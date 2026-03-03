@@ -339,11 +339,20 @@ async def get_course_analytics_overview(
             f"Skipping SAT enrichment for course {course_id}: too many students ({len(enrolled_students)} > {max_sat_enrichment_students})"
         )
     elif enrolled_students and api_key:
-        email_to_student = {s.email.lower(): s for s in enrolled_students}
+        students_with_email = [s for s in enrolled_students if s.email and s.email.strip()]
+        missing_email_count = len(enrolled_students) - len(students_with_email)
+        if missing_email_count > 0:
+            logger.warning(
+                f"Skipping SAT enrichment for {missing_email_count} students without email in course {course_id}"
+            )
+
+        email_to_student = {s.email.lower(): s for s in students_with_email}
         emails = list(email_to_student.keys())
         
         async def fetch_sat_for_student(student_obj, client_session):
             """Helper for single student fetch (fallback)"""
+            if not student_obj.email:
+                return student_obj.id, None
             email = student_obj.email.lower()
             try:
                 # Try latest-test-details first (efficient)
@@ -1562,74 +1571,151 @@ async def get_course_groups_analytics(
         base_query = base_query.filter(Group.curator_id == current_user.id)
     
     groups_with_students = base_query.distinct().all()
-    
+    if not groups_with_students:
+        return {
+            "course_id": course_id,
+            "groups": [],
+            "total_groups": 0
+        }
+
+    group_ids = [g.id for g in groups_with_students]
+
     # Get course structure for calculations
     total_steps_in_course = db.query(Step).join(Lesson).join(Module).filter(
         Module.course_id == course_id
     ).count()
-    
+
+    # Load assignments for the course once
+    assignments = db.query(Assignment.id, Assignment.max_score).join(Lesson).join(Module).filter(
+        Module.course_id == course_id
+    ).all()
+    assignment_ids = [a.id for a in assignments]
+    assignment_max_score_map = {a.id: (a.max_score or 0) for a in assignments}
+
+    # Load group -> student links once
+    group_student_rows = db.query(GroupStudent.group_id, GroupStudent.student_id).filter(
+        GroupStudent.group_id.in_(group_ids)
+    ).all()
+
+    group_student_ids_map = defaultdict(set)
+    for gid, sid in group_student_rows:
+        group_student_ids_map[gid].add(sid)
+
+    all_student_ids = sorted({sid for _, sid in group_student_rows})
+    if not all_student_ids:
+        all_student_ids = []
+
+    # Keep only active students
+    students = db.query(UserInDB.id, UserInDB.total_study_time_minutes).filter(
+        UserInDB.id.in_(all_student_ids) if all_student_ids else False,
+        UserInDB.is_active == True,
+        UserInDB.role == "student"
+    ).all()
+    student_time_map = {s.id: (s.total_study_time_minutes or 0) for s in students}
+    active_student_ids = set(student_time_map.keys())
+
+    for gid in list(group_student_ids_map.keys()):
+        group_student_ids_map[gid] = group_student_ids_map[gid].intersection(active_student_ids)
+
+    # Load completed steps per student in this course once
+    completed_steps_rows = []
+    if active_student_ids:
+        completed_steps_rows = db.query(
+            StepProgress.user_id,
+            func.count(StepProgress.id).label("completed_steps")
+        ).join(
+            Step, StepProgress.step_id == Step.id
+        ).join(
+            Lesson, Step.lesson_id == Lesson.id
+        ).join(
+            Module, Lesson.module_id == Module.id
+        ).filter(
+            StepProgress.user_id.in_(list(active_student_ids)),
+            Module.course_id == course_id,
+            StepProgress.status == "completed"
+        ).group_by(
+            StepProgress.user_id
+        ).all()
+    completed_steps_map = {row.user_id: row.completed_steps for row in completed_steps_rows}
+
+    # Load graded submissions once and keep latest per (student, assignment)
+    latest_submission_map = {}
+    if assignment_ids and active_student_ids:
+        graded_submissions = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id.in_(assignment_ids),
+            AssignmentSubmission.user_id.in_(list(active_student_ids)),
+            AssignmentSubmission.is_graded == True
+        ).all()
+
+        for submission in graded_submissions:
+            key = (submission.user_id, submission.assignment_id)
+            current_date = submission.submitted_at or submission.created_at
+            existing_submission = latest_submission_map.get(key)
+
+            if not existing_submission:
+                latest_submission_map[key] = submission
+                continue
+
+            existing_date = existing_submission.submitted_at or existing_submission.created_at
+            if current_date and (not existing_date or current_date > existing_date):
+                latest_submission_map[key] = submission
+
+    student_assignment_pct_map = {}
+    if assignment_ids and active_student_ids:
+        for student_id in active_student_ids:
+            student_score = 0
+            student_max = 0
+            for assignment_id in assignment_ids:
+                submission = latest_submission_map.get((student_id, assignment_id))
+                if not submission:
+                    continue
+                student_score += submission.score or 0
+                student_max += assignment_max_score_map.get(assignment_id, 0)
+
+            if student_max > 0:
+                student_assignment_pct_map[student_id] = (student_score / student_max) * 100
+
     groups_analytics = []
     for group in groups_with_students:
-        # Get students in this group
-        students = db.query(UserInDB).join(GroupStudent).filter(
-            GroupStudent.group_id == group.id,
-            UserInDB.is_active == True
-        ).all()
-        
-        # Calculate group metrics for this course
+        student_ids = list(group_student_ids_map.get(group.id, set()))
+        student_count = len(student_ids)
+
+        if student_count == 0:
+            groups_analytics.append({
+                "group_id": group.id,
+                "group_name": group.name,
+                "description": group.description,
+                "teacher_name": group.teacher.name if group.teacher else None,
+                "curator_name": group.curator.name if group.curator else None,
+                "students_count": 0,
+                "students_with_progress": 0,
+                "average_completion_percentage": 0,
+                "average_assignment_score_percentage": 0,
+                "average_study_time_minutes": 0,
+                "created_at": group.created_at
+            })
+            continue
+
         total_completion = 0
         total_assignment_score = 0
         total_study_time = 0
         students_with_progress = 0
-        
-        for student in students:
-            # Get student's progress in THIS course
-            completed_steps = db.query(StepProgress).join(
-                Step, StepProgress.step_id == Step.id
-            ).join(
-                Lesson, Step.lesson_id == Lesson.id
-            ).join(
-                Module, Lesson.module_id == Module.id
-            ).filter(
-                StepProgress.user_id == student.id,
-                Module.course_id == course_id,
-                StepProgress.status == "completed"
-            ).count()
-            
+
+        for student_id in student_ids:
+            completed_steps = completed_steps_map.get(student_id, 0)
+            if completed_steps > 0:
+                students_with_progress += 1
+
             if total_steps_in_course > 0:
-                completion_pct = (completed_steps / total_steps_in_course) * 100
-                total_completion += completion_pct
-                if completed_steps > 0:
-                    students_with_progress += 1
-            
-            # Get assignment scores for this course
-            assignments = db.query(Assignment).join(Lesson).join(Module).filter(
-                Module.course_id == course_id
-            ).all()
-            
-            student_score = 0
-            student_max = 0
-            for assignment in assignments:
-                submission = db.query(AssignmentSubmission).filter(
-                    AssignmentSubmission.assignment_id == assignment.id,
-                    AssignmentSubmission.user_id == student.id
-                ).first()
-                
-                if submission and submission.is_graded:
-                    student_score += submission.score or 0
-                    student_max += assignment.max_score or 0
-            
-            if student_max > 0:
-                total_assignment_score += (student_score / student_max) * 100
-            
-            total_study_time += student.total_study_time_minutes
-        
-        # Calculate averages
-        student_count = len(students)
-        avg_completion = (total_completion / student_count) if student_count > 0 else 0
-        avg_assignment_score = (total_assignment_score / student_count) if student_count > 0 else 0
-        avg_study_time = (total_study_time / student_count) if student_count > 0 else 0
-        
+                total_completion += (completed_steps / total_steps_in_course) * 100
+
+            total_assignment_score += student_assignment_pct_map.get(student_id, 0)
+            total_study_time += student_time_map.get(student_id, 0)
+
+        avg_completion = total_completion / student_count
+        avg_assignment_score = total_assignment_score / student_count
+        avg_study_time = total_study_time / student_count
+
         groups_analytics.append({
             "group_id": group.id,
             "group_name": group.name,
