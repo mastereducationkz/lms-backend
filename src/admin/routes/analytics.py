@@ -333,7 +333,12 @@ async def get_course_analytics_overview(
     student_sat_map = {} # student_id -> latest_test_result
     
     # Main fetching logic
-    if enrolled_students:
+    max_sat_enrichment_students = 120
+    if len(enrolled_students) > max_sat_enrichment_students:
+        logger.warning(
+            f"Skipping SAT enrichment for course {course_id}: too many students ({len(enrolled_students)} > {max_sat_enrichment_students})"
+        )
+    elif enrolled_students and api_key:
         email_to_student = {s.email.lower(): s for s in enrolled_students}
         emails = list(email_to_student.keys())
         
@@ -437,7 +442,7 @@ async def get_course_analytics_overview(
             batch_success = False
             try:
                 batch_url = "https://api.mastereducation.kz/api/lms/students/latest-test-details"
-                response = await client.post(batch_url, headers=headers, json={"emails": emails, "limit": 100}, timeout=15.0)
+                response = await client.post(batch_url, headers=headers, json={"emails": emails, "limit": 100}, timeout=4.0)
                 
                 if response.status_code == 200:
                     batch_data = response.json()
@@ -454,6 +459,8 @@ async def get_course_analytics_overview(
                                 parsed = parse_sat_data(student_obj.id, data)
                                 if parsed: student_sat_map[student_obj.id] = parsed
                         batch_success = True
+                elif response.status_code in [401, 403]:
+                    logger.warning(f"Batch SAT API unauthorized ({response.status_code}). Skipping SAT enrichment for this request.")
             except Exception as e:
                 logger.error(f"Batch SAT request failed: {e}")
 
@@ -462,7 +469,7 @@ async def get_course_analytics_overview(
             
             # FAIL-FAST: If too many are missing, the batch API might be broken or we're stressing it
             # Fetching 200+ individuals sequentially/parallelly is too slow and risky
-            if missing_students:
+            if missing_students and batch_success:
                 if len(missing_students) > 50:
                     logger.warning(f"Surgical fallback skipped: {len(missing_students)} students missing SAT data. Batch API might be failing or data missing at source.")
                 else:
@@ -480,6 +487,8 @@ async def get_course_analytics_overview(
                         if data:
                             parsed = parse_sat_data(sid, data)
                             if parsed: student_sat_map[sid] = parsed
+    elif enrolled_students and not api_key:
+        logger.warning("MASTEREDU_API_KEY is not configured. Skipping external SAT enrichment.")
     # Pre-fetch Quiz Attempts (Internal) as fallback (optional, or remove if strictly separated)
     # Keeping it compatible with previous logic but External overrides
     quiz_attempts_query = db.query(QuizAttempt).filter(
@@ -522,6 +531,33 @@ async def get_course_analytics_overview(
             if asm.group_id not in group_assignments_map:
                 group_assignments_map[asm.group_id] = []
             group_assignments_map[asm.group_id].append(asm)
+
+    # Bulk-load submissions to avoid N+1 queries inside student/assignment loop
+    latest_submission_map = {}
+    if student_ids and all_group_ids:
+        assignment_ids = sorted({
+            asm.id
+            for assignments_list in group_assignments_map.values()
+            for asm in assignments_list
+        })
+        if assignment_ids:
+            submissions = db.query(AssignmentSubmission).filter(
+                AssignmentSubmission.assignment_id.in_(assignment_ids),
+                AssignmentSubmission.user_id.in_(student_ids)
+            ).all()
+
+            for submission in submissions:
+                key = (submission.user_id, submission.assignment_id)
+                current_date = submission.submitted_at or submission.created_at
+                existing_submission = latest_submission_map.get(key)
+
+                if not existing_submission:
+                    latest_submission_map[key] = submission
+                    continue
+
+                existing_date = existing_submission.submitted_at or existing_submission.created_at
+                if current_date and (not existing_date or current_date > existing_date):
+                    latest_submission_map[key] = submission
 
     for student in enrolled_students:
         student_steps = [sp for sp in step_progress_records if sp.user_id == student.id]
@@ -584,10 +620,7 @@ async def get_course_analytics_overview(
         last_submission_date = None
         
         for assignment in student_group_assignments:
-            submission = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id == assignment.id,
-                AssignmentSubmission.user_id == student.id
-            ).first()
+            submission = latest_submission_map.get((student.id, assignment.id))
             
             if submission:
                 if submission.is_graded:
@@ -672,6 +705,7 @@ async def get_course_analytics_overview(
             "student_id": student.id,
             "student_name": student.name,
             "email": student.email,
+            "group_ids": current_s_group_ids,
             "group_name": student.group_name if hasattr(student, 'group_name') else student_groups_map.get(student.id, "No Group"),
             "completed_steps": student_completed,
             "total_steps_available": total_steps,
