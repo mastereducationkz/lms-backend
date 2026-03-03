@@ -264,6 +264,18 @@ async def get_course_analytics_overview(
         else:
             # Teacher has no groups? Then they see no students.
             enrolled_students = []
+
+    # Privacy Filter for curator: only students from curator's own groups
+    if current_user.role == "curator":
+        curator_group_ids = [g.id for g in db.query(Group.id).filter(Group.curator_id == current_user.id).all()]
+        if curator_group_ids:
+            allowed_student_ids = [gs.student_id for gs in db.query(GroupStudent.student_id).filter(
+                GroupStudent.group_id.in_(curator_group_ids)
+            ).all()]
+            allowed_student_ids_set = set(allowed_student_ids)
+            enrolled_students = [s for s in enrolled_students if s.id in allowed_student_ids_set]
+        else:
+            enrolled_students = []
     
     # Get course structure
     modules = db.query(Module).filter(Module.course_id == course_id).order_by(Module.order_index).all()
