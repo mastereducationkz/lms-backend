@@ -15,11 +15,15 @@ from src.routes import register_routes
 load_dotenv()
 
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+ENABLE_PUBLIC_DOCS = os.getenv("ENABLE_PUBLIC_DOCS", "false").lower() == "true"
 
 app = FastAPI(
     title="LMS Platform API",
     description="Learning Management System API",
-    version="1.26.0"
+    version="1.26.0",
+    docs_url="/docs" if ENABLE_PUBLIC_DOCS else None,
+    redoc_url="/redoc" if ENABLE_PUBLIC_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_PUBLIC_DOCS else None,
 )
 
 init_db()
