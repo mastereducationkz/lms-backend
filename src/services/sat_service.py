@@ -8,7 +8,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 SAT_API_BASE_URL = "https://api.mastereducation.kz/api/lms"
-SAT_API_KEY = os.getenv("MASTEREDU_API_KEY", "LMS_MasterEd_2025_SecureKey_XyZ789")
+SAT_API_KEY = os.getenv("MASTEREDU_API_KEY", "")
 
 class SATService:
     @staticmethod

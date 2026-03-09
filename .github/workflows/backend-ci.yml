@@ -54,5 +54,11 @@ jobs:
           fi
           exit "$code"
 
+      - name: Security - pip-audit (dependency vulnerabilities)
+        run: pip install pip-audit -q && pip-audit --desc || true
+
+      - name: Security - bandit (SAST)
+        run: pip install bandit -q && bandit -r src -ll -q || true
+
       - name: Build backend Docker image
         run: docker build -t lms-backend-ci .

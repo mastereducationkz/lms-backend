@@ -27,7 +27,7 @@ class CompleteStepsRequest(BaseModel):
 def admin_complete_steps_for_user(
     request: CompleteStepsRequest,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_admin())
 ):
     """
     Админ может пометить шаги как завершенные за студента.
@@ -141,7 +141,7 @@ def admin_complete_steps_for_user(
 def admin_reset_steps_for_user(
     request: CompleteStepsRequest,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_admin())
 ):
     """
     Админ может сбросить прогресс по шагам для студента.
@@ -181,7 +181,7 @@ def get_user_progress_summary(
     user_id: int,
     course_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_admin())
 ):
     """
     Получить краткую сводку прогресса студента по курсу (для админа).

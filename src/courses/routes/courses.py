@@ -2316,7 +2316,7 @@ async def analyze_sat_image(
 @router.post("/{course_id}/add-summary-steps")
 async def add_summary_steps_to_course(
     course_id: int,
-    current_user: UserInDB = Depends(require_teacher_or_admin),
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
 ):
     """

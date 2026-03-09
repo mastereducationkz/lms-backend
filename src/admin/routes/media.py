@@ -351,9 +351,12 @@ async def add_youtube_video(
     return response
 
 @router.get("/videos/youtube/validate")
-async def validate_youtube_url(url: str):
+async def validate_youtube_url(
+    url: str,
+    current_user: UserInDB = Depends(get_current_user_dependency)
+):
     """Валидировать YouTube ссылку и получить информацию о видео"""
-    
+
     video_info = validate_and_extract_youtube_info(url)
     
     if not video_info["is_valid"]:

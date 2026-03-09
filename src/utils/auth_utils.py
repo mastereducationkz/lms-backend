@@ -1,9 +1,21 @@
+import os
+import logging
 import jwt
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from passlib.exc import UnknownHashError
 
-SECRET_KEY = "i-hate-epu"
+_logger = logging.getLogger(__name__)
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
+if not SECRET_KEY:
+    if os.getenv("ENVIRONMENT") == "production":
+        raise RuntimeError(
+            "JWT_SECRET_KEY must be set in environment for production. "
+            "Generate: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+    SECRET_KEY = "dev-only-change-in-production"
+    _logger.warning("JWT_SECRET_KEY not set; using dev default. Set JWT_SECRET_KEY in production.")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days

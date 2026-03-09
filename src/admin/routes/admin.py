@@ -1339,80 +1339,49 @@ async def bulk_schedule_upload(
             weeks_diff = (end_date - start_date).days // 7
             week_limit = max(1, weeks_diff)  # At least 1 week
             
-            # 9. Create individual Event entries for each lesson (no more recurring events or LessonSchedule)
-            # Deactivate old events for this group
-            existing_event_ids = [eg.event_id for eg in db.query(EventGroup).filter(EventGroup.group_id == group.id).all()]
-            if existing_event_ids:
-                db.query(Event).filter(Event.id.in_(existing_event_ids)).update(
-                    {Event.is_active: False}, synchronize_session=False
-                )
-            
+            # 9. Create individual Event entries for each lesson (reconciliation preserves attendance)
             # Kazakhstan timezone offset (GMT+5)
             KZ_OFFSET = timedelta(hours=5)
-            
+
             # STEP 1: Generate all possible lesson dates first
             all_lesson_dates = []
-            
+
             for week in range(week_limit + 2):  # +2 for safety margin
                 for item in schedule_items:
                     try:
                         time_obj = datetime.strptime(item["time_of_day"], "%H:%M").time()
-                    except:
+                    except Exception:
                         time_obj = time(19, 0)
-                    
-                    # Calculate target date for this week and day
+
                     days_ahead = item["day_of_week"] - start_date.weekday()
                     if days_ahead < 0:
                         days_ahead += 7
-                    
+
                     target_date = start_date + timedelta(days=days_ahead) + timedelta(weeks=week)
                     target_dt_kz = datetime.combine(target_date, time_obj)
-                    
-                    # Convert from Kazakhstan time (GMT+5) to UTC
                     target_dt = target_dt_kz - KZ_OFFSET
-                    
-                    # Only include dates on or after start_date
+
                     if target_date >= start_date:
                         all_lesson_dates.append(target_dt)
-            
-            # STEP 2: Sort all dates chronologically and take only lessons_count
+
+            # STEP 2: Sort and take lessons_count
             all_lesson_dates.sort()
             all_lesson_dates = all_lesson_dates[:lessons_count]
-            
-            # STEP 3: Create Events with correct sequential numbering
-            lessons_created = 0
-            
-            for lesson_number, target_dt in enumerate(all_lesson_dates, start=1):
-                end_dt = target_dt + timedelta(minutes=60)
-                
-                # Check if event already exists for this group at this time
-                existing = db.query(Event).join(EventGroup).filter(
-                    EventGroup.group_id == group.id,
-                    Event.start_datetime == target_dt,
-                    Event.event_type == "class",
-                    Event.is_active == True
-                ).first()
-                
-                if not existing:
-                    new_event = Event(
-                        title=f"{group.name}: Lesson {lesson_number}",
-                        description=f"Scheduled class for {group.name}",
-                        event_type="class",
-                        start_datetime=target_dt,
-                        end_datetime=end_dt,
-                        location="Online",
-                        is_online=True,
-                        created_by=current_user.id,
-                        teacher_id=group.teacher_id,
-                        is_active=True,
-                        is_recurring=False,
-                        max_participants=50
-                    )
-                    db.add(new_event)
-                    db.flush()
-                    db.add(EventGroup(event_id=new_event.id, group_id=group.id))
-                
-                lessons_created += 1
+
+            # STEP 3: Reconcile (preserves event ids and attendance for matched slots)
+            from src.services.schedule_reconciliation import reconcile_group_schedule
+
+            dt_utc = lambda d: d.replace(tzinfo=_tz.utc) if d.tzinfo is None else d
+            desired_slots = [(dt_utc(dt), ln) for ln, dt in enumerate(all_lesson_dates, start=1)]
+            result = reconcile_group_schedule(
+                db=db,
+                group_id=group.id,
+                desired_slots=desired_slots,
+                group_name=group.name,
+                teacher_id=group.teacher_id,
+                created_by=current_user.id,
+            )
+            lessons_created = result["updated"] + result["created"]
                 
             # Save config
             group.schedule_config = {

@@ -212,3 +212,42 @@ class AttendanceService:
             count += 1
         db.flush()
         return count
+
+    @staticmethod
+    def rebind_event_attendance(
+        db: Session,
+        from_event_id: int,
+        to_event_id: int,
+        flush: bool = True,
+    ) -> int:
+        """
+        Safely move attendance records from one event to another.
+        Only moves records for user_ids that do not already have a record in to_event.
+        Returns count of records rebound.
+        Does NOT commit.
+        """
+        if from_event_id == to_event_id:
+            return 0
+
+        existing_to = {
+            row.user_id
+            for row in db.query(Attendance.user_id)
+            .filter(Attendance.event_id == to_event_id)
+            .all()
+        }
+
+        records = db.query(Attendance).filter(
+            Attendance.event_id == from_event_id,
+        ).all()
+
+        count = 0
+        for rec in records:
+            if rec.user_id in existing_to:
+                continue
+            rec.event_id = to_event_id
+            existing_to.add(rec.user_id)
+            count += 1
+
+        if flush:
+            db.flush()
+        return count

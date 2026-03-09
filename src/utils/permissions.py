@@ -286,6 +286,45 @@ def check_group_access(group_id: int, user: UserInDB, db: Session) -> bool:
     
     return False
 
+def check_event_access(event_id: int, user: UserInDB, db: Session) -> bool:
+    """
+    Check if user has access to a specific event.
+    - Admins / head_curator: always
+    - Teachers: if event's groups have user as teacher, or event's courses have user as teacher
+    - Curators: if event's groups have user as curator
+    """
+    if user.role in ["admin", "head_curator"]:
+        return True
+
+    from src.schemas.models import Event, EventGroup, EventCourse
+
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        return False
+
+    event_groups = db.query(EventGroup).filter(EventGroup.event_id == event_id).all()
+    event_courses = db.query(EventCourse).filter(EventCourse.event_id == event_id).all()
+
+    if user.role == "teacher":
+        for eg in event_groups:
+            group = db.query(Group).filter(Group.id == eg.group_id).first()
+            if group and group.teacher_id == user.id:
+                return True
+        for ec in event_courses:
+            course = db.query(Course).filter(Course.id == ec.course_id).first()
+            if course and course.teacher_id == user.id:
+                return True
+        if event.teacher_id == user.id:
+            return True
+
+    elif user.role == "curator":
+        for eg in event_groups:
+            group = db.query(Group).filter(Group.id == eg.group_id).first()
+            if group and group.curator_id == user.id:
+                return True
+
+    return False
+
 def require_group_access(group_id: int):
     """
     Dependency to require access to a specific group

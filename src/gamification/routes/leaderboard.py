@@ -1400,112 +1400,67 @@ async def generate_schedule(
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    # CLEANUP: Deactivate existing active schedules for this group
-    # 1. Legacy LessonSchedules
+    # Legacy LessonSchedules: deactivate (no attendance on these in current flow)
     existing_schedules = db.query(LessonSchedule).filter(
         LessonSchedule.group_id == data.group_id,
         LessonSchedule.is_active == True
     ).all()
-    
+
     for old_sched in existing_schedules:
         old_sched.is_active = False
-        # Also deactivate linked assignments
         old_assignments = db.query(GroupAssignment).filter(
             GroupAssignment.lesson_schedule_id == old_sched.id,
             GroupAssignment.is_active == True
         ).all()
         for oa in old_assignments:
             oa.is_active = False
-            
-    # 2. Deactivate ALL existing class events for this group (both recurring and non-recurring)
-    existing_events = db.query(Event).join(EventGroup).filter(
-        EventGroup.group_id == data.group_id,
-        Event.event_type == 'class',
-        Event.is_active == True
-    ).all()
-    
-    for e in existing_events:
-        e.is_active = False
-            
-    db.flush()
 
     # Calculate number of weeks needed
     import math
     lessons_count = data.lessons_count if data.lessons_count else (len(data.schedule_items) * data.weeks_count)
-    frequency = len(data.schedule_items)  # lessons per week
-    week_limit = math.ceil(lessons_count / frequency) + 2  # +2 for safety margin
-    
+    frequency = len(data.schedule_items)
+    week_limit = math.ceil(lessons_count / frequency) + 2
+
     start_date = data.start_date
-    
-    # Kazakhstan timezone offset (GMT+5 - Almaty/Astana)
     KZ_OFFSET = timedelta(hours=5)
-    
-    # STEP 1: Generate all possible lesson dates first
+
     all_lesson_dates = []
-    
     for week in range(week_limit):
         for item in data.schedule_items:
             try:
                 time_obj = datetime.strptime(item.time_of_day, "%H:%M").time()
             except ValueError:
                 time_obj = datetime.strptime("19:00", "%H:%M").time()
-            
-            # Calculate target date for this week and day
-            # Find the first occurrence of this weekday on or after start_date
+
             days_ahead = item.day_of_week - start_date.weekday()
             if days_ahead < 0:
                 days_ahead += 7
-            
+
             target_date = start_date + timedelta(days=days_ahead) + timedelta(weeks=week)
-            
-            # Create datetime in Kazakhstan timezone (user input is in local time)
             target_dt_kz = datetime.combine(target_date, time_obj)
-            
-            # Store in database as UTC (Kazakhstan GMT+5: subtract 5 hours)
             target_dt_utc = target_dt_kz - KZ_OFFSET
-            
-            # Only include dates on or after start_date
+
             if target_date >= start_date:
                 all_lesson_dates.append(target_dt_utc)
-    
-    # STEP 2: Sort all dates chronologically and take only lessons_count
+
     all_lesson_dates.sort()
     all_lesson_dates = all_lesson_dates[:lessons_count]
-    
-    # STEP 3: Create Events with correct sequential numbering
-    lessons_created = 0
-    
-    for lesson_number, target_dt in enumerate(all_lesson_dates, start=1):
-        end_dt = target_dt + timedelta(minutes=60)
-        
-        # Check if event already exists for this group at this time
-        existing = db.query(Event).join(EventGroup).filter(
-            EventGroup.group_id == data.group_id,
-            Event.start_datetime == target_dt,
-            Event.event_type == "class",
-            Event.is_active == True
-        ).first()
-        
-        if not existing:
-            new_event = Event(
-                title=f"{group.name}: Lesson {lesson_number}",
-                description=f"Scheduled class for {group.name}",
-                event_type="class",
-                start_datetime=target_dt,
-                end_datetime=end_dt,
-                location="Online",
-                is_online=True,
-                created_by=current_user.id,
-                teacher_id=group.teacher_id,
-                is_active=True,
-                is_recurring=False,
-                max_participants=50
-            )
-            db.add(new_event)
-            db.flush()
-            db.add(EventGroup(event_id=new_event.id, group_id=data.group_id))
-        
-        lessons_created += 1
+
+    from datetime import timezone as _tz
+    from src.services.schedule_reconciliation import reconcile_group_schedule
+
+    dt_utc = lambda d: d.replace(tzinfo=_tz.utc) if d.tzinfo is None else d
+    desired_slots = [(dt_utc(dt), ln) for ln, dt in enumerate(all_lesson_dates, start=1)]
+
+    result = reconcile_group_schedule(
+        db=db,
+        group_id=data.group_id,
+        desired_slots=desired_slots,
+        group_name=group.name,
+        teacher_id=group.teacher_id,
+        created_by=current_user.id,
+    )
+    lessons_created = result["updated"] + result["created"]
 
     # Save config for future use
     group.schedule_config = {

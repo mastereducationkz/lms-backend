@@ -12,7 +12,7 @@ from src.schemas.models import (
     AttendanceBulkUpdateSchema, EventStudentSchema, CourseGroupAccess
 )
 from src.routes.auth import get_current_user_dependency
-from src.utils.permissions import require_role, require_teacher_or_admin, require_teacher_curator_or_admin
+from src.utils.permissions import require_role, require_teacher_or_admin, require_teacher_curator_or_admin, check_event_access
 from src.services.attendance_service import (
     AttendanceService,
     attendance_status_to_ui,
@@ -1239,6 +1239,9 @@ async def get_event_participants(
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    if not check_event_access(event_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Access denied to this event")
         
     # 2. Determine target groups
     if group_id:
@@ -1284,6 +1287,9 @@ async def update_event_attendance(
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    if not check_event_access(event_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Access denied to this event")
         
     # 2. Bulk upsert via AttendanceService (single source of truth)
     updates = [
