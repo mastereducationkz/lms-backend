@@ -285,6 +285,30 @@ async def get_available_contacts(
     available_contacts = []
     
     if current_user.role == "student":
+        from src.schemas.models import Group, GroupStudent
+
+        is_special_group_student = db.query(GroupStudent).join(
+            Group, GroupStudent.group_id == Group.id
+        ).filter(
+            GroupStudent.student_id == current_user.id,
+            Group.is_special == True
+        ).first() is not None
+
+        if is_special_group_student:
+            admins = db.query(UserInDB).filter(
+                UserInDB.role == "admin",
+                UserInDB.is_active == True
+            ).all()
+            for admin in admins:
+                available_contacts.append({
+                    "user_id": admin.id,
+                    "name": admin.name,
+                    "role": admin.role,
+                    "avatar_url": admin.avatar_url
+                })
+            available_contacts.sort(key=lambda x: x["name"])
+            return {"available_contacts": available_contacts}
+
         # Студенты могут писать учителям и кураторам своих курсов/групп
         
         # Учителя курсов, на которые записан студент
@@ -307,7 +331,6 @@ async def get_available_contacts(
             })
         
         # Учителя из групп студента
-        from src.schemas.models import Group, GroupStudent
         group_student = db.query(GroupStudent).filter(
             GroupStudent.student_id == current_user.id
         ).first()
@@ -500,6 +523,18 @@ def can_communicate_with_user(current_user: UserInDB, target_user_id: int, db: S
         return True
     
     if current_user.role == "student":
+        from src.schemas.models import Group, GroupStudent
+
+        is_special_group_student = db.query(GroupStudent).join(
+            Group, GroupStudent.group_id == Group.id
+        ).filter(
+            GroupStudent.student_id == current_user.id,
+            Group.is_special == True
+        ).first() is not None
+
+        if is_special_group_student:
+            return target_user.role == "admin"
+
         # Студенты могут общаться с учителями/кураторами своих курсов/групп
         if target_user.role in ["teacher", "curator"]:
             # Проверяем, есть ли общие курсы с учителем
@@ -514,7 +549,6 @@ def can_communicate_with_user(current_user: UserInDB, target_user_id: int, db: S
                     return True
                 
                 # Если нет общих курсов, проверяем группы
-                from src.schemas.models import Group, GroupStudent
                 group_student = db.query(GroupStudent).filter(
                     GroupStudent.student_id == current_user.id
                 ).first()
@@ -528,7 +562,6 @@ def can_communicate_with_user(current_user: UserInDB, target_user_id: int, db: S
             
             # Проверяем, в одной ли группе с куратором
             if target_user.role == "curator":
-                from src.schemas.models import Group, GroupStudent
                 # Get student's group
                 student_group = db.query(GroupStudent).filter(
                     GroupStudent.student_id == current_user.id
