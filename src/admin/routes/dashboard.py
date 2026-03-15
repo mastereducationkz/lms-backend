@@ -2147,6 +2147,235 @@ async def get_teacher_pending_submissions(
     
     return {"pending_submissions": submissions_data}
 
+
+@router.get("/teacher/auto-grade-unit-homework/preview")
+async def get_teacher_auto_grade_unit_homework_preview(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
+
+    from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group
+
+    teacher_groups = db.query(Group).filter(
+        Group.teacher_id == current_user.id,
+        Group.is_active == True
+    ).all()
+    if not teacher_groups:
+        return {"eligible_count": 0, "items": []}
+
+    teacher_group_ids = [g.id for g in teacher_groups]
+
+    teacher_student_ids = {
+        gs.student_id
+        for gs in db.query(GroupStudent).filter(
+            GroupStudent.group_id.in_(teacher_group_ids)
+        ).all()
+    }
+    if not teacher_student_ids:
+        return {"eligible_count": 0, "items": []}
+
+    course_ids = [
+        c[0] for c in db.query(CourseGroupAccess.course_id).filter(
+            CourseGroupAccess.group_id.in_(teacher_group_ids),
+            CourseGroupAccess.is_active == True
+        ).distinct().all()
+    ]
+    if not course_ids:
+        return {"eligible_count": 0, "items": []}
+
+    lesson_based_assignments = db.query(Assignment).filter(
+        Assignment.lesson_id.in_(
+            db.query(Lesson.id).filter(
+                Lesson.module_id.in_(
+                    db.query(Module.id).filter(Module.course_id.in_(course_ids))
+                )
+            )
+        ),
+        Assignment.is_active == True
+    ).all()
+
+    group_assignments = db.query(Assignment).filter(
+        Assignment.group_id.in_(teacher_group_ids),
+        Assignment.is_active == True
+    ).all()
+
+    assignment_map = {a.id: a for a in lesson_based_assignments + group_assignments}
+    if not assignment_map:
+        return {"eligible_count": 0, "items": []}
+
+    pending_submissions = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.assignment_id.in_(list(assignment_map.keys())),
+        AssignmentSubmission.user_id.in_(teacher_student_ids),
+        AssignmentSubmission.is_graded == False
+    ).all()
+    if not pending_submissions:
+        return {"eligible_count": 0, "items": []}
+
+    def is_unit_only_multitask(assignment: Assignment) -> bool:
+        if assignment.assignment_type != "multi_task":
+            return False
+
+        try:
+            content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
+        except Exception:
+            return False
+
+        if not isinstance(content, dict):
+            return False
+
+        tasks = content.get("tasks", [])
+        if not isinstance(tasks, list) or len(tasks) == 0:
+            return False
+
+        return all(
+            isinstance(task, dict) and task.get("task_type") == "course_unit"
+            for task in tasks
+        )
+
+    student_ids = list({sub.user_id for sub in pending_submissions})
+    students = db.query(UserInDB).filter(UserInDB.id.in_(student_ids)).all() if student_ids else []
+    students_map = {s.id: s for s in students}
+
+    items = []
+    for submission in pending_submissions:
+        assignment = assignment_map.get(submission.assignment_id)
+        if not assignment or not is_unit_only_multitask(assignment):
+            continue
+
+        student = students_map.get(submission.user_id)
+        items.append({
+            "submission_id": submission.id,
+            "assignment_id": assignment.id,
+            "assignment_title": assignment.title,
+            "student_name": student.name if student else "Unknown Student",
+            "student_email": student.email if student else "",
+            "submitted_at": submission.submitted_at,
+            "target_score": submission.max_score
+        })
+
+    items.sort(key=lambda x: x["submitted_at"] if x["submitted_at"] is not None else datetime.min, reverse=True)
+
+    return {"eligible_count": len(items), "items": items}
+
+
+@router.post("/teacher/auto-grade-unit-homework")
+async def auto_grade_teacher_unit_homework(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """
+    Auto-grade pending homework submissions with max score when:
+    - assignment is multi_task
+    - all tasks in assignment are course_unit tasks
+    """
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
+
+    from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group
+
+    teacher_groups = db.query(Group).filter(
+        Group.teacher_id == current_user.id,
+        Group.is_active == True
+    ).all()
+
+    if not teacher_groups:
+        return {"graded_count": 0, "eligible_count": 0}
+
+    teacher_group_ids = [g.id for g in teacher_groups]
+
+    teacher_student_ids = {
+        gs.student_id
+        for gs in db.query(GroupStudent).filter(
+            GroupStudent.group_id.in_(teacher_group_ids)
+        ).all()
+    }
+
+    if not teacher_student_ids:
+        return {"graded_count": 0, "eligible_count": 0}
+
+    course_ids = [
+        c[0] for c in db.query(CourseGroupAccess.course_id).filter(
+            CourseGroupAccess.group_id.in_(teacher_group_ids),
+            CourseGroupAccess.is_active == True
+        ).distinct().all()
+    ]
+
+    if not course_ids:
+        return {"graded_count": 0, "eligible_count": 0}
+
+    lesson_based_assignments = db.query(Assignment).filter(
+        Assignment.lesson_id.in_(
+            db.query(Lesson.id).filter(
+                Lesson.module_id.in_(
+                    db.query(Module.id).filter(Module.course_id.in_(course_ids))
+                )
+            )
+        ),
+        Assignment.is_active == True
+    ).all()
+
+    group_assignments = db.query(Assignment).filter(
+        Assignment.group_id.in_(teacher_group_ids),
+        Assignment.is_active == True
+    ).all()
+
+    assignment_map = {a.id: a for a in lesson_based_assignments + group_assignments}
+    if not assignment_map:
+        return {"graded_count": 0, "eligible_count": 0}
+
+    pending_submissions = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.assignment_id.in_(list(assignment_map.keys())),
+        AssignmentSubmission.user_id.in_(teacher_student_ids),
+        AssignmentSubmission.is_graded == False
+    ).all()
+
+    def is_unit_only_multitask(assignment: Assignment) -> bool:
+        if assignment.assignment_type != "multi_task":
+            return False
+
+        try:
+            content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
+        except Exception:
+            return False
+
+        if not isinstance(content, dict):
+            return False
+
+        tasks = content.get("tasks", [])
+        if not isinstance(tasks, list) or len(tasks) == 0:
+            return False
+
+        return all(
+            isinstance(task, dict) and task.get("task_type") == "course_unit"
+            for task in tasks
+        )
+
+    eligible_submissions = []
+    for submission in pending_submissions:
+        assignment = assignment_map.get(submission.assignment_id)
+        if assignment and is_unit_only_multitask(assignment):
+            eligible_submissions.append(submission)
+
+    if not eligible_submissions:
+        return {"graded_count": 0, "eligible_count": 0}
+
+    graded_at = datetime.utcnow()
+    for submission in eligible_submissions:
+        submission.score = submission.max_score
+        submission.feedback = "Auto-graded: unit-only homework completed"
+        submission.graded_by = current_user.id
+        submission.is_graded = True
+        submission.graded_at = graded_at
+
+    db.commit()
+
+    return {
+        "graded_count": len(eligible_submissions),
+        "eligible_count": len(eligible_submissions)
+    }
+
 @router.get("/teacher/recent-submissions")
 async def get_teacher_recent_submissions(
     limit: int = 10,
