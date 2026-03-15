@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, and_, or_
 from typing import List, Optional
@@ -2039,6 +2039,8 @@ async def update_study_time(
 
 @router.get("/teacher/pending-submissions")
 async def get_teacher_pending_submissions(
+    limit: Optional[int] = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -2055,7 +2057,7 @@ async def get_teacher_pending_submissions(
     ).all()
     
     if not teacher_groups:
-        return {"pending_submissions": []}
+        return {"pending_submissions": [], "total_pending_count": 0, "has_more": False}
     
     teacher_group_ids = [g.id for g in teacher_groups]
     
@@ -2068,7 +2070,7 @@ async def get_teacher_pending_submissions(
         teacher_student_ids.add(gs.student_id)
     
     if not teacher_student_ids:
-        return {"pending_submissions": []}
+        return {"pending_submissions": [], "total_pending_count": 0, "has_more": False}
     
     # Get courses that teacher's groups have access to
     course_ids = db.query(CourseGroupAccess.course_id).filter(
@@ -2078,7 +2080,7 @@ async def get_teacher_pending_submissions(
     course_ids = [c[0] for c in course_ids]
     
     if not course_ids:
-        return {"pending_submissions": []}
+        return {"pending_submissions": [], "total_pending_count": 0, "has_more": False}
     
     # Get assignments from those courses
     teacher_assignments = db.query(Assignment).filter(
@@ -2100,39 +2102,68 @@ async def get_teacher_pending_submissions(
         Assignment.is_active == True
     ).all()
     teacher_assignments.extend(group_assignments)
+    assignment_ids = list({a.id for a in teacher_assignments})
 
-    if not teacher_assignments:
-        return {"pending_submissions": []}
+    if not assignment_ids:
+        return {"pending_submissions": [], "total_pending_count": 0, "has_more": False}
     
     # Get pending submissions ONLY from teacher's students
-    pending_submissions = db.query(AssignmentSubmission).filter(
-        AssignmentSubmission.assignment_id.in_([a.id for a in teacher_assignments]),
+    pending_query = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.assignment_id.in_(assignment_ids),
         AssignmentSubmission.user_id.in_(teacher_student_ids),
         AssignmentSubmission.is_graded == False
-    ).all()
-    
+    )
+    total_pending_count = pending_query.count()
+
+    pending_query = pending_query.order_by(AssignmentSubmission.submitted_at.desc())
+    if limit is not None:
+        pending_query = pending_query.offset(offset).limit(limit)
+
+    pending_submissions = pending_query.all()
+    if not pending_submissions:
+        return {"pending_submissions": [], "total_pending_count": total_pending_count, "has_more": False}
+
+    submission_assignment_ids = list({s.assignment_id for s in pending_submissions})
+    submission_student_ids = list({s.user_id for s in pending_submissions})
+
+    assignments = db.query(Assignment).filter(Assignment.id.in_(submission_assignment_ids)).all()
+    assignments_map = {a.id: a for a in assignments}
+
+    students = db.query(UserInDB).filter(UserInDB.id.in_(submission_student_ids)).all()
+    students_map = {s.id: s for s in students}
+
+    lesson_ids = list({a.lesson_id for a in assignments if a.lesson_id is not None})
+    lessons = db.query(Lesson).filter(Lesson.id.in_(lesson_ids)).all() if lesson_ids else []
+    lessons_map = {l.id: l for l in lessons}
+
+    module_ids = list({l.module_id for l in lessons if l.module_id is not None})
+    modules = db.query(Module).filter(Module.id.in_(module_ids)).all() if module_ids else []
+    modules_map = {m.id: m for m in modules}
+
+    course_ids_for_assignments = list({m.course_id for m in modules if m.course_id is not None})
+    courses = db.query(Course).filter(Course.id.in_(course_ids_for_assignments)).all() if course_ids_for_assignments else []
+    courses_map = {c.id: c for c in courses}
+
     submissions_data = []
     for submission in pending_submissions:
-        # Get assignment details
-        assignment = db.query(Assignment).filter(Assignment.id == submission.assignment_id).first()
-        
-        # Get student details
-        student = db.query(UserInDB).filter(UserInDB.id == submission.user_id).first()
-        
-        # Get course details
-        course = None
+        assignment = assignments_map.get(submission.assignment_id)
+        student = students_map.get(submission.user_id)
+
+        course_title = "Unknown Course"
         if assignment and assignment.lesson_id:
-            lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
+            lesson = lessons_map.get(assignment.lesson_id)
             if lesson:
-                module = db.query(Module).filter(Module.id == lesson.module_id).first()
+                module = modules_map.get(lesson.module_id)
                 if module:
-                    course = db.query(Course).filter(Course.id == module.course_id).first()
-        
+                    course = courses_map.get(module.course_id)
+                    if course:
+                        course_title = course.title
+
         submissions_data.append({
             "id": submission.id,
             "assignment_id": submission.assignment_id,
             "assignment_title": assignment.title if assignment else "Unknown Assignment",
-            "course_title": course.title if course else "Unknown Course",
+            "course_title": course_title,
             "user_id": submission.user_id,
             "student_name": student.name if student else "Unknown Student",
             "student_email": student.email if student else "",
@@ -2142,10 +2173,12 @@ async def get_teacher_pending_submissions(
             "submitted_file_name": submission.submitted_file_name
         })
     
-    # Sort by submission date (most recent first), handling potential None values
-    submissions_data.sort(key=lambda x: x["submitted_at"] if x["submitted_at"] is not None else datetime.min, reverse=True)
-    
-    return {"pending_submissions": submissions_data}
+    has_more = (offset + len(submissions_data)) < total_pending_count if limit is not None else False
+    return {
+        "pending_submissions": submissions_data,
+        "total_pending_count": total_pending_count,
+        "has_more": has_more
+    }
 
 
 @router.get("/teacher/auto-grade-unit-homework/preview")
@@ -2440,44 +2473,67 @@ async def get_teacher_recent_submissions(
         Assignment.is_active == True
     ).all()
     teacher_assignments.extend(group_assignments)
+    assignment_ids = list({a.id for a in teacher_assignments})
 
-    if not teacher_assignments:
+    if not assignment_ids:
         return {"recent_submissions": []}
     
     # Get recent submissions ONLY from teacher's students
     recent_submissions = db.query(AssignmentSubmission).filter(
-        AssignmentSubmission.assignment_id.in_([a.id for a in teacher_assignments]),
+        AssignmentSubmission.assignment_id.in_(assignment_ids),
         AssignmentSubmission.user_id.in_(teacher_student_ids)
     ).order_by(AssignmentSubmission.submitted_at.desc()).limit(limit).all()
-    
+
+    if not recent_submissions:
+        return {"recent_submissions": []}
+
+    submission_assignment_ids = list({s.assignment_id for s in recent_submissions})
+    submission_student_ids = list({s.user_id for s in recent_submissions})
+    grader_ids = list({s.graded_by for s in recent_submissions if s.graded_by is not None})
+
+    assignments = db.query(Assignment).filter(Assignment.id.in_(submission_assignment_ids)).all()
+    assignments_map = {a.id: a for a in assignments}
+
+    students = db.query(UserInDB).filter(UserInDB.id.in_(submission_student_ids)).all()
+    students_map = {s.id: s for s in students}
+
+    graders = db.query(UserInDB).filter(UserInDB.id.in_(grader_ids)).all() if grader_ids else []
+    graders_map = {g.id: g for g in graders}
+
+    lesson_ids = list({a.lesson_id for a in assignments if a.lesson_id is not None})
+    lessons = db.query(Lesson).filter(Lesson.id.in_(lesson_ids)).all() if lesson_ids else []
+    lessons_map = {l.id: l for l in lessons}
+
+    module_ids = list({l.module_id for l in lessons if l.module_id is not None})
+    modules = db.query(Module).filter(Module.id.in_(module_ids)).all() if module_ids else []
+    modules_map = {m.id: m for m in modules}
+
+    course_ids_for_assignments = list({m.course_id for m in modules if m.course_id is not None})
+    courses = db.query(Course).filter(Course.id.in_(course_ids_for_assignments)).all() if course_ids_for_assignments else []
+    courses_map = {c.id: c for c in courses}
+
     submissions_data = []
     for submission in recent_submissions:
-        # Get assignment details
-        assignment = db.query(Assignment).filter(Assignment.id == submission.assignment_id).first()
-        
-        # Get student details
-        student = db.query(UserInDB).filter(UserInDB.id == submission.user_id).first()
-        
-        # Get course details
-        course = None
+        assignment = assignments_map.get(submission.assignment_id)
+        student = students_map.get(submission.user_id)
+
+        course_title = "Unknown Course"
         if assignment and assignment.lesson_id:
-            lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
+            lesson = lessons_map.get(assignment.lesson_id)
             if lesson:
-                module = db.query(Module).filter(Module.id == lesson.module_id).first()
+                module = modules_map.get(lesson.module_id)
                 if module:
-                    course = db.query(Course).filter(Course.id == module.course_id).first()
-        
-        # Get grader details if graded
-        grader_name = None
-        if submission.graded_by:
-            grader = db.query(UserInDB).filter(UserInDB.id == submission.graded_by).first()
-            grader_name = grader.name if grader else None
-        
+                    course = courses_map.get(module.course_id)
+                    if course:
+                        course_title = course.title
+
+        grader = graders_map.get(submission.graded_by) if submission.graded_by else None
+
         submissions_data.append({
             "id": submission.id,
             "assignment_id": submission.assignment_id,
             "assignment_title": assignment.title if assignment else "Unknown Assignment",
-            "course_title": course.title if course else "Unknown Course",
+            "course_title": course_title,
             "user_id": submission.user_id,
             "student_name": student.name if student else "Unknown Student",
             "student_email": student.email if student else "",
@@ -2487,7 +2543,7 @@ async def get_teacher_recent_submissions(
             "max_score": submission.max_score,
             "is_graded": submission.is_graded,
             "feedback": submission.feedback,
-            "grader_name": grader_name,
+            "grader_name": grader.name if grader else None,
             "file_url": submission.file_url,
             "submitted_file_name": submission.submitted_file_name
         })
