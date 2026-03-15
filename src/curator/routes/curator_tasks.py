@@ -111,7 +111,7 @@ def _calc_total_weeks(group: Group) -> Optional[int]:
 @router.get("/my-tasks", summary="Get current curator's tasks")
 async def get_my_tasks(
     status: Optional[str] = Query(None, description="Filter by status: pending, in_progress, completed, overdue"),
-    task_type: Optional[str] = Query(None, description="Filter by type: onboarding, weekly, renewal"),
+    task_type: Optional[str] = Query(None, description="Filter by type: onboarding, weekly, renewal, exam_results_collection"),
     student_id: Optional[int] = Query(None),
     group_id: Optional[int] = Query(None),
     week: Optional[str] = Query(None, description="ISO week reference, e.g. 2026-W08"),

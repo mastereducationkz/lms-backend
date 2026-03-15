@@ -180,6 +180,9 @@ class AssignmentZeroSubmissionSchema(BaseModel):
     school_type: str
     group_name: str
     sat_target_date: str
+    sat_planned_test_date: Optional[date] = None
+    sat_result_score: Optional[str] = None
+    sat_result_test_date: Optional[date] = None
     has_passed_sat_before: bool
     previous_sat_score: Optional[str] = None
     recent_practice_test_score: str
@@ -204,6 +207,10 @@ class AssignmentZeroSubmissionSchema(BaseModel):
     passages_poetry: Optional[int] = None
     math_topics: Optional[List[str]] = None
     ielts_target_date: Optional[str] = None
+    ielts_planned_test_date: Optional[date] = None
+    ielts_result_score: Optional[str] = None
+    ielts_result_test_date: Optional[date] = None
+    ielts_last_date_prompted_at: Optional[datetime] = None
     has_passed_ielts_before: Optional[bool] = False
     previous_ielts_score: Optional[str] = None
     ielts_target_score: Optional[str] = None
@@ -252,6 +259,9 @@ class AssignmentZeroSubmitSchema(BaseModel):
     school_type: str
     group_name: str
     sat_target_date: str
+    sat_planned_test_date: Optional[date] = None
+    sat_result_score: Optional[str] = None
+    sat_result_test_date: Optional[date] = None
     has_passed_sat_before: bool = False
     previous_sat_score: Optional[str] = None
     recent_practice_test_score: str
@@ -276,6 +286,10 @@ class AssignmentZeroSubmitSchema(BaseModel):
     passages_poetry: Optional[int] = None
     math_topics: Optional[List[str]] = None
     ielts_target_date: Optional[str] = None
+    ielts_planned_test_date: Optional[date] = None
+    ielts_result_score: Optional[str] = None
+    ielts_result_test_date: Optional[date] = None
+    ielts_last_date_prompted_at: Optional[datetime] = None
     has_passed_ielts_before: Optional[bool] = False
     previous_ielts_score: Optional[str] = None
     ielts_target_score: Optional[str] = None
@@ -317,6 +331,9 @@ class AssignmentZeroSaveProgressSchema(BaseModel):
     school_type: Optional[str] = None
     group_name: Optional[str] = None
     sat_target_date: Optional[str] = None
+    sat_planned_test_date: Optional[date] = None
+    sat_result_score: Optional[str] = None
+    sat_result_test_date: Optional[date] = None
     has_passed_sat_before: Optional[bool] = None
     previous_sat_score: Optional[str] = None
     recent_practice_test_score: Optional[str] = None
@@ -341,6 +358,10 @@ class AssignmentZeroSaveProgressSchema(BaseModel):
     passages_poetry: Optional[int] = None
     math_topics: Optional[List[str]] = None
     ielts_target_date: Optional[str] = None
+    ielts_planned_test_date: Optional[date] = None
+    ielts_result_score: Optional[str] = None
+    ielts_result_test_date: Optional[date] = None
+    ielts_last_date_prompted_at: Optional[datetime] = None
     has_passed_ielts_before: Optional[bool] = None
     previous_ielts_score: Optional[str] = None
     ielts_target_score: Optional[str] = None
@@ -368,3 +389,14 @@ class AssignmentZeroSaveProgressSchema(BaseModel):
     ielts_weak_topics: Optional[List[str]] = None
     additional_comments: Optional[str] = None
     last_saved_step: Optional[int] = None
+
+
+class AssignmentZeroPlannedDateUpdateSchema(BaseModel):
+    exam_type: str
+    planned_test_date: date
+
+
+class AssignmentZeroExamResultUpdateSchema(BaseModel):
+    exam_type: str
+    result_score: str
+    result_test_date: date

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import uuid
 
@@ -8,15 +8,43 @@ from src.config import get_db
 from src.schemas.models import (
     UserInDB, AssignmentZeroSubmission, 
     AssignmentZeroSubmissionSchema, AssignmentZeroSubmitSchema,
-    AssignmentZeroSaveProgressSchema, Group, GroupStudent
+    AssignmentZeroSaveProgressSchema, Group, GroupStudent,
+    AssignmentZeroPlannedDateUpdateSchema, AssignmentZeroExamResultUpdateSchema
 )
 from src.routes.auth import get_current_user_dependency
+from src.assignments.exam_dates import (
+    SAT_OFFICIAL_TEST_DATES,
+    parse_sat_target_date,
+    format_sat_label,
+)
 
 router = APIRouter()
 
 # Upload directory for Assignment Zero screenshots
 UPLOAD_DIR = "uploads/assignment_zero"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalize_exam_type(exam_type: str) -> str:
+    normalized = exam_type.strip().lower()
+    if normalized not in {"sat", "ielts"}:
+        raise HTTPException(status_code=400, detail="exam_type must be either 'sat' or 'ielts'")
+    return normalized
+
+
+def _set_planned_dates_from_targets(submission: AssignmentZeroSubmission) -> None:
+    if submission.sat_planned_test_date is None:
+        submission.sat_planned_test_date = parse_sat_target_date(submission.sat_target_date)
+
+    if submission.ielts_target_date and submission.ielts_planned_test_date is None:
+        try:
+            submission.ielts_planned_test_date = datetime.fromisoformat(submission.ielts_target_date).date()
+        except ValueError:
+            submission.ielts_planned_test_date = None
 
 # =============================================================================
 # ASSIGNMENT ZERO ENDPOINTS
@@ -78,7 +106,15 @@ async def get_my_assignment_zero_submission(
     
     if not submission:
         raise HTTPException(status_code=404, detail="Assignment Zero submission not found")
-    
+
+    before_sat = submission.sat_planned_test_date
+    before_ielts = submission.ielts_planned_test_date
+    _set_planned_dates_from_targets(submission)
+    if submission.sat_planned_test_date != before_sat or submission.ielts_planned_test_date != before_ielts:
+        submission.updated_at = _utc_now()
+        db.commit()
+        db.refresh(submission)
+
     return AssignmentZeroSubmissionSchema.model_validate(submission)
 
 @router.post("/save-progress", response_model=AssignmentZeroSubmissionSchema)
@@ -125,6 +161,9 @@ async def save_assignment_zero_progress(
             school_type=data.school_type or "",
             group_name=data.group_name or "",
             sat_target_date=data.sat_target_date or "",
+            sat_planned_test_date=data.sat_planned_test_date or parse_sat_target_date(data.sat_target_date),
+            sat_result_score=data.sat_result_score,
+            sat_result_test_date=data.sat_result_test_date,
             has_passed_sat_before=data.has_passed_sat_before or False,
             previous_sat_score=data.previous_sat_score,
             recent_practice_test_score=data.recent_practice_test_score or "",
@@ -151,6 +190,10 @@ async def save_assignment_zero_progress(
             math_topics=data.math_topics,
             # IELTS fields
             ielts_target_date=data.ielts_target_date,
+            ielts_planned_test_date=data.ielts_planned_test_date,
+            ielts_result_score=data.ielts_result_score,
+            ielts_result_test_date=data.ielts_result_test_date,
+            ielts_last_date_prompted_at=data.ielts_last_date_prompted_at,
             has_passed_ielts_before=data.has_passed_ielts_before or False,
             previous_ielts_score=data.previous_ielts_score,
             ielts_target_score=data.ielts_target_score,
@@ -219,6 +262,9 @@ async def submit_assignment_zero(
         existing.school_type = data.school_type
         existing.group_name = data.group_name
         existing.sat_target_date = data.sat_target_date
+        existing.sat_planned_test_date = data.sat_planned_test_date or parse_sat_target_date(data.sat_target_date)
+        existing.sat_result_score = data.sat_result_score
+        existing.sat_result_test_date = data.sat_result_test_date
         existing.has_passed_sat_before = data.has_passed_sat_before
         existing.previous_sat_score = data.previous_sat_score
         existing.recent_practice_test_score = data.recent_practice_test_score
@@ -245,6 +291,10 @@ async def submit_assignment_zero(
         existing.math_topics = data.math_topics
         # IELTS fields
         existing.ielts_target_date = data.ielts_target_date
+        existing.ielts_planned_test_date = data.ielts_planned_test_date
+        existing.ielts_result_score = data.ielts_result_score
+        existing.ielts_result_test_date = data.ielts_result_test_date
+        existing.ielts_last_date_prompted_at = data.ielts_last_date_prompted_at
         existing.has_passed_ielts_before = data.has_passed_ielts_before
         existing.previous_ielts_score = data.previous_ielts_score
         existing.ielts_target_score = data.ielts_target_score
@@ -292,6 +342,9 @@ async def submit_assignment_zero(
             school_type=data.school_type,
             group_name=data.group_name,
             sat_target_date=data.sat_target_date,
+            sat_planned_test_date=data.sat_planned_test_date or parse_sat_target_date(data.sat_target_date),
+            sat_result_score=data.sat_result_score,
+            sat_result_test_date=data.sat_result_test_date,
             has_passed_sat_before=data.has_passed_sat_before,
             previous_sat_score=data.previous_sat_score,
             recent_practice_test_score=data.recent_practice_test_score,
@@ -318,6 +371,10 @@ async def submit_assignment_zero(
             math_topics=data.math_topics,
             # IELTS fields
             ielts_target_date=data.ielts_target_date,
+            ielts_planned_test_date=data.ielts_planned_test_date,
+            ielts_result_score=data.ielts_result_score,
+            ielts_result_test_date=data.ielts_result_test_date,
+            ielts_last_date_prompted_at=data.ielts_last_date_prompted_at,
             has_passed_ielts_before=data.has_passed_ielts_before,
             previous_ielts_score=data.previous_ielts_score,
             ielts_target_score=data.ielts_target_score,
@@ -357,6 +414,144 @@ async def submit_assignment_zero(
     db.refresh(submission)
     
     return AssignmentZeroSubmissionSchema.model_validate(submission)
+
+
+@router.patch("/planned-date", response_model=AssignmentZeroSubmissionSchema)
+async def update_planned_exam_date(
+    data: AssignmentZeroPlannedDateUpdateSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can update planned exam dates")
+
+    submission = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == current_user.id
+    ).first()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Assignment Zero submission not found")
+
+    exam_type = _normalize_exam_type(data.exam_type)
+    if exam_type == "sat":
+        submission.sat_planned_test_date = data.planned_test_date
+        submission.sat_target_date = format_sat_label(data.planned_test_date)
+    else:
+        submission.ielts_planned_test_date = data.planned_test_date
+        submission.ielts_target_date = data.planned_test_date.isoformat()
+
+    submission.updated_at = _utc_now()
+    db.commit()
+    db.refresh(submission)
+    return AssignmentZeroSubmissionSchema.model_validate(submission)
+
+
+@router.patch("/exam-result", response_model=AssignmentZeroSubmissionSchema)
+async def update_exam_result(
+    data: AssignmentZeroExamResultUpdateSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can update exam results")
+
+    submission = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == current_user.id
+    ).first()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Assignment Zero submission not found")
+
+    exam_type = _normalize_exam_type(data.exam_type)
+    result_score = data.result_score.strip()
+    if result_score == "":
+        raise HTTPException(status_code=400, detail="result_score cannot be empty")
+
+    if exam_type == "sat":
+        submission.sat_result_score = result_score
+        submission.sat_result_test_date = data.result_test_date
+    else:
+        submission.ielts_result_score = result_score
+        submission.ielts_result_test_date = data.result_test_date
+
+    submission.updated_at = _utc_now()
+    db.commit()
+    db.refresh(submission)
+    return AssignmentZeroSubmissionSchema.model_validate(submission)
+
+
+@router.get("/ielts-date-prompt-status")
+async def get_ielts_date_prompt_status(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "student":
+        return {"is_ielts_student": False, "should_prompt": False}
+
+    submission = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == current_user.id
+    ).first()
+
+    group_students = db.query(GroupStudent).filter(GroupStudent.student_id == current_user.id).all()
+    group_ids = [gs.group_id for gs in group_students]
+    group_names: list[str] = []
+    if group_ids:
+        groups = db.query(Group).filter(Group.id.in_(group_ids)).all()
+        group_names = [group.name.lower() for group in groups if group.name]
+
+    is_ielts_group_student = any("ielts" in name for name in group_names)
+    has_ielts_data = bool(
+        submission and (
+            submission.ielts_target_date
+            or submission.ielts_planned_test_date
+            or submission.ielts_target_score
+            or submission.has_passed_ielts_before
+        )
+    )
+    is_ielts_student = is_ielts_group_student or has_ielts_data
+    if not is_ielts_student:
+        return {"is_ielts_student": False, "should_prompt": False}
+
+    if submission is None:
+        return {
+            "is_ielts_student": True,
+            "should_prompt": False,
+            "reason": "assignment_zero_submission_required",
+        }
+
+    last_prompted = submission.ielts_last_date_prompted_at
+    if last_prompted is None:
+        return {"is_ielts_student": True, "should_prompt": True, "days_until_next_prompt": 0}
+
+    now = _utc_now()
+    next_prompt_at = last_prompted + timedelta(days=14)
+    should_prompt = now >= next_prompt_at
+    remaining_days = max((next_prompt_at.date() - now.date()).days, 0)
+    return {
+        "is_ielts_student": True,
+        "should_prompt": should_prompt,
+        "days_until_next_prompt": 0 if should_prompt else remaining_days,
+        "last_prompted_at": last_prompted,
+        "next_prompt_at": next_prompt_at,
+    }
+
+
+@router.post("/ielts-date-prompt-touch")
+async def touch_ielts_date_prompt(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can update IELTS prompt state")
+
+    submission = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == current_user.id
+    ).first()
+    if not submission:
+        return {"success": True, "ielts_last_date_prompted_at": None}
+
+    submission.ielts_last_date_prompted_at = _utc_now()
+    submission.updated_at = _utc_now()
+    db.commit()
+    return {"success": True, "ielts_last_date_prompted_at": submission.ielts_last_date_prompted_at}
 
 @router.post("/upload-screenshot")
 async def upload_screenshot(

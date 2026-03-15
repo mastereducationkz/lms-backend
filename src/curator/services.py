@@ -13,14 +13,19 @@ Key logic:
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone, date as date_type
+from datetime import datetime, timedelta, timezone, date as date_type, time as time_type
 from typing import Optional
 import pytz
 
 from src.config import SessionLocal
 from src.schemas.models import (
     CuratorTaskTemplate, CuratorTaskInstance,
-    UserInDB, Group, GroupStudent,
+    UserInDB, Group, GroupStudent, AssignmentZeroSubmission
+)
+from src.assignments.exam_dates import (
+    parse_sat_target_date,
+    resolve_legacy_sat_month,
+    get_nearest_sat_date,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +35,219 @@ DAY_MAP = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
     "friday": 4, "saturday": 5, "sunday": 6,
 }
+
+EXAM_COLLECTION_TEMPLATE_TITLE = "Сбор результатов экзамена"
+
+
+def _ensure_exam_collection_template(db) -> CuratorTaskTemplate:
+    template = (
+        db.query(CuratorTaskTemplate)
+        .filter(CuratorTaskTemplate.title == EXAM_COLLECTION_TEMPLATE_TITLE)
+        .first()
+    )
+    if template:
+        return template
+
+    template = CuratorTaskTemplate(
+        title=EXAM_COLLECTION_TEMPLATE_TITLE,
+        description=(
+            "Проверить, сдал ли ученик экзамен, собрать результат и зафиксировать его в LMS. "
+            "Если экзамен перенесен, обновить плановую дату."
+        ),
+        task_type="exam_results_collection",
+        scope="student",
+        order_index=200,
+        is_active=True,
+    )
+    db.add(template)
+    db.commit()
+    db.refresh(template)
+    return template
+
+
+def _get_student_groups(db, student_id: int) -> list[Group]:
+    return (
+        db.query(Group)
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .filter(
+            GroupStudent.student_id == student_id,
+            Group.is_active == True,
+        )
+        .all()
+    )
+
+
+def _get_curator_target(groups: list[Group]) -> tuple[int | None, int | None]:
+    for group in groups:
+        if group.curator_id:
+            return group.curator_id, group.id
+    return None, None
+
+
+def _student_tracks(groups: list[Group], submission: AssignmentZeroSubmission | None) -> tuple[bool, bool]:
+    lower_names = [g.name.lower() for g in groups if g.name]
+    has_ielts_group = any("ielts" in name for name in lower_names)
+    has_sat_group = any("sat" in name for name in lower_names)
+
+    if submission is None:
+        if has_ielts_group and not has_sat_group:
+            return False, True
+        return True, has_ielts_group
+
+    has_ielts_data = bool(
+        submission.ielts_target_date
+        or submission.ielts_planned_test_date
+        or submission.ielts_target_score
+        or submission.has_passed_ielts_before
+    )
+    has_sat_data = bool(submission.sat_target_date)
+
+    sat_track = has_sat_group or has_sat_data or not has_ielts_group
+    ielts_track = has_ielts_group or has_ielts_data
+    return sat_track, ielts_track
+
+
+def _resolve_sat_planned_date(
+    submission: AssignmentZeroSubmission | None,
+    today: date_type,
+) -> date_type:
+    if submission is None:
+        return get_nearest_sat_date(today)
+
+    if submission.sat_planned_test_date:
+        return submission.sat_planned_test_date
+
+    sat_target_value = (submission.sat_target_date or "").strip()
+    if sat_target_value == "":
+        return get_nearest_sat_date(today)
+
+    parsed = parse_sat_target_date(sat_target_value, reference_date=today)
+    if parsed:
+        return parsed
+
+    return resolve_legacy_sat_month(sat_target_value, reference_date=today)
+
+
+def _build_exam_due_date(trigger_date: date_type) -> datetime:
+    return datetime.combine(trigger_date, time_type(hour=18, minute=0), tzinfo=timezone.utc)
+
+
+def _create_exam_collection_task_if_needed(
+    db,
+    template: CuratorTaskTemplate,
+    *,
+    curator_id: int,
+    group_id: int,
+    student_id: int,
+    exam_type: str,
+    planned_date: date_type,
+    today: date_type,
+) -> int:
+    trigger_date = planned_date + timedelta(days=13)
+    if today < trigger_date:
+        return 0
+
+    dedupe_key = f"exam-result:{exam_type}:{planned_date.isoformat()}"
+    exists = (
+        db.query(CuratorTaskInstance)
+        .filter(
+            CuratorTaskInstance.template_id == template.id,
+            CuratorTaskInstance.student_id == student_id,
+            CuratorTaskInstance.week_reference == dedupe_key,
+        )
+        .first()
+    )
+    if exists:
+        return 0
+
+    db.add(
+        CuratorTaskInstance(
+            template_id=template.id,
+            curator_id=curator_id,
+            student_id=student_id,
+            group_id=group_id,
+            status="pending",
+            due_date=_build_exam_due_date(trigger_date),
+            week_reference=dedupe_key,
+            custom_title=f"Сбор результата {exam_type.upper()} ({planned_date.isoformat()})",
+        )
+    )
+    return 1
+
+
+def generate_exam_result_collection_tasks(db, reference_date: date_type | None = None) -> int:
+    today = reference_date or date_type.today()
+    template = _ensure_exam_collection_template(db)
+
+    students = (
+        db.query(UserInDB)
+        .filter(
+            UserInDB.role == "student",
+            UserInDB.is_active == True,
+        )
+        .all()
+    )
+
+    created_count = 0
+    has_backfill_updates = False
+    for student in students:
+        groups = _get_student_groups(db, student.id)
+        curator_id, group_id = _get_curator_target(groups)
+        if curator_id is None or group_id is None:
+            continue
+
+        submission = (
+            db.query(AssignmentZeroSubmission)
+            .filter(AssignmentZeroSubmission.user_id == student.id)
+            .first()
+        )
+        sat_track, ielts_track = _student_tracks(groups, submission)
+
+        if sat_track:
+            sat_planned_date = _resolve_sat_planned_date(submission, today=today)
+
+            if submission and submission.sat_planned_test_date is None:
+                submission.sat_planned_test_date = sat_planned_date
+                has_backfill_updates = True
+
+            sat_result_missing = (
+                submission is None
+                or (not submission.sat_result_score and submission.sat_result_test_date is None)
+            )
+            if sat_result_missing:
+                created_count += _create_exam_collection_task_if_needed(
+                    db,
+                    template,
+                    curator_id=curator_id,
+                    group_id=group_id,
+                    student_id=student.id,
+                    exam_type="sat",
+                    planned_date=sat_planned_date,
+                    today=today,
+                )
+
+        if ielts_track and submission and submission.ielts_planned_test_date:
+            ielts_result_missing = not submission.ielts_result_score and submission.ielts_result_test_date is None
+            if ielts_result_missing:
+                created_count += _create_exam_collection_task_if_needed(
+                    db,
+                    template,
+                    curator_id=curator_id,
+                    group_id=group_id,
+                    student_id=student.id,
+                    exam_type="ielts",
+                    planned_date=submission.ielts_planned_test_date,
+                    today=today,
+                )
+
+    if created_count > 0 or has_backfill_updates:
+        db.commit()
+        if created_count > 0:
+            logger.info(f"[SCHEDULER] Generated {created_count} exam-result collection tasks")
+    else:
+        db.rollback()
+
+    return created_count
 
 
 def _calc_program_week(group: Group, reference_date: Optional[date_type] = None) -> Optional[int]:
@@ -269,14 +487,18 @@ class CuratorTaskScheduler:
                 logger.info(f"[SCHEDULER] Startup: generated {created} tasks for {week_ref}")
             else:
                 logger.info(f"[SCHEDULER] {existing} tasks already exist for {week_ref}, skipping startup generation")
+
+            generate_exam_result_collection_tasks(db, reference_date=now_almaty.date())
         finally:
             db.close()
 
     def _check_and_create_tasks(self):
-        """On Mondays, generate tasks for the current week."""
+        """Generate exam-result tasks daily and weekly tasks on Mondays."""
         db = SessionLocal()
         try:
             now_almaty = datetime.now(TZ)
+
+            generate_exam_result_collection_tasks(db, reference_date=now_almaty.date())
 
             # Only generate on Mondays
             if now_almaty.weekday() != 0:
