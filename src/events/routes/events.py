@@ -1151,25 +1151,36 @@ async def create_curator_event(
     if event_data.start_datetime >= event_data.end_datetime:
         raise HTTPException(status_code=400, detail="Start datetime must be before end datetime")
     
-    # For curators: verify they manage all specified groups
-    if current_user.role == "curator" and event_data.group_ids:
+    # Remove special groups from selected groups
+    eligible_groups = []
+    if event_data.group_ids:
+        existing_groups = db.query(Group).filter(Group.id.in_(event_data.group_ids)).all()
+        if len(existing_groups) != len(event_data.group_ids):
+            raise HTTPException(status_code=400, detail="One or more groups not found")
+        eligible_groups = [group for group in existing_groups if not group.is_special]
+
+    if event_data.group_ids and not eligible_groups and not event_data.course_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Selected groups are special and cannot be used for events"
+        )
+
+    eligible_group_ids = [group.id for group in eligible_groups]
+
+    # For curators: verify they manage all specified non-special groups
+    if current_user.role == "curator" and eligible_group_ids:
         curator_groups = db.query(Group).filter(
             Group.curator_id == current_user.id,
-            Group.id.in_(event_data.group_ids)
+            Group.id.in_(eligible_group_ids)
         ).all()
         
-        if len(curator_groups) != len(event_data.group_ids):
+        if len(curator_groups) != len(eligible_group_ids):
             raise HTTPException(
                 status_code=403, 
                 detail="You can only create events for groups you manage"
             )
-    
-    # Validate groups exist
-    groups = []
-    if event_data.group_ids:
-        groups = db.query(Group).filter(Group.id.in_(event_data.group_ids)).all()
-        if len(groups) != len(event_data.group_ids):
-            raise HTTPException(status_code=400, detail="One or more groups not found")
+
+    groups = eligible_groups
 
     # Validate courses exist (optional)
     courses = []
@@ -1200,7 +1211,7 @@ async def create_curator_event(
     db.flush()  # To get the event ID
     
     # Create event-group associations
-    for group_id in event_data.group_ids:
+    for group_id in eligible_group_ids:
         event_group = EventGroup(event_id=event.id, group_id=group_id)
         db.add(event_group)
 
@@ -1216,8 +1227,8 @@ async def create_curator_event(
     # Return enriched event data
     result = EventSchema.from_orm(event)
     result.creator_name = current_user.name
-    result.groups = [g.name for g in groups] if event_data.group_ids else []
-    result.group_ids = event_data.group_ids or []
+    result.groups = [g.name for g in groups] if eligible_group_ids else []
+    result.group_ids = eligible_group_ids
     result.course_ids = event_data.course_ids or []
     
     if event_data.course_ids:

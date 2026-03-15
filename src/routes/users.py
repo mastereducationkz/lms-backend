@@ -73,6 +73,7 @@ async def get_my_groups(
                 teacher_name="", # Not needed for this view
                 curator_id=group.curator_id,
                 is_active=group.is_active,
+                is_special=group.is_special,
                 student_count=0, # Not needed
                 students=[],
                 created_at=group.created_at
@@ -97,6 +98,7 @@ async def get_my_groups(
                 teacher_id=g.teacher_id,
                 curator_id=g.curator_id,
                 is_active=g.is_active,
+                is_special=g.is_special,
                 students=[],
                 student_count=0,
                 created_at=g.created_at

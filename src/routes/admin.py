@@ -106,6 +106,7 @@ class CreateGroupRequest(BaseModel):
     curator_id: Optional[int] = None
     course_id: Optional[int] = None  # Курс, к которому привязана группа
     is_active: bool = True
+    is_special: bool = False
 
 class UpdateGroupRequest(BaseModel):
     name: Optional[str] = None
@@ -114,6 +115,7 @@ class UpdateGroupRequest(BaseModel):
     curator_id: Optional[int] = None
     course_id: Optional[int] = None  # Курс, к которому привязана группа
     is_active: Optional[bool] = None
+    is_special: Optional[bool] = None
     student_ids: Optional[List[int]] = None  # Update student list
 
 class AssignTeacherRequest(BaseModel):
@@ -171,6 +173,17 @@ def generate_password(length: int = 8) -> str:
 def generate_student_id() -> str:
     """Generate a unique student ID"""
     return f"STU{secrets.randbelow(100000):05d}"
+
+
+def get_non_special_group_ids(db: Session, group_ids: List[int]) -> List[int]:
+    if not group_ids:
+        return []
+
+    existing_groups = db.query(Group).filter(Group.id.in_(group_ids)).all()
+    if len(existing_groups) != len(group_ids):
+        raise HTTPException(status_code=400, detail="One or more groups not found")
+
+    return [group.id for group in existing_groups if not group.is_special]
 
 @router.post("/users/single", response_model=CreateUserResponse)
 async def create_single_user(
@@ -729,6 +742,9 @@ async def get_all_groups(
     if is_active is not None:
         query = query.filter(Group.is_active == is_active)
     
+    if current_user.role in ["head_curator", "head_teacher"]:
+        query = query.filter(Group.is_special == False)
+
     groups = query.offset(skip).limit(limit).all()
     # Enrich with teacher names, curator names and student counts
     result = []
@@ -776,6 +792,7 @@ async def get_all_groups(
             students=students,
             created_at=group.created_at,
             is_active=group.is_active,
+            is_special=group.is_special,
             schedule_config=group.schedule_config
         )
         
@@ -829,7 +846,8 @@ async def create_group(
         description=group_data.description,
         teacher_id=group_data.teacher_id,
         curator_id=group_data.curator_id,
-        is_active=group_data.is_active
+        is_active=group_data.is_active,
+        is_special=group_data.is_special
     )
     
     db.add(new_group)
@@ -860,6 +878,7 @@ async def create_group(
         students=[],
         created_at=new_group.created_at,
         is_active=new_group.is_active,
+        is_special=new_group.is_special,
         schedule_config=new_group.schedule_config
     )
     
@@ -925,6 +944,8 @@ async def update_group(
         group.curator_id = group_data.curator_id
     if group_data.is_active is not None:
         group.is_active = group_data.is_active
+    if group_data.is_special is not None:
+        group.is_special = group_data.is_special
     
     # Update course access if provided
     if group_data.course_id is not None:
@@ -1000,6 +1021,7 @@ async def update_group(
         students=students,
         created_at=group.created_at,
         is_active=group.is_active,
+        is_special=group.is_special,
         schedule_config=group.schedule_config
     )
     
@@ -2096,11 +2118,12 @@ async def create_event(
     if event_data.start_datetime >= event_data.end_datetime:
         raise HTTPException(status_code=400, detail="Start datetime must be before end datetime")
     
-    # Validate groups exist
-    if event_data.group_ids:
-        groups = db.query(Group).filter(Group.id.in_(event_data.group_ids)).all()
-        if len(groups) != len(event_data.group_ids):
-            raise HTTPException(status_code=400, detail="One or more groups not found")
+    eligible_group_ids = get_non_special_group_ids(db, event_data.group_ids or [])
+    if event_data.group_ids and not eligible_group_ids and not event_data.course_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Selected groups are special and cannot be used for events"
+        )
 
     # Validate courses exist
     if event_data.course_ids:
@@ -2131,7 +2154,7 @@ async def create_event(
     db.flush()  # To get the event ID
     
     # Create event-group associations
-    for group_id in event_data.group_ids:
+    for group_id in eligible_group_ids:
         event_group = EventGroup(event_id=event.id, group_id=group_id)
         db.add(event_group)
 
@@ -2141,6 +2164,8 @@ async def create_event(
         event_course = EventCourse(event_id=event.id, course_id=course_id)
         db.add(event_course)
     
+    event_data.group_ids = eligible_group_ids
+
     # If recurring, create additional events
     # Only create physical copies if an end date is specified.
     # If no end date, we rely on dynamic generation in retrieval endpoints.
@@ -2160,6 +2185,7 @@ async def create_event(
         result.teacher_name = teacher.name if teacher else None
     
     result.groups = [eg.group.name for eg in event.event_groups if eg.group]
+    result.group_ids = eligible_group_ids
     result.courses = [ec.course.title for ec in event.event_courses if ec.course]
     
     return result
@@ -2191,17 +2217,21 @@ async def update_event(
     
     # Update group associations if provided
     if "group_ids" in update_data:
-        # Validate groups exist
-        if update_data["group_ids"]:
-            groups = db.query(Group).filter(Group.id.in_(update_data["group_ids"])).all()
-            if len(groups) != len(update_data["group_ids"]):
-                raise HTTPException(status_code=400, detail="One or more groups not found")
+        validated_group_ids = get_non_special_group_ids(db, update_data["group_ids"] or [])
+        existing_course_ids = [ec.course_id for ec in event.event_courses] if event.event_courses else []
+        requested_course_ids = update_data.get("course_ids")
+        effective_course_ids = requested_course_ids if requested_course_ids is not None else existing_course_ids
+        if update_data["group_ids"] and not validated_group_ids and not effective_course_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Selected groups are special and cannot be used for events"
+            )
         
         # Remove existing associations
         db.query(EventGroup).filter(EventGroup.event_id == event_id).delete()
         
         # Create new associations
-        for group_id in update_data["group_ids"]:
+        for group_id in validated_group_ids:
             event_group = EventGroup(event_id=event_id, group_id=group_id)
             db.add(event_group)
         
@@ -2307,6 +2337,13 @@ async def create_bulk_events(
         if event_data.start_datetime >= event_data.end_datetime:
             raise HTTPException(status_code=400, detail="Start datetime must be before end datetime")
         
+        eligible_group_ids = get_non_special_group_ids(db, event_data.group_ids or [])
+        if event_data.group_ids and not eligible_group_ids and not event_data.course_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Selected groups are special and cannot be used for events"
+            )
+
         # Create event
         event = Event(
             title=event_data.title,
@@ -2328,7 +2365,7 @@ async def create_bulk_events(
         db.flush()
         
         # Create event-group associations
-        for group_id in event_data.group_ids:
+        for group_id in eligible_group_ids:
             event_group = EventGroup(event_id=event.id, group_id=group_id)
             db.add(event_group)
         

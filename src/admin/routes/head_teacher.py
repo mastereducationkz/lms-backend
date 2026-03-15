@@ -343,6 +343,13 @@ async def get_course_teacher_statistics(
         CourseGroupAccess.is_active == True
     ).all()
     group_ids = [ga.group_id for ga in group_accesses]
+    if group_ids:
+        group_ids = [
+            group_id for (group_id,) in db.query(Group.id).filter(
+                Group.id.in_(group_ids),
+                Group.is_special == False
+            ).all()
+        ]
     
     if not group_ids:
         return CourseTeacherStatsResponse(
@@ -576,6 +583,13 @@ async def get_teacher_details(
         CourseGroupAccess.is_active == True
     ).all()
     group_ids = [ga.group_id for ga in group_accesses]
+    if group_ids:
+        group_ids = [
+            group_id for (group_id,) in db.query(Group.id).filter(
+                Group.id.in_(group_ids),
+                Group.is_special == False
+            ).all()
+        ]
     
     teacher_groups = db.query(Group).filter(
         Group.id.in_(group_ids),
@@ -737,6 +751,13 @@ async def get_teacher_feedbacks(
         CourseGroupAccess.is_active == True
     ).all()
     group_ids = [ga.group_id for ga in group_accesses]
+    if group_ids:
+        group_ids = [
+            group_id for (group_id,) in db.query(Group.id).filter(
+                Group.id.in_(group_ids),
+                Group.is_special == False
+            ).all()
+        ]
     
     teacher_group_ids = db.query(Group.id).filter(
         Group.id.in_(group_ids),
@@ -827,6 +848,13 @@ async def get_teacher_assignments(
         CourseGroupAccess.is_active == True
     ).all()
     group_ids = [ga.group_id for ga in group_accesses]
+    if group_ids:
+        group_ids = [
+            group_id for (group_id,) in db.query(Group.id).filter(
+                Group.id.in_(group_ids),
+                Group.is_special == False
+            ).all()
+        ]
     
     teacher_groups = db.query(Group).filter(
         Group.id.in_(group_ids),

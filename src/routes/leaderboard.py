@@ -24,9 +24,12 @@ async def get_curator_groups(
 ):
     """Get groups managed by average curator"""
     if current_user.role == "admin" or current_user.role == "head_curator":
-        groups = db.query(Group).all()
+        groups = db.query(Group).filter(Group.is_special == False).all()
     elif current_user.role == "curator":
-        groups = db.query(Group).filter(Group.curator_id == current_user.id).all()
+        groups = db.query(Group).filter(
+            Group.curator_id == current_user.id,
+            Group.is_special == False
+        ).all()
     else:
         raise HTTPException(status_code=403, detail="Only curators and admins can access this endpoint")
     # We need to return GroupSchema. Since GroupSchema has many fields, we might need to populate them or use a simplified schema.
@@ -132,6 +135,7 @@ async def get_curator_groups(
             students=[],
             created_at=group.created_at,
             is_active=group.is_active,
+            is_special=group.is_special,
             current_week=current_week,
             max_week=max_week
         ))

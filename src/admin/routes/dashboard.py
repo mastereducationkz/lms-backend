@@ -727,7 +727,10 @@ def get_head_curator_dashboard_stats(
     total_curators = db.query(UserInDB).filter(UserInDB.role == "curator", UserInDB.is_active == True).count()
     
     # Base query for groups
-    group_query = db.query(Group).filter(Group.is_active == True)
+    group_query = db.query(Group).filter(
+        Group.is_active == True,
+        Group.is_special == False
+    )
     if group_id:
         group_query = group_query.filter(Group.id == group_id)
     
@@ -856,7 +859,11 @@ def get_head_curator_dashboard_stats(
     
     for curator in curators:
         # Группы куратора
-        c_groups_query = db.query(Group).filter(Group.curator_id == curator.id, Group.is_active == True)
+        c_groups_query = db.query(Group).filter(
+            Group.curator_id == curator.id,
+            Group.is_active == True,
+            Group.is_special == False
+        )
         if group_id:
             c_groups_query = c_groups_query.filter(Group.id == group_id)
         
@@ -1178,6 +1185,13 @@ def get_head_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardSt
         CourseGroupAccess.is_active == True
     ).all()
     managed_group_ids = [ga.group_id for ga in group_accesses]
+    if managed_group_ids:
+        managed_group_ids = [
+            group_id for (group_id,) in db.query(Group.id).filter(
+                Group.id.in_(managed_group_ids),
+                Group.is_special == False
+            ).all()
+        ]
 
     missing_attendance_reminders = []
     cutoff_date = datetime(2026, 2, 16, 0, 0, 0)

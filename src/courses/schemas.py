@@ -16,6 +16,7 @@ class GroupSchema(BaseModel):
     students: Optional[List["UserSchema"]] = None
     created_at: datetime
     is_active: bool
+    is_special: bool = False
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None

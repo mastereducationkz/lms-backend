@@ -1433,6 +1433,8 @@ async def get_groups_analytics(
         groups_query = groups_query.filter(Group.teacher_id == current_user.id)
     elif current_user.role == "curator":
         groups_query = groups_query.filter(Group.curator_id == current_user.id)
+    elif current_user.role == "head_curator":
+        groups_query = groups_query.filter(Group.is_special == False)
     
     # Админ видит все группы (без дополнительной фильтрации)
     
@@ -1581,6 +1583,8 @@ async def get_course_groups_analytics(
         base_query = base_query.filter(Group.teacher_id == current_user.id)
     elif current_user.role == "curator":
         base_query = base_query.filter(Group.curator_id == current_user.id)
+    elif current_user.role == "head_curator":
+        base_query = base_query.filter(Group.is_special == False)
     
     groups_with_students = base_query.distinct().all()
     if not groups_with_students:
