@@ -744,9 +744,6 @@ async def get_all_groups(
     if is_active is not None:
         query = query.filter(Group.is_active == is_active)
     
-    if current_user.role in ["head_curator", "head_teacher"]:
-        query = query.filter(Group.is_special == False)
-
     groups = query.offset(skip).limit(limit).all()
     # Enrich with teacher names, curator names and student counts
     result = []
