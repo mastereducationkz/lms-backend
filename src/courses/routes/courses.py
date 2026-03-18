@@ -1127,7 +1127,7 @@ async def check_lesson_access(
         return {"accessible": True}
     
     # Check if this lesson is assigned as homework (priority access) - optimized lookup
-    from src.schemas.models import StudentProgress, StepProgress, Assignment, GroupStudent, AssignmentLinkedLesson
+    from src.schemas.models import StudentProgress, StepProgress, Assignment, AssignmentLinkedLesson
     
     student_group_ids = db.query(GroupStudent.group_id).filter(
         GroupStudent.student_id == current_user.id
