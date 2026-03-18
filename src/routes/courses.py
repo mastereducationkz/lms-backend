@@ -45,7 +45,6 @@ async def get_courses(
     
     if current_user.role == "student":
         # Students see courses they are enrolled in OR courses their group has access to
-        from src.schemas.models import GroupStudent, CourseGroupAccess
         
         # Get enrolled course IDs
         enrolled_course_ids = db.query(Enrollment.course_id).filter(
@@ -1847,8 +1846,6 @@ async def auto_enroll_students(
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get all students in teacher's groups
-    from src.schemas.models import GroupStudent
-    
     if current_user.role == "teacher":
         # Get all groups created by this teacher
         teacher_groups = db.query(Group).filter(Group.teacher_id == current_user.id).all()
