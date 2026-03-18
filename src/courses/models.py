@@ -68,6 +68,8 @@ class Course(Base):
     is_active = Column(Boolean, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    # "all" = all modules open; "weekly" = modules unlock by week based on group start_date
+    release_schedule = Column(String(20), default="all", nullable=False)
 
     teacher = relationship("UserInDB", back_populates="created_courses")
     modules = relationship("Module", back_populates="course", cascade="all, delete-orphan", order_by="Module.order_index")
@@ -126,6 +128,8 @@ class Module(Base):
     description = Column(Text, nullable=True)
     order_index = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # For weekly release: which week (1-based) this module unlocks; if null, falls back to order_index
+    week_number = Column(Integer, nullable=True)
 
     course = relationship("Course", back_populates="modules")
     lessons = relationship("Lesson", back_populates="module", cascade="all, delete-orphan", order_by="Lesson.order_index")

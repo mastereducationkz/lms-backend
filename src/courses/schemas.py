@@ -80,6 +80,7 @@ class CourseSchema(BaseModel):
     is_active: bool
     created_at: datetime
     status: Optional[str] = None
+    release_schedule: str = "all"  # "all" | "weekly"
 
     class Config:
         from_attributes = True
@@ -91,6 +92,7 @@ class CourseCreateSchema(BaseModel):
     cover_image_url: Optional[str] = None
     estimated_duration_minutes: int = 0
     teacher_id: Optional[int] = None
+    release_schedule: str = "all"
 
 
 class CourseGroupAccessSchema(BaseModel):
@@ -133,6 +135,7 @@ class ModuleSchema(BaseModel):
     lessons: Optional[List[dict]] = None
     created_at: datetime
     is_completed: Optional[bool] = False
+    week_number: Optional[int] = None  # For weekly release: which week (1-based) this module unlocks
 
     class Config:
         from_attributes = True
@@ -142,6 +145,7 @@ class ModuleCreateSchema(BaseModel):
     title: str
     description: Optional[str] = None
     order_index: int = 0
+    week_number: Optional[int] = None
 
 
 class BaseLessonSchema(BaseModel):

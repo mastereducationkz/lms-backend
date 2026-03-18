@@ -4,6 +4,7 @@ Shared utilities for course access logic.
 This module consolidates duplicated course access logic from various route handlers
 into reusable functions, eliminating code duplication and ensuring consistency.
 """
+from datetime import date
 from typing import List, Optional
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -138,6 +139,30 @@ def check_user_course_access(
     return has_group_access
 
 
+def calc_program_week_from_start_date(start_date_str: Optional[str], reference_date: Optional[date] = None) -> Optional[int]:
+    """
+    Calculate program week (1-based) from group schedule_config start_date.
+
+    Args:
+        start_date_str: ISO date string from schedule_config["start_date"]
+        reference_date: Date to calculate relative to. Defaults to today.
+
+    Returns:
+        Week number (1, 2, 3...) or None if not started or invalid.
+    """
+    if not start_date_str:
+        return None
+    try:
+        start = date.fromisoformat(start_date_str)
+        ref = reference_date if reference_date is not None else date.today()
+        delta = (ref - start).days
+        if delta < 0:
+            return None
+        return delta // 7 + 1
+    except (ValueError, TypeError):
+        return None
+
+
 def get_courses_with_teacher(
     user_id: int,
     db: Session
@@ -164,7 +189,7 @@ def get_courses_with_teacher(
             "cover_image_url": c.cover_image_url,
             "teacher_id": c.teacher_id,
             "teacher_name": teachers.get(c.teacher_id, "Unknown"),
-            "is_linear": c.is_linear
+            "is_linear": getattr(c, "is_linear", False)
         }
         for c in courses
     ]

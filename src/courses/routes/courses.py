@@ -21,6 +21,7 @@ from src.schemas.models import (
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_teacher_or_admin, require_admin, check_course_access
+from src.utils.course_access import calc_program_week_from_start_date
 from src.services.azure_openai_service import AzureOpenAIService
 from src.utils.duration_calculator import update_course_duration
 
@@ -240,7 +241,8 @@ async def create_course(
         description=course_data.description,
         cover_image_url=course_data.cover_image_url,
         teacher_id=teacher_id,
-        estimated_duration_minutes=course_data.estimated_duration_minutes
+        estimated_duration_minutes=course_data.estimated_duration_minutes,
+        release_schedule=getattr(course_data, "release_schedule", None) or "all"
     )
     
     db.add(new_course)
@@ -308,7 +310,9 @@ async def update_course(
     course.description = course_data.description
     course.cover_image_url = course_data.cover_image_url
     course.estimated_duration_minutes = course_data.estimated_duration_minutes
-    
+    if hasattr(course_data, "release_schedule") and course_data.release_schedule:
+        course.release_schedule = course_data.release_schedule
+
     db.commit()
     db.refresh(course)
     
@@ -442,7 +446,48 @@ async def get_course_modules(
     # Check course access
     if not check_course_access(course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this course")
-    
+
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    target_user_id = current_user.id
+    if student_id:
+        if current_user.role not in ["teacher", "admin", "head_curator"]:
+            raise HTTPException(status_code=403, detail="Only teachers, admins, and head curators can view other students' progress")
+        target_user_id = student_id
+
+    # Weekly release: modules unlocked by week based on group start_date
+    unlocked_module_ids: Optional[set] = None
+    if course.release_schedule == "weekly" and (current_user.role == "student" or student_id):
+        student_group_ids = db.query(GroupStudent.group_id).filter(
+            GroupStudent.student_id == target_user_id
+        ).all()
+        student_group_ids = [g[0] for g in student_group_ids]
+        groups_with_course = []
+        if student_group_ids:
+            groups_with_course = [
+                r[0] for r in db.query(CourseGroupAccess.group_id).filter(
+                    CourseGroupAccess.course_id == course_id,
+                    CourseGroupAccess.group_id.in_(student_group_ids),
+                    CourseGroupAccess.is_active == True
+                ).all()
+            ]
+        current_program_week: Optional[int] = None
+        for gid in groups_with_course:
+            group = db.query(Group).filter(Group.id == gid).first()
+            if group and group.schedule_config:
+                w = calc_program_week_from_start_date(group.schedule_config.get("start_date"))
+                if w is not None and (current_program_week is None or w > current_program_week):
+                    current_program_week = w
+        if current_program_week is not None:
+            unlocked_module_ids = set()
+            mods = db.query(Module).filter(Module.course_id == course_id).all()
+            for m in mods:
+                module_week = m.week_number if m.week_number is not None else (m.order_index + 1)
+                if module_week <= current_program_week:
+                    unlocked_module_ids.add(m.id)
+
     # Get modules with lesson counts in a single query using subquery
     from sqlalchemy import func
     
@@ -461,13 +506,6 @@ async def get_course_modules(
     # Fetch progress
     completed_step_ids = set()
     completed_lesson_ids = set()
-    
-    # Determine target user for progress
-    target_user_id = current_user.id
-    if student_id:
-        if current_user.role not in ["teacher", "admin", "head_curator"]:
-            raise HTTPException(status_code=403, detail="Only teachers, admins, and head curators can view other students' progress")
-        target_user_id = student_id
     
     # Only fetch progress if target user is a student (or we are viewing as student)
     # We check if target_user_id corresponds to a student role, or just fetch if requested
@@ -591,7 +629,8 @@ async def get_course_modules(
             "description": module.description,
             "order_index": module.order_index,
             "total_lessons": lesson_count_map.get(module.id, 0),
-            "created_at": module.created_at
+            "created_at": module.created_at,
+            "week_number": getattr(module, "week_number", None),
         }
         
         # Include lessons if requested
@@ -650,8 +689,11 @@ async def get_course_modules(
                 # SEQUENTIAL ACCESS LOGIC: Determine if lesson is accessible
                 # If viewing for a specific student OR current user is a student
                 if current_user.role == "student" or student_id:
+                    # Weekly release: if module is locked by schedule, lesson is not accessible
+                    if unlocked_module_ids is not None and module.id not in unlocked_module_ids:
+                        lesson_dict["is_accessible"] = False
                     # Check if lesson is marked as initially unlocked by admin
-                    if lesson.is_initially_unlocked:
+                    elif lesson.is_initially_unlocked:
                         lesson_dict["is_accessible"] = True
                     # Check if explicitly unlocked by redirect, assignment, or manual
                     elif (lesson.id in unlocked_by_redirect_ids or 
@@ -732,7 +774,8 @@ async def create_module(
         course_id=course_id,
         title=module_data.title,
         description=module_data.description,
-        order_index=module_data.order_index
+        order_index=module_data.order_index,
+        week_number=getattr(module_data, "week_number", None)
     )
     
     db.add(new_module)
@@ -771,7 +814,9 @@ async def update_module(
     module.title = module_data.title
     module.description = module_data.description
     module.order_index = module_data.order_index
-    
+    if hasattr(module_data, "week_number"):
+        module.week_number = module_data.week_number
+
     db.commit()
     db.refresh(module)
     
@@ -1038,7 +1083,8 @@ async def check_lesson_access(
         raise HTTPException(status_code=404, detail="Module not found")
     
     course_id = module.course_id
-    
+    course = db.query(Course).filter(Course.id == course_id).first()
+
     # Check basic course access
     if not check_course_access(course_id, current_user, db):
         return {
@@ -1049,6 +1095,32 @@ async def check_lesson_access(
     # Teachers and admins can access any lesson
     if current_user.role != "student":
         return {"accessible": True}
+
+    # Weekly release: if course uses weekly schedule and module is locked, deny access
+    if course and course.release_schedule == "weekly":
+        student_group_ids = [r[0] for r in db.query(GroupStudent.group_id).filter(
+            GroupStudent.student_id == current_user.id
+        ).all()]
+        current_program_week = None
+        if student_group_ids:
+            groups_with_course = [r[0] for r in db.query(CourseGroupAccess.group_id).filter(
+                CourseGroupAccess.course_id == course_id,
+                CourseGroupAccess.group_id.in_(student_group_ids),
+                CourseGroupAccess.is_active == True
+            ).all()]
+            for gid in groups_with_course:
+                group = db.query(Group).filter(Group.id == gid).first()
+                if group and group.schedule_config:
+                    w = calc_program_week_from_start_date(group.schedule_config.get("start_date"))
+                    if w is not None and (current_program_week is None or w > current_program_week):
+                        current_program_week = w
+        if current_program_week is not None:
+            module_week = module.week_number if getattr(module, "week_number", None) is not None else (module.order_index + 1)
+            if module_week > current_program_week:
+                return {
+                    "accessible": False,
+                    "reason": f"This module opens in week {module_week}. Current week: {current_program_week}."
+                }
     
     # Check if lesson is marked as initially unlocked by admin
     if lesson.is_initially_unlocked:
