@@ -543,7 +543,7 @@ async def get_course_modules(
 
         if should_fetch_progress:
             # Get active assignments for the target student's groups that are linked to lessons
-            from src.schemas.models import GroupStudent, AssignmentLinkedLesson
+            from src.schemas.models import AssignmentLinkedLesson
             student_group_ids = db.query(GroupStudent.group_id).filter(
                 GroupStudent.student_id == target_user_id
             ).subquery()
