@@ -159,6 +159,28 @@ class UserListResponse(BaseModel):
     skip: int
     limit: int
 
+
+class TeacherGroupSummary(BaseModel):
+    teacher_id: Optional[int] = None
+    teacher_name: str
+    total_students: int
+
+
+class TeacherGroupListResponse(BaseModel):
+    groups: List[TeacherGroupSummary]
+    total: int
+    skip: int
+    limit: int
+
+
+class TeacherGroupStudentsResponse(BaseModel):
+    teacher_id: Optional[int] = None
+    teacher_name: str
+    students: List[UserSchema]
+    total: int
+    skip: int
+    limit: int
+
 class GroupListResponse(BaseModel):
     groups: List[GroupSchema]
     total: int
@@ -1560,47 +1582,52 @@ async def get_all_users(
     # Apply pagination
     users = query.offset(skip).limit(limit).all()
     
-    # Enrich with group information (name, teacher, curator)
+    # Batch enrich group/teacher/curator info for students to avoid N+1 queries
     result = []
+    student_ids = [u.id for u in users if u.role == "student"]
+    student_group_rows = []
+    teacher_name_by_id = {}
+    curator_name_by_id = {}
+    if student_ids:
+        student_group_rows = (
+            db.query(
+                GroupStudent.student_id,
+                GroupStudent.group_id,
+                Group.teacher_id,
+                Group.curator_id,
+            )
+            .join(Group, Group.id == GroupStudent.group_id)
+            .filter(GroupStudent.student_id.in_(student_ids))
+            .all()
+        )
+        teacher_ids = {row.teacher_id for row in student_group_rows if row.teacher_id is not None}
+        curator_ids = {row.curator_id for row in student_group_rows if row.curator_id is not None}
+        if teacher_ids:
+            teacher_rows = db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(teacher_ids)).all()
+            teacher_name_by_id = {r.id: r.name for r in teacher_rows}
+        if curator_ids:
+            curator_rows = db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(curator_ids)).all()
+            curator_name_by_id = {r.id: r.name for r in curator_rows}
+
+    groups_by_student = {}
+    teacher_names_by_student = {}
+    curator_names_by_student = {}
+    for row in student_group_rows:
+        groups_by_student.setdefault(row.student_id, []).append(row.group_id)
+        if row.teacher_id in teacher_name_by_id:
+            teacher_names_by_student.setdefault(row.student_id, set()).add(teacher_name_by_id[row.teacher_id])
+        if row.curator_id in curator_name_by_id:
+            curator_names_by_student.setdefault(row.student_id, set()).add(curator_name_by_id[row.curator_id])
+
     for user in users:
-        # Get groups for this user first
+        group_ids = groups_by_student.get(user.id, []) if user.role == "student" else []
         teacher_name = None
         curator_name = None
-        group_ids = []
-        
         if user.role == "student":
-            
-            # Check if there are any group associations for this student
-            group_students = db.query(GroupStudent).filter(GroupStudent.student_id == user.id).all()
-            
-            if group_students:
-                # Get all groups for this student
-                teacher_names = []
-                curator_names = []
-                
-                for group_student in group_students:
-                    group_ids.append(group_student.group_id)
-                    
-                    group = db.query(Group).filter(Group.id == group_student.group_id).first()
-                    
-                    if group:
-                        # Get teacher name
-                        teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
-                        if teacher and teacher.name not in teacher_names:
-                            teacher_names.append(teacher.name)
-                        
-                        # Get curator name from group.curator_id
-                        if group.curator_id:
-                            curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first()
-                            if curator and curator.name not in curator_names:
-                                curator_names.append(curator.name)
-                
-                # Use the first teacher and curator (or combine them)
-                teacher_name = ", ".join(teacher_names) if teacher_names else None
-                curator_name = ", ".join(curator_names) if curator_names else None
-        
-        # Create UserSchema with group information
-        user_data = UserSchema(
+            teacher_name = ", ".join(sorted(teacher_names_by_student.get(user.id, set()))) or None
+            curator_name = ", ".join(sorted(curator_names_by_student.get(user.id, set()))) or None
+
+        result.append(UserSchema(
             id=user.id,
             email=user.email,
             name=user.name,
@@ -1613,15 +1640,187 @@ async def get_all_users(
             group_ids=group_ids if group_ids else None,
             total_study_time_minutes=user.total_study_time_minutes,
             created_at=user.created_at
-        )
-        
-        result.append(user_data)
+        ))
     
     return UserListResponse(
         users=result,
         total=total,
         skip=skip,
         limit=limit
+    )
+
+
+@router.get("/students/teacher-groups", response_model=TeacherGroupListResponse)
+async def get_students_teacher_groups(
+    skip: int = 0,
+    limit: int = 10,
+    group_id: Optional[int] = None,
+    is_active: Optional[bool] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin()),
+):
+    """
+    Paginated list of teacher groups (teacher -> count of students) for student management UI.
+    Filters apply to students (search / is_active) and optionally group_id.
+    """
+    base_students = db.query(UserInDB.id).filter(UserInDB.role == "student")
+    if is_active is not None:
+        base_students = base_students.filter(UserInDB.is_active == is_active)
+    if search:
+        search_filter = f"%{search}%"
+        base_students = base_students.filter(
+            (UserInDB.name.ilike(search_filter)) |
+            (UserInDB.email.ilike(search_filter)) |
+            (UserInDB.student_id.ilike(search_filter))
+        )
+    base_students_sq = base_students.subquery()
+
+    group_students_q = (
+        db.query(
+            Group.teacher_id.label("teacher_id"),
+            func.count(func.distinct(GroupStudent.student_id)).label("total_students"),
+        )
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .filter(GroupStudent.student_id.in_(base_students_sq))
+    )
+    if group_id is not None:
+        group_students_q = group_students_q.filter(Group.id == group_id)
+
+    group_students_q = group_students_q.group_by(Group.teacher_id)
+
+    total_groups = group_students_q.count()
+    rows = (
+        group_students_q
+        .order_by(desc("total_students"))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    teacher_ids = [r.teacher_id for r in rows if r.teacher_id is not None]
+    teacher_name_by_id = {}
+    if teacher_ids:
+        teacher_rows = db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(teacher_ids)).all()
+        teacher_name_by_id = {r.id: r.name for r in teacher_rows}
+
+    groups = [
+        TeacherGroupSummary(
+            teacher_id=r.teacher_id,
+            teacher_name=teacher_name_by_id.get(r.teacher_id, "No Teacher Assigned") if r.teacher_id else "No Teacher Assigned",
+            total_students=int(r.total_students or 0),
+        )
+        for r in rows
+    ]
+
+    return TeacherGroupListResponse(groups=groups, total=total_groups, skip=skip, limit=limit)
+
+
+@router.get("/students/teacher-groups/{teacher_id}", response_model=TeacherGroupStudentsResponse)
+async def get_students_for_teacher_group(
+    teacher_id: int,
+    skip: int = 0,
+    limit: int = 20,
+    group_id: Optional[int] = None,
+    is_active: Optional[bool] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin()),
+):
+    """
+    Paginated students for a given teacher group.
+    teacher_id uses -1 for 'No Teacher Assigned'.
+    """
+    base_students = db.query(UserInDB).filter(UserInDB.role == "student")
+    if is_active is not None:
+        base_students = base_students.filter(UserInDB.is_active == is_active)
+    if search:
+        search_filter = f"%{search}%"
+        base_students = base_students.filter(
+            (UserInDB.name.ilike(search_filter)) |
+            (UserInDB.email.ilike(search_filter)) |
+            (UserInDB.student_id.ilike(search_filter))
+        )
+
+    gs = db.query(GroupStudent.student_id).join(Group, Group.id == GroupStudent.group_id)
+    if teacher_id == -1:
+        gs = gs.filter(Group.teacher_id.is_(None))
+        teacher_name = "No Teacher Assigned"
+    else:
+        gs = gs.filter(Group.teacher_id == teacher_id)
+        teacher = db.query(UserInDB).filter(UserInDB.id == teacher_id).first()
+        teacher_name = teacher.name if teacher else "Unknown"
+    if group_id is not None:
+        gs = gs.filter(Group.id == group_id)
+    student_ids_sq = gs.subquery()
+
+    filtered = base_students.filter(UserInDB.id.in_(student_ids_sq))
+    total = filtered.count()
+    students = filtered.order_by(UserInDB.name.asc()).offset(skip).limit(limit).all()
+
+    # Lightweight enrich: teacher/curator names for each student
+    student_ids = [s.id for s in students]
+    student_group_rows = []
+    teacher_name_by_id = {}
+    curator_name_by_id = {}
+    if student_ids:
+        student_group_rows = (
+            db.query(
+                GroupStudent.student_id,
+                GroupStudent.group_id,
+                Group.teacher_id,
+                Group.curator_id,
+            )
+            .join(Group, Group.id == GroupStudent.group_id)
+            .filter(GroupStudent.student_id.in_(student_ids))
+            .all()
+        )
+        teacher_ids = {row.teacher_id for row in student_group_rows if row.teacher_id is not None}
+        curator_ids = {row.curator_id for row in student_group_rows if row.curator_id is not None}
+        if teacher_ids:
+            teacher_rows = db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(teacher_ids)).all()
+            teacher_name_by_id = {r.id: r.name for r in teacher_rows}
+        if curator_ids:
+            curator_rows = db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(curator_ids)).all()
+            curator_name_by_id = {r.id: r.name for r in curator_rows}
+
+    groups_by_student = {}
+    teacher_names_by_student = {}
+    curator_names_by_student = {}
+    for row in student_group_rows:
+        groups_by_student.setdefault(row.student_id, []).append(row.group_id)
+        if row.teacher_id in teacher_name_by_id:
+            teacher_names_by_student.setdefault(row.student_id, set()).add(teacher_name_by_id[row.teacher_id])
+        if row.curator_id in curator_name_by_id:
+            curator_names_by_student.setdefault(row.student_id, set()).add(curator_name_by_id[row.curator_id])
+
+    out = []
+    for u in students:
+        group_ids = groups_by_student.get(u.id, [])
+        t_name = ", ".join(sorted(teacher_names_by_student.get(u.id, set()))) or None
+        c_name = ", ".join(sorted(curator_names_by_student.get(u.id, set()))) or None
+        out.append(UserSchema(
+            id=u.id,
+            email=u.email,
+            name=u.name,
+            role=u.role,
+            avatar_url=u.avatar_url,
+            is_active=u.is_active,
+            student_id=u.student_id,
+            teacher_name=t_name,
+            curator_name=c_name,
+            group_ids=group_ids if group_ids else None,
+            total_study_time_minutes=u.total_study_time_minutes,
+            created_at=u.created_at,
+        ))
+
+    return TeacherGroupStudentsResponse(
+        teacher_id=None if teacher_id == -1 else teacher_id,
+        teacher_name=teacher_name,
+        students=out,
+        total=total,
+        skip=skip,
+        limit=limit,
     )
 
 @router.put("/users/{user_id}", response_model=UserSchema)
