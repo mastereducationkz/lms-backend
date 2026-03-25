@@ -599,8 +599,8 @@ async def get_all_submissions(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Get all Assignment Zero submissions (admin/teacher only)"""
-    if current_user.role not in ["admin", "teacher"]:
+    """Get all Assignment Zero submissions (admin/teacher/head roles)"""
+    if current_user.role not in ["admin", "teacher", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     query = db.query(AssignmentZeroSubmission)
@@ -618,8 +618,8 @@ async def get_submission_by_user(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Get Assignment Zero submission for a specific user (admin/teacher only)"""
-    if current_user.role not in ["admin", "teacher"]:
+    """Get Assignment Zero submission for a specific user (admin/teacher/head roles)"""
+    if current_user.role not in ["admin", "teacher", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     submission = db.query(AssignmentZeroSubmission).filter(

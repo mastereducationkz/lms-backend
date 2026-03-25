@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, time, date
 
 from src.config import get_db
 from src.schemas.models import (
-    UserInDB, UserSchema, Group, GroupSchema, GroupStudent, Course, Module, Enrollment, 
+    UserInDB, UserSchema, Group, GroupSchema, GroupStudent, Course, Module, Enrollment,
     StudentProgress, Assignment, AssignmentSubmission, AssignmentExtension, Event, EventGroup, EventParticipant,
     EventSchema, CreateEventRequest, UpdateEventRequest, EventGroupSchema, EventParticipantSchema,
-    StepProgress, Step, Lesson, LessonSchedule, CourseGroupAccess, CourseHeadTeacher
+    StepProgress, Step, Lesson, LessonSchedule, CourseGroupAccess, CourseHeadTeacher,
+    QuestionErrorReport, LessonRequest,
 )
 from src.utils.auth_utils import hash_password
 from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin
@@ -88,7 +89,17 @@ class AdminStatsResponse(BaseModel):
     total_courses: int
     total_active_enrollments: int
     recent_registrations: int  # Last 7 days
-    
+    pending_homework_to_grade: int = 0
+    students_without_assignment_zero: int = 0
+    open_question_reports: int = 0
+    pending_lesson_requests: int = 0
+    events_in_next_7_days: int = 0
+    teacher_active_last_7_days: int = 0
+    teacher_active_last_30_days: int = 0
+    teachers_who_graded_last_7_days: int = 0
+    homework_graded_last_7_days: int = 0
+    avg_homework_graded_per_active_teacher_last_7_days: float = 0.0
+
 class StudentProgressSummary(BaseModel):
     user_id: int
     name: str
@@ -166,6 +177,49 @@ class AdminDashboardResponse(BaseModel):
     recent_users: List[UserSchema]
     recent_groups: List[GroupSchema]
     recent_courses: List[dict]
+
+
+class AdminChartDayPoint(BaseModel):
+    date: str
+    count: int
+
+
+class AdminDashboardChartsResponse(BaseModel):
+    registrations_last_14_days: List[AdminChartDayPoint]
+    homework_submissions_last_14_days: List[AdminChartDayPoint]
+
+
+def _admin_operational_counts(db: Session) -> dict:
+    """Counts that help admins prioritize daily work."""
+    now = datetime.utcnow()
+    week_end = now + timedelta(days=7)
+    pending_homework_to_grade = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.is_graded == False
+    ).count()
+    students_without_assignment_zero = db.query(UserInDB).filter(
+        UserInDB.role == "student",
+        UserInDB.is_active == True,
+        UserInDB.assignment_zero_completed == False,
+    ).count()
+    open_question_reports = db.query(QuestionErrorReport).filter(
+        QuestionErrorReport.status == "pending"
+    ).count()
+    pending_lesson_requests = db.query(LessonRequest).filter(
+        LessonRequest.status == "pending"
+    ).count()
+    events_in_next_7_days = db.query(Event).filter(
+        Event.is_active == True,
+        Event.start_datetime >= now,
+        Event.start_datetime <= week_end,
+    ).count()
+    return {
+        "pending_homework_to_grade": pending_homework_to_grade,
+        "students_without_assignment_zero": students_without_assignment_zero,
+        "open_question_reports": open_question_reports,
+        "pending_lesson_requests": pending_lesson_requests,
+        "events_in_next_7_days": events_in_next_7_days,
+    }
+
 
 def generate_password(length: int = 8) -> str:
     """Generate a random password"""
@@ -614,7 +668,9 @@ async def get_admin_stats(
     # Recent registrations (last 7 days)
     week_ago = datetime.utcnow() - timedelta(days=7)
     recent_registrations = db.query(UserInDB).filter(UserInDB.created_at >= week_ago).count()
-    
+
+    operational = _admin_operational_counts(db)
+
     return AdminStatsResponse(
         total_users=total_users,
         total_students=total_students,
@@ -622,7 +678,8 @@ async def get_admin_stats(
         total_curators=total_curators,
         total_courses=total_courses,
         total_active_enrollments=total_active_enrollments,
-        recent_registrations=recent_registrations
+        recent_registrations=recent_registrations,
+        **operational,
     )
 
 @router.get("/students/progress", response_model=List[StudentProgressSummary])
@@ -1774,7 +1831,42 @@ async def get_admin_dashboard(
     recent_registrations = db.query(UserInDB).filter(
         UserInDB.created_at >= week_ago
     ).count()
-    
+
+    operational = _admin_operational_counts(db)
+    today = datetime.utcnow().date()
+    seven_days_ago = today - timedelta(days=7)
+    thirty_days_ago = today - timedelta(days=30)
+    seven_days_ago_dt = datetime.utcnow() - timedelta(days=7)
+
+    teacher_active_last_7_days = db.query(UserInDB).filter(
+        UserInDB.role == "teacher",
+        UserInDB.last_activity_date.isnot(None),
+        UserInDB.last_activity_date >= seven_days_ago,
+    ).count()
+    teacher_active_last_30_days = db.query(UserInDB).filter(
+        UserInDB.role == "teacher",
+        UserInDB.last_activity_date.isnot(None),
+        UserInDB.last_activity_date >= thirty_days_ago,
+    ).count()
+    teachers_who_graded_last_7_days = db.query(
+        func.count(func.distinct(AssignmentSubmission.graded_by))
+    ).filter(
+        AssignmentSubmission.is_graded == True,
+        AssignmentSubmission.graded_by.isnot(None),
+        AssignmentSubmission.graded_at.isnot(None),
+        AssignmentSubmission.graded_at >= seven_days_ago_dt,
+    ).scalar() or 0
+    homework_graded_last_7_days = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.is_graded == True,
+        AssignmentSubmission.graded_at.isnot(None),
+        AssignmentSubmission.graded_at >= seven_days_ago_dt,
+    ).count()
+    avg_homework_graded_per_active_teacher_last_7_days = (
+        round(homework_graded_last_7_days / teachers_who_graded_last_7_days, 1)
+        if teachers_who_graded_last_7_days
+        else 0.0
+    )
+
     stats = AdminStatsResponse(
         total_users=total_users,
         total_students=total_students,
@@ -1782,9 +1874,15 @@ async def get_admin_dashboard(
         total_curators=total_curators,
         total_courses=total_courses,
         total_active_enrollments=total_active_enrollments,
-        recent_registrations=recent_registrations
+        recent_registrations=recent_registrations,
+        teacher_active_last_7_days=teacher_active_last_7_days,
+        teacher_active_last_30_days=teacher_active_last_30_days,
+        teachers_who_graded_last_7_days=teachers_who_graded_last_7_days,
+        homework_graded_last_7_days=homework_graded_last_7_days,
+        avg_homework_graded_per_active_teacher_last_7_days=avg_homework_graded_per_active_teacher_last_7_days,
+        **operational,
     )
-    
+
     # Recent users (last 5)
     recent_users = db.query(UserInDB).order_by(desc(UserInDB.created_at)).limit(5).all()
     recent_users_data = [UserSchema.from_orm(user) for user in recent_users]
@@ -1834,6 +1932,47 @@ async def get_admin_dashboard(
         recent_groups=recent_groups_data,
         recent_courses=recent_courses_data
     )
+
+
+@router.get("/dashboard/charts", response_model=AdminDashboardChartsResponse)
+async def get_admin_dashboard_charts(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin()),
+):
+    """Time-series for charts (last 14 days, UTC day buckets)."""
+    n = 14
+    today = datetime.utcnow().date()
+    registrations_last_14_days: List[AdminChartDayPoint] = []
+    homework_submissions_last_14_days: List[AdminChartDayPoint] = []
+
+    for i in range(n - 1, -1, -1):
+        d = today - timedelta(days=i)
+        start = datetime.combine(d, time.min)
+        end = start + timedelta(days=1)
+        registrations_last_14_days.append(
+            AdminChartDayPoint(
+                date=d.isoformat(),
+                count=db.query(UserInDB).filter(
+                    UserInDB.created_at >= start,
+                    UserInDB.created_at < end,
+                ).count(),
+            )
+        )
+        homework_submissions_last_14_days.append(
+            AdminChartDayPoint(
+                date=d.isoformat(),
+                count=db.query(AssignmentSubmission).filter(
+                    AssignmentSubmission.submitted_at >= start,
+                    AssignmentSubmission.submitted_at < end,
+                ).count(),
+            )
+        )
+
+    return AdminDashboardChartsResponse(
+        registrations_last_14_days=registrations_last_14_days,
+        homework_submissions_last_14_days=homework_submissions_last_14_days,
+    )
+
 
 # =============================================================================
 # GROUP STUDENTS MANAGEMENT ENDPOINTS
