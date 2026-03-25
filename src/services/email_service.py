@@ -18,7 +18,30 @@ logger = logging.getLogger(__name__)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "noreply@mail.mastereducation.kz")
 EMAIL_SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "MasterED Platform")
-LMS_URL = os.getenv("LMS_URL", "https://lms.mastereducation.kz/homework")
+DEFAULT_LMS_BASE_URL = "https://lms.mastereducation.kz"
+
+
+def _get_lms_base_url() -> str:
+    """Return normalized LMS base URL, resilient to empty env values."""
+    raw_url = (os.getenv("LMS_URL") or "").strip()
+    if not raw_url:
+        return DEFAULT_LMS_BASE_URL
+    return raw_url.rstrip("/")
+
+
+def _build_lms_url(path: str = "") -> str:
+    base_url = _get_lms_base_url()
+    if not path:
+        return base_url
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base_url}{path}"
+
+
+def _build_homework_url(assignment_id: Optional[int] = None) -> str:
+    if assignment_id is None:
+        return _build_lms_url("/homework")
+    return _build_lms_url(f"/homework/{assignment_id}")
 
 
 class EmailService:
@@ -161,7 +184,8 @@ def send_homework_notification(
     assignment_title: str, 
     course_name: str, 
     due_date: str,
-    action: str = "created"
+    action: str = "created",
+    assignment_id: Optional[int] = None,
 ) -> Optional[dict]:
     """
     Send notification about homework creation or update
@@ -261,7 +285,7 @@ def send_homework_notification(
           <!-- Action -->
           <div style="margin-bottom: 40px">
             <a
-              href="{LMS_URL}"
+              href="{_build_homework_url(assignment_id)}"
               style="
                 display: inline-block;
                 background-color: #2563eb;
@@ -310,7 +334,8 @@ def send_submission_graded_notification(
     course_name: str,
     score: int,
     max_score: int,
-    feedback: Optional[str] = None
+    feedback: Optional[str] = None,
+    assignment_id: Optional[int] = None,
 ) -> Optional[dict]:
     """
     Send notification when a submission is graded
@@ -410,7 +435,7 @@ def send_submission_graded_notification(
           <!-- Action -->
           <div style="margin-bottom: 40px">
             <a
-              href="{LMS_URL}"
+              href="{_build_homework_url(assignment_id)}"
               style="
                 display: inline-block;
                 background-color: #2563eb;
@@ -584,7 +609,7 @@ def send_lesson_reminder_notification(
           <!-- Action -->
           <div style="margin-bottom: 40px">
             <a
-              href="{LMS_URL.replace('/homework', '')}"
+              href="{_build_lms_url()}"
               style="
                 display: inline-block;
                 background-color: #2563eb;

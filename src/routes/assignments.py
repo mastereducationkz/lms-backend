@@ -498,7 +498,8 @@ async def create_assignment(
                 assignment_data.title,
                 course_title,
                 due_str,
-                action="created"
+                action="created",
+                assignment_id=created_assignments[0].id,
             )
             
     except Exception as e:
@@ -668,7 +669,8 @@ async def update_assignment(
                 assignment.title,
                 course_title,
                 due_str,
-                action="updated"
+                action="updated",
+                assignment_id=assignment.id,
             )
             
     except Exception as e:
@@ -1350,7 +1352,8 @@ async def grade_submission(
                 course_name=course_name,
                 score=grade_data.score,
                 max_score=assignment.max_score,
-                feedback=grade_data.feedback
+                feedback=grade_data.feedback,
+                assignment_id=assignment.id,
             )
     except Exception as e:
         print(f"Failed to send grading email notification: {e}")
