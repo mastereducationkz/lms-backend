@@ -46,6 +46,33 @@ def _set_planned_dates_from_targets(submission: AssignmentZeroSubmission) -> Non
         except ValueError:
             submission.ielts_planned_test_date = None
 
+
+def _curator_can_access_student(db: Session, *, curator_id: int, student_id: int) -> bool:
+    """Return True if student belongs to an active group curated by curator_id."""
+    count = (
+        db.query(GroupStudent)
+        .join(Group, Group.id == GroupStudent.group_id)
+        .filter(
+            GroupStudent.student_id == student_id,
+            Group.curator_id == curator_id,
+            Group.is_active == True,
+        )
+        .count()
+    )
+    return count > 0
+
+
+def _is_ielts_group_name(group_name: str | None) -> bool:
+    normalized = (group_name or "").lower()
+    return ("ielts" in normalized) or ("iealts" in normalized)
+
+
+class CuratorUpcomingExamRow(AssignmentZeroSubmissionSchema):
+    exam_type: str
+    planned_test_date: str | None = None
+    ask_result_on: str | None = None
+    status: str  # pending | overdue | completed
+
 # =============================================================================
 # ASSIGNMENT ZERO ENDPOINTS
 # =============================================================================
@@ -629,4 +656,163 @@ async def get_submission_by_user(
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     
+    return AssignmentZeroSubmissionSchema.model_validate(submission)
+
+
+@router.get("/curator/upcoming", response_model=list[CuratorUpcomingExamRow])
+async def get_curator_upcoming_exam_results(
+    days: int = 7,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Curator view: upcoming/overdue exam-result collection rows for their students."""
+    if current_user.role not in ["curator", "head_curator", "admin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if days < 1 or days > 60:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 60")
+
+    now = datetime.utcnow().date()
+    horizon = now + timedelta(days=days)
+
+    # Gather students for this curator + their active group names (for accurate SAT/IELTS detection)
+    student_groups_q = (
+        db.query(GroupStudent.student_id, Group.name)
+        .join(Group, Group.id == GroupStudent.group_id)
+        .filter(Group.is_active == True)
+    )
+    if current_user.role == "curator":
+        student_groups_q = student_groups_q.filter(Group.curator_id == current_user.id)
+
+    student_groups_raw = student_groups_q.all()
+    student_ids = sorted({r[0] for r in student_groups_raw})
+    if not student_ids:
+        return []
+
+    group_names_by_student: dict[int, list[str]] = {}
+    for student_id, group_name in student_groups_raw:
+        group_names_by_student.setdefault(student_id, []).append(group_name or "")
+
+    submissions = (
+        db.query(AssignmentZeroSubmission)
+        .filter(AssignmentZeroSubmission.user_id.in_(student_ids))
+        .all()
+    )
+
+    rows: list[CuratorUpcomingExamRow] = []
+    for s in submissions:
+        group_names = group_names_by_student.get(s.user_id, [])
+        normalized_group_names = [name.lower() for name in group_names if name]
+        is_sat_student = any("sat" in name for name in normalized_group_names)
+        is_ielts_student = any(("ielts" in name) or ("iealts" in name) for name in normalized_group_names)
+        is_ielts_only = is_ielts_student and not is_sat_student
+
+        preferred_group_name = next((name for name in group_names if name), None) or s.group_name
+
+        # SAT row
+        sat_planned = s.sat_planned_test_date
+        if sat_planned and not is_ielts_only:
+            ask = sat_planned + timedelta(days=13)
+            sat_completed = bool(s.sat_result_score and s.sat_result_test_date)
+            sat_status = "completed" if sat_completed else ("overdue" if ask < now else "pending")
+            if sat_status != "completed" and ask > horizon:
+                pass
+            else:
+                rows.append(CuratorUpcomingExamRow(
+                    **{
+                        **AssignmentZeroSubmissionSchema.model_validate(s).model_dump(),
+                        "group_name": preferred_group_name or "",
+                    },
+                    exam_type="sat",
+                    planned_test_date=sat_planned.isoformat(),
+                    ask_result_on=ask.isoformat(),
+                    status=sat_status,
+                ))
+
+        # IELTS row
+        if s.ielts_planned_test_date:
+            ask = s.ielts_planned_test_date + timedelta(days=13)
+            i_completed = bool(s.ielts_result_score and s.ielts_result_test_date)
+            i_status = "completed" if i_completed else ("overdue" if ask < now else "pending")
+            if i_status != "completed" and ask > horizon:
+                continue
+            rows.append(CuratorUpcomingExamRow(
+                **{
+                    **AssignmentZeroSubmissionSchema.model_validate(s).model_dump(),
+                    "group_name": preferred_group_name or "",
+                },
+                exam_type="ielts",
+                planned_test_date=s.ielts_planned_test_date.isoformat(),
+                ask_result_on=ask.isoformat(),
+                status=i_status,
+            ))
+
+    return sorted(rows, key=lambda r: (r.ask_result_on or "9999-12-31", r.full_name))
+
+
+@router.patch("/curator/planned-date", response_model=AssignmentZeroSubmissionSchema)
+async def curator_update_planned_exam_date(
+    user_id: int,
+    data: AssignmentZeroPlannedDateUpdateSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ["curator", "head_curator", "admin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and not _curator_can_access_student(db, curator_id=current_user.id, student_id=user_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    submission = db.query(AssignmentZeroSubmission).filter(AssignmentZeroSubmission.user_id == user_id).first()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Assignment Zero submission not found")
+
+    exam_type = _normalize_exam_type(data.exam_type)
+    if exam_type == "sat":
+        submission.sat_planned_test_date = data.planned_test_date
+        submission.sat_target_date = format_sat_label(data.planned_test_date)
+        # Clear result if rescheduled
+        submission.sat_result_score = None
+        submission.sat_result_test_date = None
+    else:
+        submission.ielts_planned_test_date = data.planned_test_date
+        submission.ielts_target_date = data.planned_test_date.isoformat()
+        submission.ielts_result_score = None
+        submission.ielts_result_test_date = None
+
+    submission.updated_at = _utc_now()
+    db.commit()
+    db.refresh(submission)
+    return AssignmentZeroSubmissionSchema.model_validate(submission)
+
+
+@router.patch("/curator/exam-result", response_model=AssignmentZeroSubmissionSchema)
+async def curator_update_exam_result(
+    user_id: int,
+    data: AssignmentZeroExamResultUpdateSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ["curator", "head_curator", "admin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and not _curator_can_access_student(db, curator_id=current_user.id, student_id=user_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    submission = db.query(AssignmentZeroSubmission).filter(AssignmentZeroSubmission.user_id == user_id).first()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Assignment Zero submission not found")
+
+    exam_type = _normalize_exam_type(data.exam_type)
+    result_score = data.result_score.strip()
+    if result_score == "":
+        raise HTTPException(status_code=400, detail="result_score cannot be empty")
+
+    if exam_type == "sat":
+        submission.sat_result_score = result_score
+        submission.sat_result_test_date = data.result_test_date
+    else:
+        submission.ielts_result_score = result_score
+        submission.ielts_result_test_date = data.result_test_date
+
+    submission.updated_at = _utc_now()
+    db.commit()
+    db.refresh(submission)
     return AssignmentZeroSubmissionSchema.model_validate(submission)

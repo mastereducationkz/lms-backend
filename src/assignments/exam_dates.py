@@ -52,14 +52,24 @@ def resolve_legacy_sat_month(value: str, reference_date: Optional[date] = None) 
         return get_nearest_sat_date(reference_date)
 
     candidates = [d for d in SAT_OFFICIAL_TEST_DATES if d.month == month]
-    if not candidates:
-        return get_nearest_sat_date(reference_date)
-
     reference = reference_date or date.today()
+    if not candidates:
+        # If we don't know official dates for this month, interpret a bare month
+        # as this year's month (use 1st day as a safe placeholder).
+        return date(reference.year, month, 1)
+
     future_candidates = [d for d in candidates if d >= reference]
     if future_candidates:
         return min(future_candidates)
-    return max(candidates)
+    # Only past candidates exist (e.g. "October" while our official list only includes last year).
+    same_year_candidates = [d for d in candidates if d.year == reference.year]
+    if same_year_candidates:
+        # Keep the official date in the intended year, even if already in the past.
+        return max(same_year_candidates)
+
+    # Otherwise, we don't have an official date for this month in the intended year.
+    # Treat bare month as this year's month start (a safe placeholder in the right year).
+    return date(reference.year, month, 1)
 
 
 def parse_sat_target_date(value: Optional[str], reference_date: Optional[date] = None) -> Optional[date]:

@@ -42,11 +42,9 @@ def parse_args() -> ArgumentParser:
 
 
 def is_incomplete_sat(row: AssignmentZeroSubmission) -> bool:
-    return (
-        row.sat_planned_test_date is None
-        or row.sat_result_score is None
-        or row.sat_result_test_date is None
-    )
+    # "Incomplete" here means we don't know WHEN the SAT is planned,
+    # not that the result is missing (results are naturally missing before the exam).
+    return row.sat_planned_test_date is None
 
 
 def is_ielts_only_group(row: AssignmentZeroSubmission) -> bool:
@@ -76,7 +74,7 @@ def main() -> None:
         for row in rows:
             if is_ielts_only_group(row):
                 continue
-            if is_incomplete_sat(row) or is_overdue_without_result(row, today):
+        if is_incomplete_sat(row) or is_overdue_without_result(row, today):
                 if row.sat_planned_test_date != target_date:
                     to_update.append(row)
 
