@@ -845,6 +845,7 @@ async def generate_weekly_tasks(
         return None
 
     created_count = 0
+    skipped_exam_templates = 0
     monday_date = monday.date() if hasattr(monday, 'date') else monday
 
     for group in groups:
@@ -853,6 +854,9 @@ async def generate_weekly_tasks(
 
         # Clean up stale pending tasks whose templates no longer apply for this week's program_week
         for tmpl in templates:
+            if tmpl.task_type == "exam_results_collection":
+                skipped_exam_templates += 1
+                continue
             should_skip = False
             if prog_week is not None:
                 if tmpl.applicable_from_week and prog_week < tmpl.applicable_from_week:
@@ -871,6 +875,9 @@ async def generate_weekly_tasks(
                 ).delete(synchronize_session=False)
 
         for tmpl in templates:
+            if tmpl.task_type == "exam_results_collection":
+                skipped_exam_templates += 1
+                continue
             # Skip if template not applicable for this program week
             if prog_week is not None:
                 if tmpl.applicable_from_week and prog_week < tmpl.applicable_from_week:
@@ -928,6 +935,10 @@ async def generate_weekly_tasks(
                     created_count += 1
 
     db.commit()
+
+    logger.info(
+        f"[GENERATE_WEEKLY] week={week} group_id={group_id} groups={len(groups)} created={created_count} skipped_exam_templates={skipped_exam_templates}"
+    )
 
     phase_label = ""
     if groups:
