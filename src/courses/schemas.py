@@ -17,6 +17,7 @@ class GroupSchema(BaseModel):
     created_at: datetime
     is_active: bool
     is_special: bool = False
+    is_over: bool = False
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None

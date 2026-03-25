@@ -14,6 +14,7 @@ from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_role
 from src.schemas.models import GroupStudent
 from src.services.attendance_service import AttendanceService
+from src.services.group_completion_service import sync_groups_over_status
 
 router = APIRouter()
 
@@ -1374,6 +1375,8 @@ async def get_curator_homework_by_group(
     """
     if current_user.role not in ["curator", "head_curator"]:
         raise HTTPException(status_code=403, detail="Only curators and head curators can access this endpoint")
+
+    sync_groups_over_status(db)
     
     from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group
     
@@ -1381,9 +1384,12 @@ async def get_curator_homework_by_group(
     if current_user.role == "head_curator":
         # Head curator sees all groups that have a curator or all active groups? 
         # Usually they oversee everything.
-        curator_groups_query = db.query(Group)
+        curator_groups_query = db.query(Group).filter(Group.is_over == False)
     else:
-        curator_groups_query = db.query(Group).filter(Group.curator_id == current_user.id)
+        curator_groups_query = db.query(Group).filter(
+            Group.curator_id == current_user.id,
+            Group.is_over == False
+        )
         
     if group_id:
         curator_groups_query = curator_groups_query.filter(Group.id == group_id)

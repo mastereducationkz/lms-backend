@@ -16,6 +16,7 @@ class Group(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
     is_special = Column(Boolean, default=False, nullable=False)
+    is_over = Column(Boolean, default=False, nullable=False)
     schedule_config = Column(JSONB, nullable=True)
 
     teacher = relationship("UserInDB", foreign_keys=[teacher_id], post_update=True)

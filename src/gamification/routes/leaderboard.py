@@ -141,6 +141,7 @@ async def get_curator_groups(
             created_at=group.created_at,
             is_active=group.is_active,
             is_special=group.is_special,
+            is_over=group.is_over,
             current_week=current_week,
             max_week=max_week
         ))

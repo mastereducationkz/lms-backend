@@ -14,6 +14,7 @@ from src.schemas.models import (
 )
 from src.utils.auth_utils import hash_password
 from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin
+from src.services.group_completion_service import sync_groups_over_status
 import secrets
 import string
 import logging
@@ -107,6 +108,7 @@ class CreateGroupRequest(BaseModel):
     course_id: Optional[int] = None  # Курс, к которому привязана группа
     is_active: bool = True
     is_special: bool = False
+    is_over: bool = False
 
 class UpdateGroupRequest(BaseModel):
     name: Optional[str] = None
@@ -116,6 +118,7 @@ class UpdateGroupRequest(BaseModel):
     course_id: Optional[int] = None  # Курс, к которому привязана группа
     is_active: Optional[bool] = None
     is_special: Optional[bool] = None
+    is_over: Optional[bool] = None
     student_ids: Optional[List[int]] = None  # Update student list
 
 class AssignTeacherRequest(BaseModel):
@@ -731,6 +734,7 @@ async def get_all_groups(
     current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
 ):
     """Get all groups (teachers, head curators and admins)"""
+    sync_groups_over_status(db)
     query = db.query(Group)
     
     # Teachers can only see their own groups, admins and head curators can see all
@@ -790,6 +794,7 @@ async def get_all_groups(
             created_at=group.created_at,
             is_active=group.is_active,
             is_special=group.is_special,
+            is_over=group.is_over,
             schedule_config=group.schedule_config
         )
         
@@ -844,7 +849,8 @@ async def create_group(
         teacher_id=group_data.teacher_id,
         curator_id=group_data.curator_id,
         is_active=group_data.is_active,
-        is_special=group_data.is_special
+        is_special=group_data.is_special,
+        is_over=group_data.is_over
     )
     
     db.add(new_group)
@@ -876,6 +882,7 @@ async def create_group(
         created_at=new_group.created_at,
         is_active=new_group.is_active,
         is_special=new_group.is_special,
+        is_over=new_group.is_over,
         schedule_config=new_group.schedule_config
     )
     
@@ -943,6 +950,8 @@ async def update_group(
         group.is_active = group_data.is_active
     if group_data.is_special is not None:
         group.is_special = group_data.is_special
+    if group_data.is_over is not None:
+        group.is_over = group_data.is_over
     
     # Update course access if provided
     if group_data.course_id is not None:
@@ -1019,6 +1028,7 @@ async def update_group(
         created_at=group.created_at,
         is_active=group.is_active,
         is_special=group.is_special,
+        is_over=group.is_over,
         schedule_config=group.schedule_config
     )
     

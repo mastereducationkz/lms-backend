@@ -74,6 +74,7 @@ async def get_my_groups(
                 curator_id=group.curator_id,
                 is_active=group.is_active,
                 is_special=group.is_special,
+                is_over=group.is_over,
                 student_count=0, # Not needed
                 students=[],
                 created_at=group.created_at
@@ -99,6 +100,7 @@ async def get_my_groups(
                 curator_id=g.curator_id,
                 is_active=g.is_active,
                 is_special=g.is_special,
+                is_over=g.is_over,
                 students=[],
                 student_count=0,
                 created_at=g.created_at
