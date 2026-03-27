@@ -24,6 +24,23 @@ router = APIRouter()
 UPLOAD_DIR = "uploads/assignment_zero"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+_ALLOWED_IMAGE_MIMES = frozenset(
+    {"image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"}
+)
+
+
+def _sniff_image_mime(contents: bytes) -> str | None:
+    """Detect image MIME from magic bytes when the client sends wrong or empty Content-Type."""
+    if len(contents) >= 3 and contents[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(contents) >= 8 and contents[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(contents) >= 6 and contents[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(contents) >= 12 and contents[:4] == b"RIFF" and contents[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -589,16 +606,17 @@ async def upload_screenshot(
     """Upload screenshot for Assignment Zero"""
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can upload screenshots")
-    
-    # Validate file type
-    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Only image files are allowed (JPEG, PNG, GIF, WEBP)")
-    
-    # Validate file size (max 10MB)
+
     contents = await file.read()
     if len(contents) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File size must be less than 10MB")
+
+    ct = (file.content_type or "").strip().lower()
+    if ct == "image/jpg":
+        ct = "image/jpeg"
+    sniffed = _sniff_image_mime(contents)
+    if ct not in _ALLOWED_IMAGE_MIMES and sniffed not in _ALLOWED_IMAGE_MIMES:
+        raise HTTPException(status_code=400, detail="Only image files are allowed (JPEG, PNG, GIF, WEBP)")
     
     # Generate unique filename
     file_ext = os.path.splitext(file.filename)[1] if file.filename else ".png"
