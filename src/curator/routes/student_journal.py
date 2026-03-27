@@ -246,6 +246,7 @@ async def get_student_profile(
             "telegram_id": az.telegram_id,
             "email": az.email,
             "college_board_email": az.college_board_email,
+            "college_board_password": az.college_board_password,
             "birthday_date": az.birthday_date.isoformat() if az.birthday_date else None,
             "city": az.city,
             "school_type": az.school_type,
