@@ -1,6 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 
 class CuratorTaskTemplateSchema(BaseModel):
@@ -65,3 +65,16 @@ class CuratorTaskInstanceUpdateSchema(BaseModel):
     status: Optional[str] = None
     result_text: Optional[str] = None
     screenshot_url: Optional[str] = None
+
+
+class CuratorTaskBulkCreateSchema(BaseModel):
+    """Create the same task for many curator × group combinations (cartesian product)."""
+
+    template_id: int
+    curator_ids: List[int] = Field(..., min_length=1)
+    group_ids: Optional[List[int]] = None
+    student_id: Optional[int] = None
+    due_date: Optional[datetime] = None
+    week: Optional[str] = None
+    program_week: Optional[int] = None
+    custom_title: Optional[str] = None

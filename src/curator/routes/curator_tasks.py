@@ -7,11 +7,12 @@ Endpoints:
   - Admin: CRUD task templates, manually create task instances
 """
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, and_, or_, desc
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pydantic import BaseModel
 
 from src.config import get_db
@@ -20,6 +21,7 @@ from src.schemas.models import (
     CuratorTaskTemplate, CuratorTaskInstance,
     CuratorTaskTemplateSchema, CuratorTaskTemplateCreateSchema,
     CuratorTaskInstanceSchema, CuratorTaskInstanceUpdateSchema,
+    CuratorTaskBulkCreateSchema,
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_role
@@ -102,6 +104,31 @@ def _calc_total_weeks(group: Group) -> Optional[int]:
         return cfg.get("weeks_count")
     except Exception:
         return None
+
+
+def _monday_of_iso_week(week_ref: str) -> Optional[date]:
+    m = re.fullmatch(r"(\d{4})-W(\d{2})", (week_ref or "").strip())
+    if not m:
+        return None
+    y, w = int(m.group(1)), int(m.group(2))
+    try:
+        return date.fromisocalendar(y, w, 1)
+    except ValueError:
+        return None
+
+
+def _program_week_for_iso_week(iso_week_str: str, start_date_str: str) -> Optional[int]:
+    monday = _monday_of_iso_week(iso_week_str)
+    if not monday:
+        return None
+    try:
+        start = date.fromisoformat(start_date_str)
+    except ValueError:
+        return None
+    delta_days = (monday - start).days
+    if delta_days < 0:
+        return None
+    return delta_days // 7 + 1
 
 
 # ============================================================================
@@ -537,6 +564,81 @@ async def create_task_instance(
         .first()
     )
     return _instance_to_schema(inst)
+
+
+@router.post("/create-instances-bulk", summary="Create task instances for multiple curators and/or groups")
+async def create_task_instances_bulk(
+    data: CuratorTaskBulkCreateSchema,
+    current_user: UserInDB = Depends(require_role(["admin", "head_curator"])),
+    db: Session = Depends(get_db),
+):
+    """
+    Cartesian product of curator_ids × group_ids.
+    If group_ids is omitted or empty, creates one row per curator with group_id=NULL.
+    student_id is allowed only with exactly one curator and one group.
+    """
+    template = db.query(CuratorTaskTemplate).filter(CuratorTaskTemplate.id == data.template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    curator_ids = list(dict.fromkeys(data.curator_ids))
+    group_ids_unique: List[Optional[int]]
+    if data.group_ids:
+        group_ids_unique = list(dict.fromkeys(data.group_ids))
+    else:
+        group_ids_unique = [None]
+
+    if data.student_id is not None:
+        if len(curator_ids) != 1 or len(group_ids_unique) != 1 or group_ids_unique[0] is None:
+            raise HTTPException(
+                status_code=400,
+                detail="student_id requires exactly one curator and exactly one group",
+            )
+
+    for cid in curator_ids:
+        cur = db.query(UserInDB).filter(UserInDB.id == cid, UserInDB.role.in_(["curator", "head_curator"])).first()
+        if not cur:
+            raise HTTPException(status_code=400, detail=f"Curator not found: {cid}")
+
+    groups_by_id: dict[int, Group] = {}
+    for gid in group_ids_unique:
+        if gid is None:
+            continue
+        g = db.query(Group).filter(Group.id == gid).first()
+        if not g:
+            raise HTTPException(status_code=404, detail=f"Group not found: {gid}")
+        groups_by_id[gid] = g
+
+    created_ids: List[int] = []
+    for cid in curator_ids:
+        for gid in group_ids_unique:
+            pw: Optional[int] = None
+            if gid is not None:
+                g = groups_by_id[gid]
+                cfg = g.schedule_config or {}
+                start = cfg.get("start_date")
+                if data.week and start:
+                    pw = _program_week_for_iso_week(data.week, start)
+            else:
+                pw = data.program_week
+
+            inst = CuratorTaskInstance(
+                template_id=data.template_id,
+                curator_id=cid,
+                student_id=data.student_id,
+                group_id=gid,
+                due_date=data.due_date,
+                week_reference=data.week,
+                program_week=pw,
+                custom_title=data.custom_title,
+                status="pending",
+            )
+            db.add(inst)
+            db.flush()
+            created_ids.append(inst.id)
+
+    db.commit()
+    return {"created": len(created_ids), "task_ids": created_ids}
 
 
 # ============================================================================
