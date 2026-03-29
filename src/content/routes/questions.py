@@ -285,6 +285,32 @@ async def get_error_report_detail(
                 "lesson_title": step.lesson.title,
             }
     
+    sibling_reports = []
+    if report.step_id is not None:
+        others = (
+            db.query(QuestionErrorReport)
+            .options(joinedload(QuestionErrorReport.user))
+            .filter(
+                QuestionErrorReport.step_id == report.step_id,
+                QuestionErrorReport.question_id == report.question_id,
+                QuestionErrorReport.id != report.id,
+            )
+            .order_by(QuestionErrorReport.created_at.desc())
+            .all()
+        )
+        sibling_reports = [
+            {
+                "id": o.id,
+                "message": o.message,
+                "suggested_answer": o.suggested_answer,
+                "status": o.status,
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+                "user_name": o.user.name if o.user else "Unknown",
+                "user_email": o.user.email if o.user else None,
+            }
+            for o in others
+        ]
+
     return {
         "report": {
             "id": report.id,
@@ -295,6 +321,7 @@ async def get_error_report_detail(
             "created_at": report.created_at.isoformat() if report.created_at else None,
             "resolved_at": report.resolved_at.isoformat() if report.resolved_at else None,
         },
+        "sibling_reports": sibling_reports,
         "user": {
             "id": report.user.id,
             "name": report.user.name,
@@ -323,11 +350,14 @@ async def get_error_report_detail(
 async def update_error_report(
     report_id: int,
     status: str,
+    sync_same_question: bool = True,
     current_user: UserInDB = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Update the status of an error report (admin only).
+    When sync_same_question is True (default), applies the same status to all reports
+    for the same quiz step and question_id so duplicates are handled once.
     """
     if current_user.role not in ["admin", "teacher"]:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -336,15 +366,38 @@ async def update_error_report(
     
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    
-    report.status = status
-    if status == "resolved":
-        report.resolved_at = datetime.utcnow()
-        report.resolved_by = current_user.id
-    
+
+    if sync_same_question and report.step_id is not None:
+        reports_to_update = (
+            db.query(QuestionErrorReport)
+            .filter(
+                QuestionErrorReport.step_id == report.step_id,
+                QuestionErrorReport.question_id == report.question_id,
+            )
+            .all()
+        )
+    else:
+        reports_to_update = [report]
+
+    updated_ids: list[int] = []
+    for r in reports_to_update:
+        r.status = status
+        if status == "resolved":
+            r.resolved_at = datetime.utcnow()
+            r.resolved_by = current_user.id
+        else:
+            r.resolved_at = None
+            r.resolved_by = None
+        updated_ids.append(r.id)
+
     db.commit()
-    
-    return {"success": True, "message": "Report updated successfully"}
+
+    return {
+        "success": True,
+        "message": "Report updated successfully",
+        "updated_report_ids": updated_ids,
+        "synced_count": len(updated_ids),
+    }
 
 
 @router.put("/update-question/{step_id}/{question_id}")
