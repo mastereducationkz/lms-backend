@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, and_, or_
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, timezone
+import math
 import json
 
 from src.config import get_db
@@ -16,6 +17,38 @@ from src.schemas.models import GroupStudent
 from src.services.group_completion_service import sync_groups_over_status
 
 router = APIRouter()
+
+
+def _compute_group_program_end(group) -> Optional[date]:
+    """Best-effort finish date from group.schedule_config."""
+    cfg = group.schedule_config or {}
+    start_raw = cfg.get("start_date")
+    if not start_raw:
+        return None
+    try:
+        start = date.fromisoformat(start_raw)
+    except Exception:
+        return None
+
+    end_raw = cfg.get("end_date")
+    if end_raw:
+        try:
+            return date.fromisoformat(end_raw)
+        except Exception:
+            pass
+
+    weeks_count = cfg.get("weeks_count")
+    if isinstance(weeks_count, int) and weeks_count > 0:
+        return start + timedelta(days=(weeks_count * 7) - 1)
+
+    lessons_count = cfg.get("lessons_count")
+    items = cfg.get("schedule_items", []) if isinstance(cfg.get("schedule_items"), list) else []
+    lessons_per_week = len(items)
+    if isinstance(lessons_count, int) and lessons_count > 0 and lessons_per_week > 0:
+        weeks = math.ceil(lessons_count / lessons_per_week)
+        return start + timedelta(days=(weeks * 7) - 1)
+
+    return None
 
 @router.get("/stats", response_model=DashboardStatsSchema)
 async def get_dashboard_stats(
@@ -2410,6 +2443,123 @@ async def get_teacher_recent_submissions(
         })
     
     return {"recent_submissions": submissions_data}
+
+
+@router.get("/teacher/salary-breakdown")
+async def get_teacher_salary_breakdown(
+    period_start: str = Query(..., description="Start date YYYY-MM-DD"),
+    period_end: str = Query(..., description="End date YYYY-MM-DD"),
+    lesson_rate: int = Query(4000, ge=0, le=1_000_000),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Build per-group lesson payroll breakdown and formatted message for Telegram."""
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
+
+    try:
+        start_d = date.fromisoformat(period_start)
+        end_d = date.fromisoformat(period_end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="period_start and period_end must be YYYY-MM-DD")
+
+    if start_d > end_d:
+        raise HTTPException(status_code=400, detail="period_start must be before or equal to period_end")
+
+    from src.schemas.models import Event, EventGroup, Group
+
+    start_dt = datetime.combine(start_d, datetime.min.time())
+    end_dt = datetime.combine(end_d, datetime.max.time())
+
+    event_rows = (
+        db.query(Event, Group)
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .join(Group, Group.id == EventGroup.group_id)
+        .filter(
+            Event.event_type == "class",
+            Event.is_active == True,
+            Event.start_datetime >= start_dt,
+            Event.start_datetime <= end_dt,
+            or_(
+                Event.teacher_id == current_user.id,
+                and_(Event.teacher_id.is_(None), Group.teacher_id == current_user.id),
+            ),
+        )
+        .all()
+    )
+
+    by_group: dict[int, dict] = {}
+    for event, group in event_rows:
+        if group.id not in by_group:
+            cfg = group.schedule_config or {}
+            start_label = cfg.get("start_date") if isinstance(cfg.get("start_date"), str) else None
+            finish_d = _compute_group_program_end(group)
+            by_group[group.id] = {
+                "group_id": group.id,
+                "group_name": group.name,
+                "program_start": start_label,
+                "program_end": finish_d.isoformat() if finish_d else None,
+                "lesson_dates": [],
+            }
+        by_group[group.id]["lesson_dates"].append(event.start_datetime.date())
+
+    groups = []
+    total_amount = 0
+    total_lessons = 0
+
+    for _, item in sorted(by_group.items(), key=lambda x: x[1]["group_name"].lower()):
+        dates = sorted(item["lesson_dates"])
+        lesson_count = len(dates)
+        amount = lesson_count * lesson_rate
+        total_lessons += lesson_count
+        total_amount += amount
+        groups.append({
+            "group_id": item["group_id"],
+            "group_name": item["group_name"],
+            "program_start": item["program_start"],
+            "program_end": item["program_end"],
+            "lesson_dates": [d.isoformat() for d in dates],
+            "lesson_count": lesson_count,
+            "amount_tenge": amount,
+        })
+
+    lines = ["Здравствуйте!", f"Зарплата на {end_d.strftime('%d.%m.%Y')}:", ""]
+    for idx, g in enumerate(groups, start=1):
+        dates_text = "; ".join(datetime.fromisoformat(d).strftime("%d.%m") for d in g["lesson_dates"])
+        start_text = datetime.fromisoformat(g["program_start"]).strftime("%d.%m.%y") if g["program_start"] else "—"
+        end_text = datetime.fromisoformat(g["program_end"]).strftime("%d.%m.%y") if g["program_end"] else "—"
+        lines.extend([
+            f"{idx}. {g['group_name']} — {g['lesson_count']} уроков",
+            f"{g['amount_tenge']} тг",
+            f"({dates_text})" if dates_text else "(—)",
+            f"старт {start_text} — финиш {end_text}",
+            "",
+        ])
+
+    total_expr = "+".join(str(g["amount_tenge"]) for g in groups) if groups else "0"
+    lines.extend([
+        f"Итого: {total_expr}={total_amount} тг",
+        "",
+        "Для отправки:",
+        "Telegram: @gauhar107",
+        "Телефон: +7 705 893 00 24",
+    ])
+
+    return {
+        "teacher_id": current_user.id,
+        "teacher_name": current_user.name,
+        "period_start": start_d.isoformat(),
+        "period_end": end_d.isoformat(),
+        "lesson_rate": lesson_rate,
+        "groups": groups,
+        "total_lessons": total_lessons,
+        "total_amount_tenge": total_amount,
+        "message_text": "\n".join(lines),
+        "contacts": {
+            "telegram": "@gauhar107",
+            "phone": "+7 705 893 00 24",
+        },
+    }
 
 @router.get("/teacher/students-progress")
 async def get_teacher_students_progress(
