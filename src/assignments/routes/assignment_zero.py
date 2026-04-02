@@ -45,6 +45,17 @@ def _sniff_image_mime(contents: bytes) -> str | None:
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+def _align_datetime_kind(reference: datetime, value: datetime) -> datetime:
+    """
+    Align datetime awareness (naive vs aware) to match reference datetime.
+    Prevents TypeError when DB stores naive timestamps.
+    """
+    if reference.tzinfo is None and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    if reference.tzinfo is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
 
 def _normalize_exam_type(exam_type: str) -> str:
     normalized = exam_type.strip().lower()
@@ -565,7 +576,7 @@ async def get_ielts_date_prompt_status(
     if last_prompted is None:
         return {"is_ielts_student": True, "should_prompt": True, "days_until_next_prompt": 0}
 
-    now = _utc_now()
+    now = _align_datetime_kind(last_prompted, _utc_now())
     next_prompt_at = last_prompted + timedelta(days=14)
     should_prompt = now >= next_prompt_at
     remaining_days = max((next_prompt_at.date() - now.date()).days, 0)
