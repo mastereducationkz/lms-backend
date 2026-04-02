@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, and_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, date, timezone
 
@@ -134,76 +135,83 @@ def update_student_progress(user_id: int, course_id: int, db: Session):
 
 def create_progress_snapshot(user_id: int, course_id: int, db: Session):
     """
-    Создать снимок прогресса студента
+    Создать или обновить снимок прогресса за сегодня (user + course + день).
+    Использует upsert, чтобы не падать при гонке двух запросов и обновлять метрики при повторных визитах.
     """
     today = date.today()
-    
-    # Проверяем, есть ли уже снимок на сегодня
-    existing_snapshot = db.query(ProgressSnapshot).filter(
-        ProgressSnapshot.user_id == user_id,
-        ProgressSnapshot.course_id == course_id,
-        ProgressSnapshot.snapshot_date == today
-    ).first()
-    
-    if existing_snapshot:
-        return existing_snapshot
-    
-    # Получаем актуальный прогресс (общий по курсу)
+
     student_progress = db.query(StudentProgress).filter(
         StudentProgress.user_id == user_id,
         StudentProgress.course_id == course_id,
         StudentProgress.lesson_id.is_(None),
         StudentProgress.assignment_id.is_(None)
     ).first()
-    
+
     if not student_progress:
         return None
-    
-    # Получаем дополнительную статистику для снимка
+
     total_steps = db.query(func.count(Step.id)).join(Lesson).join(Module).filter(
         Module.course_id == course_id
     ).scalar() or 0
-    
+
     completed_steps = db.query(func.count(StepProgress.id)).join(Step).join(Lesson).join(Module).filter(
         Module.course_id == course_id,
         StepProgress.user_id == user_id,
         StepProgress.status == 'completed'
     ).scalar() or 0
-    
-    # Получаем статистику заданий
+
     total_assignments = db.query(func.count(Assignment.id)).join(Lesson).join(Module).filter(
         Module.course_id == course_id
     ).scalar() or 0
-    
+
     completed_assignments = db.query(func.count(AssignmentSubmission.id)).join(Assignment).join(Lesson).join(Module).filter(
         Module.course_id == course_id,
         AssignmentSubmission.user_id == user_id,
         AssignmentSubmission.is_graded == True
     ).scalar() or 0
-    
+
     avg_assignment_score = db.query(func.avg(AssignmentSubmission.score)).join(Assignment).join(Lesson).join(Module).filter(
         Module.course_id == course_id,
         AssignmentSubmission.user_id == user_id,
         AssignmentSubmission.is_graded == True
     ).scalar() or 0
-    
-    # Создаем снимок
-    snapshot = ProgressSnapshot(
+
+    assignment_pct = float(avg_assignment_score) if avg_assignment_score else 0.0
+    completion_pct = float(student_progress.completion_percentage)
+
+    stmt = pg_insert(ProgressSnapshot).values(
         user_id=user_id,
         course_id=course_id,
         snapshot_date=today,
         completed_steps=completed_steps,
         total_steps=total_steps,
-        completion_percentage=float(student_progress.completion_percentage),
+        completion_percentage=completion_pct,
         total_time_spent_minutes=student_progress.time_spent_minutes,
         assignments_completed=completed_assignments,
         total_assignments=total_assignments,
-        assignment_score_percentage=float(avg_assignment_score) if avg_assignment_score else 0.0
+        assignment_score_percentage=assignment_pct,
+        created_at=datetime.now(timezone.utc),
     )
-    
-    db.add(snapshot)
+    stmt = stmt.on_conflict_do_update(
+        constraint='uq_progress_snapshot',
+        set_={
+            'completed_steps': stmt.excluded.completed_steps,
+            'total_steps': stmt.excluded.total_steps,
+            'completion_percentage': stmt.excluded.completion_percentage,
+            'total_time_spent_minutes': stmt.excluded.total_time_spent_minutes,
+            'assignments_completed': stmt.excluded.assignments_completed,
+            'total_assignments': stmt.excluded.total_assignments,
+            'assignment_score_percentage': stmt.excluded.assignment_score_percentage,
+        },
+    )
+    db.execute(stmt)
     db.commit()
-    return snapshot
+
+    return db.query(ProgressSnapshot).filter(
+        ProgressSnapshot.user_id == user_id,
+        ProgressSnapshot.course_id == course_id,
+        ProgressSnapshot.snapshot_date == today,
+    ).first()
 
 # =============================================================================
 # PROGRESS TRACKING
