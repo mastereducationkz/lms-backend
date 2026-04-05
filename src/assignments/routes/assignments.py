@@ -74,6 +74,16 @@ async def get_assignments(
             pass
     if group_id:
         query = query.filter(Assignment.group_id == group_id)
+        if current_user.role == "teacher":
+            from src.schemas.models import Group
+            g = db.query(Group).filter(Group.id == group_id).first()
+            if not g or g.teacher_id != current_user.id:
+                raise HTTPException(status_code=403, detail="Access denied to this group")
+        elif current_user.role == "curator":
+            from src.schemas.models import Group
+            g = db.query(Group).filter(Group.id == group_id).first()
+            if not g or g.curator_id != current_user.id:
+                raise HTTPException(status_code=403, detail="Access denied to this group")
     if assignment_type:
         query = query.filter(Assignment.assignment_type == assignment_type)
     if is_active is not None:
@@ -149,6 +159,10 @@ async def get_assignments(
             (Assignment.lesson_id.in_(lesson_ids)) | (Assignment.group_id.in_(teacher_group_ids))
         )
     
+    query = query.order_by(
+        Assignment.created_at.desc().nullslast(),
+        Assignment.id.desc(),
+    )
     assignments = query.options(joinedload(Assignment.event), joinedload(Assignment.group)).offset(skip).limit(limit).all()
     return [_to_enriched_schema(a) for a in assignments]
 
