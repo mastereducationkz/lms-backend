@@ -117,21 +117,24 @@ except Exception as e:
 
 try:
     from src.services.lesson_reminder_scheduler import start_lesson_reminder_scheduler
-    disable_scheduler = os.getenv('DISABLE_SCHEDULER', 'false').lower() == 'true'
-    if disable_scheduler:
-        logging.info("Lesson reminder scheduler disabled (DISABLE_SCHEDULER=true)")
+    enable_lesson_in_api = os.getenv('ENABLE_LESSON_REMINDER_IN_API', 'false').lower() == 'true'
+    if not enable_lesson_in_api:
+        logging.info(
+            "Lesson reminder scheduler not started in API (set ENABLE_LESSON_REMINDER_IN_API=true for local dev); "
+            "production uses the scheduler container"
+        )
     elif os.getenv('RESEND_API_KEY'):
         start_lesson_reminder_scheduler()
-        logging.info("Lesson reminder scheduler initialized")
+        logging.info("Lesson reminder scheduler initialized in API process")
     else:
-        logging.warning("RESEND_API_KEY not configured, skipping lesson reminder scheduler")
+        logging.warning("RESEND_API_KEY not configured, skipping lesson reminder scheduler in API")
 except Exception as e:
     logging.error(f"Failed to initialize lesson reminder scheduler: {e}")
 
 try:
     from src.curator.services import start_curator_task_scheduler
-    disable_scheduler = os.getenv('DISABLE_SCHEDULER', 'false').lower() == 'true'
-    if disable_scheduler:
+    disable_curator_scheduler = os.getenv('DISABLE_SCHEDULER', 'false').lower() == 'true'
+    if disable_curator_scheduler:
         logging.info("Curator task scheduler disabled (DISABLE_SCHEDULER=true)")
     else:
         start_curator_task_scheduler()

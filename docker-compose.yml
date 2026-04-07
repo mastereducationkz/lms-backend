@@ -37,6 +37,7 @@ services:
       - LMS_URL=${LMS_URL}
       - SENDER_NAME=${SENDER_NAME}
       - DISABLE_SCHEDULER=false
+      - ENABLE_LESSON_REMINDER_IN_API=false
       - VIRTUAL_HOST=lmsapi.mastereducation.kz
       - LETSENCRYPT_HOST=lmsapi.mastereducation.kz
       - VIRTUAL_PORT=8000
