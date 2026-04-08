@@ -688,17 +688,17 @@ async def get_course_modules(
                 # SEQUENTIAL ACCESS LOGIC: Determine if lesson is accessible
                 # If viewing for a specific student OR current user is a student
                 if current_user.role == "student" or student_id:
-                    # Weekly release: if module is locked by schedule, lesson is not accessible
-                    if unlocked_module_ids is not None and module.id not in unlocked_module_ids:
-                        lesson_dict["is_accessible"] = False
                     # Check if lesson is marked as initially unlocked by admin
-                    elif lesson.is_initially_unlocked:
+                    if lesson.is_initially_unlocked:
                         lesson_dict["is_accessible"] = True
                     # Check if explicitly unlocked by redirect, assignment, or manual
                     elif (lesson.id in unlocked_by_redirect_ids or 
                           lesson.id in unlocked_by_assignment_ids or
                           lesson.id in manually_unlocked_lesson_ids):
                         lesson_dict["is_accessible"] = True
+                    # Weekly release: if module is locked by schedule, lesson is not accessible
+                    elif unlocked_module_ids is not None and module.id not in unlocked_module_ids:
+                        lesson_dict["is_accessible"] = False
                     # First lesson is always accessible
                     elif lesson_idx == 0:
                         # Check if this is the first module
@@ -1095,16 +1095,51 @@ async def check_lesson_access(
     if current_user.role != "student":
         return {"accessible": True}
 
+    student_group_ids_list = [r[0] for r in db.query(GroupStudent.group_id).filter(
+        GroupStudent.student_id == current_user.id
+    ).all()]
+    student_group_ids_subquery = db.query(GroupStudent.group_id).filter(
+        GroupStudent.student_id == current_user.id
+    ).subquery()
+    
+    # Check if lesson is marked as initially unlocked by admin
+    if lesson.is_initially_unlocked:
+        return {"accessible": True}
+    
+    # Check if this lesson is assigned as homework (priority access) - optimized lookup
+    from src.schemas.models import StudentProgress, StepProgress, Assignment, AssignmentLinkedLesson
+    
+    is_assigned = db.query(AssignmentLinkedLesson).join(
+        Assignment, Assignment.id == AssignmentLinkedLesson.assignment_id
+    ).filter(
+        AssignmentLinkedLesson.lesson_id == lesson_id,
+        Assignment.group_id.in_(student_group_ids_subquery),
+        Assignment.is_active == True,
+        (Assignment.is_hidden == False) | (Assignment.is_hidden == None)
+    ).first()
+    
+    if is_assigned:
+        print(f"DEBUG: Lesson {lesson_id} reached via active assignment")
+        return {"accessible": True}
+    
+    # Check if manually unlocked by teacher/admin
+    is_manually_unlocked = db.query(ManualLessonUnlock).filter(
+        ManualLessonUnlock.lesson_id == lesson_id,
+        (ManualLessonUnlock.user_id == current_user.id) |
+        (ManualLessonUnlock.group_id.in_(student_group_ids_subquery))
+    ).first()
+
+    if is_manually_unlocked:
+        print(f"DEBUG: Lesson {lesson_id} reached via manual unlock")
+        return {"accessible": True}
+
     # Weekly release: if course uses weekly schedule and module is locked, deny access
     if course and course.release_schedule == "weekly":
-        student_group_ids = [r[0] for r in db.query(GroupStudent.group_id).filter(
-            GroupStudent.student_id == current_user.id
-        ).all()]
         current_program_week = None
-        if student_group_ids:
+        if student_group_ids_list:
             groups_with_course = [r[0] for r in db.query(CourseGroupAccess.group_id).filter(
                 CourseGroupAccess.course_id == course_id,
-                CourseGroupAccess.group_id.in_(student_group_ids),
+                CourseGroupAccess.group_id.in_(student_group_ids_list),
                 CourseGroupAccess.is_active == True
             ).all()]
             for gid in groups_with_course:
@@ -1120,41 +1155,6 @@ async def check_lesson_access(
                     "accessible": False,
                     "reason": f"This module opens in week {module_week}. Current week: {current_program_week}."
                 }
-    
-    # Check if lesson is marked as initially unlocked by admin
-    if lesson.is_initially_unlocked:
-        return {"accessible": True}
-    
-    # Check if this lesson is assigned as homework (priority access) - optimized lookup
-    from src.schemas.models import StudentProgress, StepProgress, Assignment, AssignmentLinkedLesson
-    
-    student_group_ids = db.query(GroupStudent.group_id).filter(
-        GroupStudent.student_id == current_user.id
-    ).subquery()
-    
-    is_assigned = db.query(AssignmentLinkedLesson).join(
-        Assignment, Assignment.id == AssignmentLinkedLesson.assignment_id
-    ).filter(
-        AssignmentLinkedLesson.lesson_id == lesson_id,
-        Assignment.group_id.in_(student_group_ids),
-        Assignment.is_active == True,
-        (Assignment.is_hidden == False) | (Assignment.is_hidden == None)
-    ).first()
-    
-    if is_assigned:
-        print(f"DEBUG: Lesson {lesson_id} reached via active assignment")
-        return {"accessible": True}
-    
-    # Check if manually unlocked by teacher/admin
-    is_manually_unlocked = db.query(ManualLessonUnlock).filter(
-        ManualLessonUnlock.lesson_id == lesson_id,
-        (ManualLessonUnlock.user_id == current_user.id) |
-        (ManualLessonUnlock.group_id.in_(student_group_ids))
-    ).first()
-
-    if is_manually_unlocked:
-        print(f"DEBUG: Lesson {lesson_id} reached via manual unlock")
-        return {"accessible": True}
 
     # First, find ALL lessons that redirect to this one
     redirect_sources = db.query(Lesson).filter(Lesson.next_lesson_id == lesson_id).all()
