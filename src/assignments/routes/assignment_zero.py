@@ -12,6 +12,7 @@ from src.schemas.models import (
     AssignmentZeroPlannedDateUpdateSchema, AssignmentZeroExamResultUpdateSchema
 )
 from src.routes.auth import get_current_user_dependency
+from src.utils.course_access import student_has_only_special_groups
 from src.assignments.exam_dates import (
     SAT_OFFICIAL_TEST_DATES,
     parse_sat_target_date,
@@ -95,6 +96,16 @@ def _is_ielts_group_name(group_name: str | None) -> bool:
     return ("ielts" in normalized) or ("iealts" in normalized)
 
 
+def _forbid_special_group_student_assignment_zero(user: UserInDB, db: Session) -> None:
+    if user.role != "student":
+        return
+    if student_has_only_special_groups(user.id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="Assignment Zero is not available for your group type",
+        )
+
+
 class CuratorUpcomingExamRow(AssignmentZeroSubmissionSchema):
     exam_type: str
     planned_test_date: str | None = None
@@ -119,7 +130,16 @@ async def get_assignment_zero_status(
             "message": "Assignment Zero is only for students",
             "user_groups": []
         }
-    
+
+    if student_has_only_special_groups(current_user.id, db):
+        return {
+            "needs_completion": False,
+            "completed": bool(current_user.assignment_zero_completed),
+            "special_group_exempt": True,
+            "message": "Assignment Zero does not apply to your group",
+            "user_groups": [],
+        }
+
     # Check for draft submission
     draft = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id,
@@ -155,6 +175,7 @@ async def get_my_assignment_zero_submission(
     db: Session = Depends(get_db)
 ):
     """Get current user's Assignment Zero submission (including draft)"""
+    _forbid_special_group_student_assignment_zero(current_user, db)
     submission = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id
     ).first()
@@ -181,7 +202,8 @@ async def save_assignment_zero_progress(
     """Save progress on Assignment Zero (auto-save)"""
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can save Assignment Zero progress")
-    
+    _forbid_special_group_student_assignment_zero(current_user, db)
+
     # Check if already fully submitted (not draft)
     existing = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id
@@ -294,7 +316,8 @@ async def submit_assignment_zero(
     # Only students can submit
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can submit Assignment Zero")
-    
+    _forbid_special_group_student_assignment_zero(current_user, db)
+
     # Check if already submitted (not draft)
     existing = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id
@@ -479,6 +502,7 @@ async def update_planned_exam_date(
 ):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can update planned exam dates")
+    _forbid_special_group_student_assignment_zero(current_user, db)
 
     submission = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id
@@ -508,6 +532,7 @@ async def update_exam_result(
 ):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can update exam results")
+    _forbid_special_group_student_assignment_zero(current_user, db)
 
     submission = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id
@@ -539,6 +564,9 @@ async def get_ielts_date_prompt_status(
     db: Session = Depends(get_db)
 ):
     if current_user.role != "student":
+        return {"is_ielts_student": False, "should_prompt": False}
+
+    if student_has_only_special_groups(current_user.id, db):
         return {"is_ielts_student": False, "should_prompt": False}
 
     submission = db.query(AssignmentZeroSubmission).filter(
@@ -596,6 +624,7 @@ async def touch_ielts_date_prompt(
 ):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can update IELTS prompt state")
+    _forbid_special_group_student_assignment_zero(current_user, db)
 
     submission = db.query(AssignmentZeroSubmission).filter(
         AssignmentZeroSubmission.user_id == current_user.id
@@ -617,6 +646,7 @@ async def upload_screenshot(
     """Upload screenshot for Assignment Zero"""
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can upload screenshots")
+    _forbid_special_group_student_assignment_zero(current_user, db)
 
     contents = await file.read()
     if len(contents) > 10 * 1024 * 1024:

@@ -11,7 +11,7 @@ from src.schemas.models import (
     AssignmentSchema, AssignmentCreateSchema, AssignmentSubmissionSchema,
     SubmitAssignmentSchema, GradeSubmissionSchema, AssignmentLinkedLesson,
     AssignmentExtension, AssignmentExtensionSchema, GrantExtensionSchema,
-    Event, EventGroup
+    Event, EventGroup, Group, CourseGroupAccess,
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_teacher_or_admin, check_course_access
@@ -20,6 +20,44 @@ from src.services.email_service import send_homework_notification
 from src.schemas.models import GroupStudent
 from src.services.event_service import EventService
 from src.routes.gamification import award_points
+from src.utils.course_access import student_can_see_homework_for_course
+
+
+def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
+    if assignment.lesson_id:
+        lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
+        if lesson:
+            mod = db.query(Module).filter(Module.id == lesson.module_id).first()
+            if mod:
+                return mod.course_id
+    if assignment.group_id:
+        cga = (
+            db.query(CourseGroupAccess)
+            .filter(
+                CourseGroupAccess.group_id == assignment.group_id,
+                CourseGroupAccess.is_active == True,
+            )
+            .first()
+        )
+        if cga:
+            return cga.course_id
+    return None
+
+
+def assignment_visible_to_student(user_id: int, assignment: Assignment, db: Session) -> bool:
+    cid = _assignment_course_id(assignment, db)
+    if cid is None:
+        return True
+    if student_can_see_homework_for_course(user_id, cid, db):
+        return True
+    if assignment.group_id:
+        g = db.query(Group).filter(Group.id == assignment.group_id).first()
+        if g and g.is_special:
+            return False
+    if assignment.lesson_id:
+        return False
+    return True
+
 
 def _to_enriched_schema(assignment: Assignment) -> AssignmentSchema:
     schema = AssignmentSchema.from_orm(assignment)
@@ -164,6 +202,8 @@ async def get_assignments(
         Assignment.id.desc(),
     )
     assignments = query.options(joinedload(Assignment.event), joinedload(Assignment.group)).offset(skip).limit(limit).all()
+    if current_user.role == "student":
+        assignments = [a for a in assignments if assignment_visible_to_student(current_user.id, a, db)]
     return [_to_enriched_schema(a) for a in assignments]
 
 @router.patch("/{assignment_id}/toggle-visibility", response_model=AssignmentSchema)
@@ -191,7 +231,9 @@ async def toggle_assignment_visibility(
     elif assignment.group_id:
         from src.schemas.models import Group
         group = db.query(Group).filter(Group.id == assignment.group_id).first()
-        if group and group.teacher_id == current_user.id:
+        if group and (
+            group.teacher_id == current_user.id or group.curator_id == current_user.id
+        ):
             has_access = True
     
     if not has_access:
@@ -532,8 +574,10 @@ async def get_assignment(
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
-    
-    
+
+    if current_user.role == "student" and not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+
     # Check access permissions
     has_access = False
     
@@ -606,8 +650,12 @@ async def update_assignment(
     if assignment.group_id:
         from src.schemas.models import Group
         group = db.query(Group).filter(Group.id == assignment.group_id).first()
-        if current_user.role != "admin" and group.teacher_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        if current_user.role != "admin":
+            can_edit = (
+                group.teacher_id == current_user.id or group.curator_id == current_user.id
+            )
+            if not can_edit:
+                raise HTTPException(status_code=403, detail="Access denied")
     
     # Validate content
     validate_assignment_content(assignment_data.assignment_type, assignment_data.content)
@@ -755,6 +803,9 @@ async def submit_assignment(
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
+
+    if not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
     
     print(f"Assignment found: {assignment.title}, lesson_id={assignment.lesson_id}, group_id={assignment.group_id}")
     
@@ -1742,6 +1793,9 @@ async def get_assignment_status_for_student(
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
+
+    if not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
     
     # Check if student has access to this assignment
     has_access = False

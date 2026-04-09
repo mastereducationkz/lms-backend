@@ -11,7 +11,7 @@ class Group(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
-    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     curator_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
@@ -96,6 +96,8 @@ class CourseGroupAccess(Base):
     granted_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     granted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
+    # For special groups: max lessons open per module (first N by order in each module; NULL = no cap)
+    max_open_lessons = Column(Integer, nullable=True)
 
     course = relationship("Course", back_populates="group_access")
     group = relationship("Group")

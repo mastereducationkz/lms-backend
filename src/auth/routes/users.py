@@ -1,15 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime
-
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
+from src.auth.user_schema import build_user_schema_response
 from src.schemas.models import UserInDB, UserSchema, Group, GroupStudent, GroupSchema
 from src.config import get_db
 from src.utils.auth_utils import verify_token
@@ -128,7 +123,7 @@ async def update_profile(
         user.hashed_password = hash_password(update.password)
     db.commit()
     db.refresh(user)
-    return user 
+    return build_user_schema_response(user, db)
 
 
 @router.post("/complete-onboarding", response_model=UserSchema)
@@ -138,15 +133,14 @@ async def complete_onboarding(
 ):
     """Mark user's onboarding as completed."""
     if user.onboarding_completed:
-        # Already completed, just return the user
-        return user
-    
+        return build_user_schema_response(user, db)
+
     user.onboarding_completed = True
     from datetime import timezone
     user.onboarding_completed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(user)
-    return user
+    return build_user_schema_response(user, db)
 
 
 class PushTokenRequest(BaseModel):

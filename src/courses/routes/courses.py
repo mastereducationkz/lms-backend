@@ -21,7 +21,12 @@ from src.schemas.models import (
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_teacher_or_admin, require_admin, check_course_access
-from src.utils.course_access import calc_program_week_from_start_date
+from src.utils.course_access import (
+    calc_program_week_from_start_date,
+    get_special_lesson_cap_for_student_course,
+    student_has_nonspecial_group_access_to_course,
+    lesson_blocked_by_special_cap,
+)
 from src.services.azure_openai_service import AzureOpenAIService
 from src.utils.duration_calculator import update_course_duration
 
@@ -557,6 +562,10 @@ async def get_course_modules(
     unlocked_by_assignment_ids = set()
     manually_unlocked_lesson_ids = set()
 
+    special_cap: Optional[int] = None
+    if should_fetch_progress:
+        special_cap = get_special_lesson_cap_for_student_course(target_user_id, course_id, db)
+
     if include_lessons and modules:
         # Fetch all steps for these lessons in one lightweight query
         all_lesson_ids = [l.id for m in modules for l in m.lessons]
@@ -584,17 +593,18 @@ async def get_course_modules(
             student_group_ids = db.query(GroupStudent.group_id).filter(
                 GroupStudent.student_id == target_user_id
             ).subquery()
-            
-            # FAST LOOKUP: Use AssignmentLinkedLesson table
-            assigned_lesson_ids = db.query(AssignmentLinkedLesson.lesson_id).join(
-                Assignment, Assignment.id == AssignmentLinkedLesson.assignment_id
-            ).filter(
-                Assignment.group_id.in_(student_group_ids),
-                Assignment.is_active == True,
-                (Assignment.is_hidden == False) | (Assignment.is_hidden == None)
-            ).all()
-            
-            unlocked_by_assignment_ids = {a[0] for a in assigned_lesson_ids}
+
+            if student_has_nonspecial_group_access_to_course(target_user_id, course_id, db):
+                assigned_lesson_ids = db.query(AssignmentLinkedLesson.lesson_id).join(
+                    Assignment, Assignment.id == AssignmentLinkedLesson.assignment_id
+                ).filter(
+                    Assignment.group_id.in_(student_group_ids),
+                    Assignment.is_active == True,
+                    (Assignment.is_hidden == False) | (Assignment.is_hidden == None)
+                ).all()
+                unlocked_by_assignment_ids = {a[0] for a in assigned_lesson_ids}
+            else:
+                unlocked_by_assignment_ids = set()
 
             # Get manual unlocks for the user (individual and group-level)
             manual_unlocks = db.query(ManualLessonUnlock.lesson_id).filter(
@@ -698,6 +708,8 @@ async def get_course_modules(
                         lesson_dict["is_accessible"] = True
                     # Weekly release: if module is locked by schedule, lesson is not accessible
                     elif unlocked_module_ids is not None and module.id not in unlocked_module_ids:
+                        lesson_dict["is_accessible"] = False
+                    elif special_cap is not None and lesson_idx >= special_cap:
                         lesson_dict["is_accessible"] = False
                     # First lesson is always accessible
                     elif lesson_idx == 0:
@@ -1108,19 +1120,20 @@ async def check_lesson_access(
     
     # Check if this lesson is assigned as homework (priority access) - optimized lookup
     from src.schemas.models import StudentProgress, StepProgress, Assignment, AssignmentLinkedLesson
-    
-    is_assigned = db.query(AssignmentLinkedLesson).join(
-        Assignment, Assignment.id == AssignmentLinkedLesson.assignment_id
-    ).filter(
-        AssignmentLinkedLesson.lesson_id == lesson_id,
-        Assignment.group_id.in_(student_group_ids_subquery),
-        Assignment.is_active == True,
-        (Assignment.is_hidden == False) | (Assignment.is_hidden == None)
-    ).first()
-    
-    if is_assigned:
-        print(f"DEBUG: Lesson {lesson_id} reached via active assignment")
-        return {"accessible": True}
+
+    if student_has_nonspecial_group_access_to_course(current_user.id, course_id, db):
+        is_assigned = db.query(AssignmentLinkedLesson).join(
+            Assignment, Assignment.id == AssignmentLinkedLesson.assignment_id
+        ).filter(
+            AssignmentLinkedLesson.lesson_id == lesson_id,
+            Assignment.group_id.in_(student_group_ids_subquery),
+            Assignment.is_active == True,
+            (Assignment.is_hidden == False) | (Assignment.is_hidden == None)
+        ).first()
+
+        if is_assigned:
+            print(f"DEBUG: Lesson {lesson_id} reached via active assignment")
+            return {"accessible": True}
     
     # Check if manually unlocked by teacher/admin
     is_manually_unlocked = db.query(ManualLessonUnlock).filter(
@@ -1155,6 +1168,15 @@ async def check_lesson_access(
                     "accessible": False,
                     "reason": f"This module opens in week {module_week}. Current week: {current_program_week}."
                 }
+
+    cap_blocked, cap_reason = lesson_blocked_by_special_cap(
+        current_user.id, course_id, lesson_id, db
+    )
+    if cap_blocked:
+        return {
+            "accessible": False,
+            "reason": cap_reason or "Lesson not available for your group",
+        }
 
     # First, find ALL lessons that redirect to this one
     redirect_sources = db.query(Lesson).filter(Lesson.next_lesson_id == lesson_id).all()

@@ -11,6 +11,7 @@ from src.utils.auth_utils import (
 )
 from src.config import get_db
 from src.schemas.models import UserInDB, Token, UserSchema
+from src.auth.user_schema import build_user_schema_response
 import logging
 from pydantic import BaseModel
 from datetime import datetime
@@ -183,8 +184,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     
     if user is None or not user.is_active:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    return user
+
+    return build_user_schema_response(user, db)
 
 @router.post("/logout")
 async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):

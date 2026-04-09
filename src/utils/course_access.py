@@ -5,12 +5,19 @@ This module consolidates duplicated course access logic from various route handl
 into reusable functions, eliminating code duplication and ensuring consistency.
 """
 from datetime import date
-from typing import List, Optional
-from sqlalchemy import or_
+from typing import List, Optional, Tuple
+from sqlalchemy import or_, asc
 from sqlalchemy.orm import Session, joinedload
 
 from src.schemas.models import (
-    Course, Enrollment, GroupStudent, CourseGroupAccess, UserInDB
+    Course,
+    Enrollment,
+    GroupStudent,
+    CourseGroupAccess,
+    UserInDB,
+    Group,
+    Module,
+    Lesson,
 )
 
 
@@ -137,6 +144,149 @@ def check_user_course_access(
     ).first() is not None
     
     return has_group_access
+
+
+def get_ordered_lesson_ids_for_course(course_id: int, db: Session) -> List[int]:
+    rows = (
+        db.query(Lesson.id)
+        .join(Module, Lesson.module_id == Module.id)
+        .filter(Module.course_id == course_id)
+        .order_by(asc(Module.order_index), asc(Lesson.order_index))
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def get_lesson_global_index(lesson_id: int, course_id: int, db: Session) -> Optional[int]:
+    ids = get_ordered_lesson_ids_for_course(course_id, db)
+    try:
+        return ids.index(lesson_id)
+    except ValueError:
+        return None
+
+
+def get_lesson_index_in_module(lesson_id: int, module_id: int, db: Session) -> Optional[int]:
+    """0-based position among lessons in the module (by order_index)."""
+    rows = (
+        db.query(Lesson.id)
+        .filter(Lesson.module_id == module_id)
+        .order_by(asc(Lesson.order_index))
+        .all()
+    )
+    ids = [r[0] for r in rows]
+    try:
+        return ids.index(lesson_id)
+    except ValueError:
+        return None
+
+
+def student_has_enrollment_for_course(user_id: int, course_id: int, db: Session) -> bool:
+    return (
+        db.query(Enrollment)
+        .filter(
+            Enrollment.user_id == user_id,
+            Enrollment.course_id == course_id,
+            Enrollment.is_active == True,
+        )
+        .first()
+        is not None
+    )
+
+
+def student_can_see_homework_for_course(user_id: int, course_id: int, db: Session) -> bool:
+    """
+    Homework is allowed if the student has a non-special group grant to the course,
+    or an individual enrollment (enrollment does not count as 'non-special group' for lesson caps,
+    but keeps homework for enrolled-only students).
+    """
+    if student_has_nonspecial_group_access_to_course(user_id, course_id, db):
+        return True
+    return student_has_enrollment_for_course(user_id, course_id, db)
+
+
+def student_has_only_special_groups(user_id: int, db: Session) -> bool:
+    """
+    True if the student is in at least one active group and every active group is special.
+    Matches frontend Sidebar / get_my_groups (active groups only).
+    """
+    rows = (
+        db.query(Group.is_special)
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .filter(
+            GroupStudent.student_id == user_id,
+            Group.is_active == True,
+        )
+        .all()
+    )
+    if not rows:
+        return False
+    return all(r[0] for r in rows)
+
+
+def student_has_nonspecial_group_access_to_course(user_id: int, course_id: int, db: Session) -> bool:
+    """If True, full course rules apply (no special cap, homework allowed via normal rules)."""
+    rows = (
+        db.query(Group.is_special)
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .join(CourseGroupAccess, CourseGroupAccess.group_id == Group.id)
+        .filter(
+            GroupStudent.student_id == user_id,
+            CourseGroupAccess.course_id == course_id,
+            CourseGroupAccess.is_active == True,
+        )
+        .all()
+    )
+    if not rows:
+        return False
+    return any(not r[0] for r in rows)
+
+
+def get_special_lesson_cap_for_student_course(user_id: int, course_id: int, db: Session) -> Optional[int]:
+    """
+    When the student has course access only via special groups, return the minimum
+    max_open_lessons among those accesses (None in DB = unlimited for that row).
+    The cap applies per module: only the first N lessons (by order) in each module are open.
+    Returns None if no cap applies.
+    """
+    if student_has_nonspecial_group_access_to_course(user_id, course_id, db):
+        return None
+    caps: List[int] = []
+    rows = (
+        db.query(CourseGroupAccess.max_open_lessons, Group.is_special)
+        .join(Group, Group.id == CourseGroupAccess.group_id)
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .filter(
+            GroupStudent.student_id == user_id,
+            CourseGroupAccess.course_id == course_id,
+            CourseGroupAccess.is_active == True,
+        )
+        .all()
+    )
+    for max_open, is_sp in rows:
+        if not is_sp:
+            continue
+        if max_open is not None:
+            caps.append(max_open)
+    if not caps:
+        return None
+    return min(caps)
+
+
+def lesson_blocked_by_special_cap(
+    user_id: int, course_id: int, lesson_id: int, db: Session
+) -> Tuple[bool, Optional[str]]:
+    cap = get_special_lesson_cap_for_student_course(user_id, course_id, db)
+    if cap is None:
+        return False, None
+    lesson = db.query(Lesson).filter(Lesson.id == lesson_id).first()
+    if not lesson:
+        return True, "Lesson not found"
+    idx = get_lesson_index_in_module(lesson_id, lesson.module_id, db)
+    if idx is None:
+        return True, "Lesson not found in module order"
+    if idx >= cap:
+        return True, f"Only the first {cap} lessons per module are open for your group"
+    return False, None
 
 
 def calc_program_week_from_start_date(start_date_str: Optional[str], reference_date: Optional[date] = None) -> Optional[int]:

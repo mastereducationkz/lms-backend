@@ -8,7 +8,7 @@ class GroupSchema(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
-    teacher_id: int
+    teacher_id: Optional[int] = None
     teacher_name: Optional[str] = None
     curator_id: Optional[int] = None
     curator_name: Optional[str] = None
@@ -21,6 +21,8 @@ class GroupSchema(BaseModel):
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None
+    max_open_lessons: Optional[int] = None
+    course_id: Optional[int] = None
 
     class Config:
         from_attributes = True

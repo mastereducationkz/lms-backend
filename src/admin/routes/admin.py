@@ -116,12 +116,14 @@ class StudentProgressSummary(BaseModel):
 class CreateGroupRequest(BaseModel):
     name: str
     description: Optional[str] = None
-    teacher_id: int
+    teacher_id: Optional[int] = None
     curator_id: Optional[int] = None
     course_id: Optional[int] = None  # Курс, к которому привязана группа
     is_active: bool = True
     is_special: bool = False
     is_over: bool = False
+    # For special groups with course_id: cap on first N lessons (default 1 if omitted)
+    max_open_lessons: Optional[int] = None
 
 class UpdateGroupRequest(BaseModel):
     name: Optional[str] = None
@@ -133,6 +135,7 @@ class UpdateGroupRequest(BaseModel):
     is_special: Optional[bool] = None
     is_over: Optional[bool] = None
     student_ids: Optional[List[int]] = None  # Update student list
+    max_open_lessons: Optional[int] = None
 
 class AssignTeacherRequest(BaseModel):
     teacher_id: int
@@ -831,8 +834,18 @@ async def get_all_groups(
     # Enrich with teacher names, curator names and student counts
     result = []
     for group in groups:
-        teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
+        teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
         curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first() if group.curator_id else None
+        cga = (
+            db.query(CourseGroupAccess)
+            .filter(
+                CourseGroupAccess.group_id == group.id,
+                CourseGroupAccess.is_active == True,
+            )
+            .first()
+        )
+        max_open_lessons = cga.max_open_lessons if cga else None
+        linked_course_id = cga.course_id if cga else None
         # Get students for this group
         group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group.id).all()
         student_count = len(group_students)
@@ -855,7 +868,7 @@ async def get_all_groups(
                     avatar_url=student.avatar_url,
                     is_active=student.is_active,
                     student_id=student.student_id,
-                    teacher_name=teacher.name if teacher else "Unknown",
+                    teacher_name=teacher.name if teacher else None,
                     curator_name=curator.name if curator else None,
                     total_study_time_minutes=student.total_study_time_minutes,
                     created_at=student.created_at
@@ -867,7 +880,7 @@ async def get_all_groups(
             name=group.name,
             description=group.description,
             teacher_id=group.teacher_id,
-            teacher_name=teacher.name if teacher else "Unknown",
+            teacher_name=teacher.name if teacher else None,
             curator_id=group.curator_id,
             curator_name=curator.name if curator else None,
             student_count=student_count,
@@ -876,7 +889,9 @@ async def get_all_groups(
             is_active=group.is_active,
             is_special=group.is_special,
             is_over=group.is_over,
-            schedule_config=group.schedule_config
+            schedule_config=group.schedule_config,
+            max_open_lessons=max_open_lessons,
+            course_id=linked_course_id,
         )
         
         result.append(group_data)
@@ -894,68 +909,91 @@ async def create_group(
     current_user: UserInDB = Depends(require_admin())
 ):
     """Create a new group (admin only)"""
-    # Check if teacher exists
-    teacher = db.query(UserInDB).filter(
-        UserInDB.id == group_data.teacher_id,
-        UserInDB.role == "teacher"
-    ).first()
-    if not teacher:
-        raise HTTPException(status_code=400, detail="Teacher not found")
-    
-    # Check if curator exists if provided
-    curator = None
-    if group_data.curator_id:
+    if group_data.is_special:
+        if not group_data.curator_id:
+            raise HTTPException(status_code=400, detail="Curator is required for special groups")
         curator = db.query(UserInDB).filter(
             UserInDB.id == group_data.curator_id,
             UserInDB.role == "curator"
         ).first()
         if not curator:
             raise HTTPException(status_code=400, detail="Curator not found")
-    
-    # Check if course exists if provided
-    course = None
+        teacher = None
+        resolved_teacher_id = None
+        if group_data.teacher_id is not None:
+            teacher = db.query(UserInDB).filter(
+                UserInDB.id == group_data.teacher_id,
+                UserInDB.role == "teacher"
+            ).first()
+            if not teacher:
+                raise HTTPException(status_code=400, detail="Teacher not found")
+            resolved_teacher_id = group_data.teacher_id
+    else:
+        if not group_data.teacher_id:
+            raise HTTPException(status_code=400, detail="Teacher is required")
+        teacher = db.query(UserInDB).filter(
+            UserInDB.id == group_data.teacher_id,
+            UserInDB.role == "teacher"
+        ).first()
+        if not teacher:
+            raise HTTPException(status_code=400, detail="Teacher not found")
+        resolved_teacher_id = group_data.teacher_id
+        curator = None
+        if group_data.curator_id:
+            curator = db.query(UserInDB).filter(
+                UserInDB.id == group_data.curator_id,
+                UserInDB.role == "curator"
+            ).first()
+            if not curator:
+                raise HTTPException(status_code=400, detail="Curator not found")
+
     if group_data.course_id:
         course = db.query(Course).filter(Course.id == group_data.course_id).first()
         if not course:
             raise HTTPException(status_code=400, detail="Course not found")
-    
+
+    max_for_access: Optional[int] = None
+    if group_data.is_special and group_data.course_id:
+        max_for_access = group_data.max_open_lessons if group_data.max_open_lessons is not None else 1
+        if max_for_access < 1:
+            raise HTTPException(status_code=400, detail="max_open_lessons must be at least 1")
+
     # Check if group name already exists
     existing_group = db.query(Group).filter(Group.name == group_data.name).first()
     if existing_group:
         raise HTTPException(status_code=400, detail="Group name already exists")
-    
+
     new_group = Group(
         name=group_data.name,
         description=group_data.description,
-        teacher_id=group_data.teacher_id,
+        teacher_id=resolved_teacher_id,
         curator_id=group_data.curator_id,
         is_active=group_data.is_active,
         is_special=group_data.is_special,
         is_over=group_data.is_over
     )
-    
+
     db.add(new_group)
     db.commit()
     db.refresh(new_group)
-    
-    # If course_id provided, automatically grant access to the course
+
     if group_data.course_id:
         course_access = CourseGroupAccess(
             course_id=group_data.course_id,
             group_id=new_group.id,
             granted_by=current_user.id,
-            is_active=True
+            is_active=True,
+            max_open_lessons=max_for_access,
         )
         db.add(course_access)
         db.commit()
-    
-    # Create response with teacher and curator names
+
     group_response = GroupSchema(
         id=new_group.id,
         name=new_group.name,
         description=new_group.description,
         teacher_id=new_group.teacher_id,
-        teacher_name=teacher.name,
+        teacher_name=teacher.name if teacher else None,
         curator_id=new_group.curator_id,
         curator_name=curator.name if curator else None,
         student_count=0,
@@ -964,9 +1002,11 @@ async def create_group(
         is_active=new_group.is_active,
         is_special=new_group.is_special,
         is_over=new_group.is_over,
-        schedule_config=new_group.schedule_config
+        schedule_config=new_group.schedule_config,
+        max_open_lessons=max_for_access,
+        course_id=group_data.course_id,
     )
-    
+
     return group_response
 
 @router.put("/groups/{group_id}", response_model=GroupSchema)
@@ -980,36 +1020,32 @@ async def update_group(
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
-    # Check if new teacher exists if provided
-    if group_data.teacher_id is not None:
+
+    patch = group_data.model_dump(exclude_unset=True)
+
+    if "teacher_id" in patch and patch["teacher_id"] is not None:
+        tid = patch["teacher_id"]
         teacher = db.query(UserInDB).filter(
-            UserInDB.id == group_data.teacher_id,
+            UserInDB.id == tid,
             UserInDB.role == "teacher"
         ).first()
         if not teacher:
             raise HTTPException(status_code=400, detail="Teacher not found")
-    
-    # Check if new curator exists if provided
-    if group_data.curator_id is not None:
-        if group_data.curator_id:
+
+    if "curator_id" in patch:
+        if patch["curator_id"]:
             curator = db.query(UserInDB).filter(
-                UserInDB.id == group_data.curator_id,
+                UserInDB.id == patch["curator_id"],
                 UserInDB.role == "curator"
             ).first()
             if not curator:
                 raise HTTPException(status_code=400, detail="Curator not found")
-        else:
-            curator = None
-    
-    # Check if new course exists if provided
-    if group_data.course_id is not None:
-        if group_data.course_id:
-            course = db.query(Course).filter(Course.id == group_data.course_id).first()
-            if not course:
-                raise HTTPException(status_code=400, detail="Course not found")
-    
-    # Check if new name already exists (if changing name)
+
+    if patch.get("course_id"):
+        course = db.query(Course).filter(Course.id == patch["course_id"]).first()
+        if not course:
+            raise HTTPException(status_code=400, detail="Course not found")
+
     if group_data.name and group_data.name != group.name:
         existing_group = db.query(Group).filter(
             Group.name == group_data.name,
@@ -1017,39 +1053,58 @@ async def update_group(
         ).first()
         if existing_group:
             raise HTTPException(status_code=400, detail="Group name already exists")
-    
-    # Update fields
+
     if group_data.name is not None:
         group.name = group_data.name
     if group_data.description is not None:
         group.description = group_data.description
-    if group_data.teacher_id is not None:
-        group.teacher_id = group_data.teacher_id
-    if group_data.curator_id is not None:
-        group.curator_id = group_data.curator_id
+    if "teacher_id" in patch:
+        group.teacher_id = patch["teacher_id"]
+    if "curator_id" in patch:
+        group.curator_id = patch["curator_id"]
     if group_data.is_active is not None:
         group.is_active = group_data.is_active
     if group_data.is_special is not None:
         group.is_special = group_data.is_special
     if group_data.is_over is not None:
         group.is_over = group_data.is_over
-    
-    # Update course access if provided
+
+    if group.is_special:
+        if not group.curator_id:
+            raise HTTPException(status_code=400, detail="Curator is required for special groups")
+    else:
+        if not group.teacher_id:
+            raise HTTPException(status_code=400, detail="Teacher is required for non-special groups")
+
+    max_for_new_access: Optional[int] = None
     if group_data.course_id is not None:
-        # Remove existing course access for this group
         db.query(CourseGroupAccess).filter(
             CourseGroupAccess.group_id == group_id
         ).delete()
-        
-        # Add new course access if course_id is provided
+
         if group_data.course_id:
+            if group.is_special:
+                if "max_open_lessons" in patch and patch["max_open_lessons"] is not None:
+                    max_for_new_access = patch["max_open_lessons"]
+                else:
+                    max_for_new_access = 1
+                if max_for_new_access < 1:
+                    raise HTTPException(status_code=400, detail="max_open_lessons must be at least 1")
             course_access = CourseGroupAccess(
                 course_id=group_data.course_id,
                 group_id=group_id,
                 granted_by=current_user.id,
-                is_active=True
+                is_active=True,
+                max_open_lessons=max_for_new_access,
             )
             db.add(course_access)
+    elif "max_open_lessons" in patch and group.is_special:
+        q = db.query(CourseGroupAccess).filter(CourseGroupAccess.group_id == group_id)
+        mo = patch["max_open_lessons"]
+        if mo is not None and mo < 1:
+            raise HTTPException(status_code=400, detail="max_open_lessons must be at least 1")
+        for row in q.all():
+            row.max_open_lessons = mo
     
     # Update student list if provided
     if group_data.student_ids is not None:
@@ -1075,8 +1130,18 @@ async def update_group(
     db.refresh(group)
     
     # Create response with teacher name, curator name and student count
-    teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
+    teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
     curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first() if group.curator_id else None
+    cga_out = (
+        db.query(CourseGroupAccess)
+        .filter(
+            CourseGroupAccess.group_id == group.id,
+            CourseGroupAccess.is_active == True,
+        )
+        .first()
+    )
+    max_open_out = cga_out.max_open_lessons if cga_out else None
+    course_id_out = cga_out.course_id if cga_out else None
     
     # Get student count using GroupStudent association table
     student_count = db.query(GroupStudent).filter(
@@ -1101,7 +1166,7 @@ async def update_group(
         name=group.name,
         description=group.description,
         teacher_id=group.teacher_id,
-        teacher_name=teacher.name if teacher else "Unknown",
+        teacher_name=teacher.name if teacher else None,
         curator_id=group.curator_id,
         curator_name=curator.name if curator else None,
         student_count=len(students),
@@ -1110,7 +1175,9 @@ async def update_group(
         is_active=group.is_active,
         is_special=group.is_special,
         is_over=group.is_over,
-        schedule_config=group.schedule_config
+        schedule_config=group.schedule_config,
+        max_open_lessons=max_open_out,
+        course_id=course_id_out,
     )
     
     return group_response
@@ -2100,7 +2167,7 @@ async def get_admin_dashboard(
     recent_groups = db.query(Group).order_by(desc(Group.created_at)).limit(5).all()
     recent_groups_data = []
     for group in recent_groups:
-        teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
+        teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
         student_count = db.query(GroupStudent).filter(GroupStudent.group_id == group.id).count()
         
         group_data = GroupSchema(
@@ -2108,13 +2175,15 @@ async def get_admin_dashboard(
             name=group.name,
             description=group.description,
             teacher_id=group.teacher_id,
-            teacher_name=teacher.name if teacher else "Unknown",
+            teacher_name=teacher.name if teacher else None,
             curator_id=group.curator_id,
             curator_name=None,  # Not needed for dashboard
             student_count=student_count,
             students=[],  # Not needed for dashboard
             created_at=group.created_at,
-            is_active=group.is_active
+            is_active=group.is_active,
+            is_special=group.is_special,
+            is_over=group.is_over,
         )
         recent_groups_data.append(group_data)
     

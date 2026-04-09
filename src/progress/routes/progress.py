@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, and_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, date, timezone
 
@@ -19,6 +20,7 @@ from src.schemas.models import (
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_course_access, check_student_access, require_teacher_or_admin
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
+from src.utils.course_access import student_has_only_special_groups
 
 
 router = APIRouter()
@@ -1606,6 +1608,54 @@ async def recalculate_course_progress(
 # QUIZ ATTEMPTS
 # =============================================================================
 
+def _get_manual_question_ids(step: Step | None) -> set[str]:
+    if not step or not step.content_text:
+        return set()
+    try:
+        parsed = json.loads(step.content_text)
+    except Exception:
+        return set()
+    questions = parsed.get("questions") if isinstance(parsed, dict) else None
+    if not isinstance(questions, list):
+        return set()
+    return {
+        str(q.get("id"))
+        for q in questions
+        if isinstance(q, dict) and q.get("question_type") == "long_text" and q.get("id") is not None
+    }
+
+
+def _answered_question_ids(raw_answers: str | None) -> set[str]:
+    if not raw_answers:
+        return set()
+    try:
+        parsed = json.loads(raw_answers)
+    except Exception:
+        return set()
+    if isinstance(parsed, list):
+        result: set[str] = set()
+        for item in parsed:
+            if not (isinstance(item, list) and len(item) >= 2):
+                continue
+            qid = str(item[0])
+            value = item[1]
+            if value is None:
+                continue
+            if isinstance(value, str) and value.strip() == "":
+                continue
+            if isinstance(value, list) and len(value) == 0:
+                continue
+            result.add(qid)
+        return result
+    if isinstance(parsed, dict):
+        return {str(k) for k in parsed.keys()}
+    return set()
+
+
+def _forbid_special_group_manual_quiz(step_id: int, raw_answers: str | None, current_user: UserInDB, db: Session) -> None:
+    # Keep permissive: special-group students can save long_text answers without blocking submission.
+    return
+
 @router.post("/quiz-attempt", response_model=QuizAttemptSchema)
 async def create_quiz_attempt(
     attempt_data: QuizAttemptCreateSchema,
@@ -1614,6 +1664,8 @@ async def create_quiz_attempt(
 ):
     """Сохранить попытку прохождения квиза или обновить черновик"""
     try:
+        _forbid_special_group_manual_quiz(attempt_data.step_id, attempt_data.answers, current_user, db)
+
         # Draft expiration cutoff (7 days)
         stale_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
         
@@ -1711,6 +1763,12 @@ async def update_quiz_attempt(
     
     if not attempt:
         raise HTTPException(status_code=404, detail="Quiz attempt not found")
+    _forbid_special_group_manual_quiz(
+        attempt.step_id,
+        update_data.answers if update_data.answers is not None else attempt.answers,
+        current_user,
+        db,
+    )
     
     try:
         if update_data.answers is not None:

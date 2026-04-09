@@ -27,6 +27,8 @@ class UserSchema(BaseModel):
     onboarding_completed_at: Optional[datetime] = None
     assignment_zero_completed: Optional[bool] = False
     assignment_zero_completed_at: Optional[datetime] = None
+    # Computed on /auth/me: student in active groups and all groups are special (not a DB column)
+    special_group_only_student: Optional[bool] = False
     activity_points: Optional[int] = 0
     no_substitutions: Optional[bool] = False
     course_ids: Optional[List[int]] = []
