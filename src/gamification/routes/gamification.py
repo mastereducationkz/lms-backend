@@ -350,10 +350,18 @@ async def get_leaderboard(
     for rank, (user_id, points) in enumerate(results, start=1):
         user = users_map.get(user_id)
         if user:
+            # Students only need their own row for rank UI; never expose classmates'
+            # display names (often equal to email in DB) in the JSON payload.
+            if current_user.role == "student" and user.id != current_user.id:
+                display_name = "Участник"
+                display_avatar = None
+            else:
+                display_name = user.name
+                display_avatar = user.avatar_url
             entries.append(LeaderboardEntry(
                 user_id=user_id,
-                user_name=user.name,
-                avatar_url=user.avatar_url,
+                user_name=display_name,
+                avatar_url=display_avatar,
                 points=int(points),
                 rank=rank
             ))
