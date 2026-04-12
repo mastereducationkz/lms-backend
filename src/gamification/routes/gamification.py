@@ -141,12 +141,37 @@ def get_teacher_weekly_bonus_given(db: Session, teacher_id: int, group_id: int =
     return int(result) if result else 0
 
 
+def _leaderboard_active_group_members_query(db: Session, group_id: Optional[int]):
+    """GroupStudent rows only for groups that are active and not finished (is_over)."""
+    q = db.query(GroupStudent.student_id).join(Group, Group.id == GroupStudent.group_id).filter(
+        Group.is_over == False,
+        Group.is_active == True,
+    )
+    if group_id is not None:
+        q = q.filter(GroupStudent.group_id == group_id)
+    return q
+
+
 def _leaderboard_scope_student_ids(db: Session, group_id: Optional[int]) -> List[int]:
     if group_id:
-        rows = db.query(GroupStudent.student_id).filter(GroupStudent.group_id == group_id).all()
+        rows = _leaderboard_active_group_members_query(db, group_id).all()
         return [r[0] for r in rows]
-    rows = db.query(UserInDB.id).filter(UserInDB.role == "student", UserInDB.is_active == True).all()
+    rows = _leaderboard_active_group_members_query(db, None).distinct().all()
     return [r[0] for r in rows]
+
+
+def _leaderboard_distinct_eligible_student_count(db: Session) -> int:
+    n = (
+        _leaderboard_active_group_members_query(db, None)
+        .distinct()
+        .count()
+    )
+    return int(n or 0)
+
+
+def _leaderboard_group_participant_count(db: Session, group_id: int) -> int:
+    n = _leaderboard_active_group_members_query(db, group_id).count()
+    return int(n or 0)
 
 
 def _student_leaderboard_self_only(
@@ -160,9 +185,9 @@ def _student_leaderboard_self_only(
     Rank and points for the current student only (no classmates in the response body).
     """
     if group_id:
-        total_participants = db.query(GroupStudent).filter(GroupStudent.group_id == group_id).count()
+        total_participants = _leaderboard_group_participant_count(db, group_id)
     else:
-        total_participants = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True).count()
+        total_participants = _leaderboard_distinct_eligible_student_count(db)
 
     user_ids = _leaderboard_scope_student_ids(db, group_id)
     if not user_ids or current_user.id not in user_ids:
@@ -270,29 +295,32 @@ async def get_gamification_status(
 ):
     """Get current user's gamification stats."""
     monthly_points = get_monthly_points(db, current_user.id)
-    
-    # Calculate rank this month
+
     now = datetime.now(timezone.utc)
-    subquery = db.query(
-        PointHistory.user_id,
-        func.sum(PointHistory.amount).label('total')
-    ).filter(
-        extract('year', PointHistory.created_at) == now.year,
-        extract('month', PointHistory.created_at) == now.month
-    ).group_by(PointHistory.user_id).subquery()
-    
-    # Count users with more points
-    users_ahead = db.query(func.count()).select_from(subquery).filter(
-        subquery.c.total > monthly_points
-    ).scalar()
-    
-    rank = (users_ahead or 0) + 1
-    
+    eligible_ids = _leaderboard_scope_student_ids(db, None)
+    if not eligible_ids or current_user.id not in eligible_ids:
+        rank_this_month = None
+    else:
+        subquery = db.query(
+            PointHistory.user_id,
+            func.sum(PointHistory.amount).label('total')
+        ).filter(
+            extract('year', PointHistory.created_at) == now.year,
+            extract('month', PointHistory.created_at) == now.month,
+            PointHistory.user_id.in_(eligible_ids),
+        ).group_by(PointHistory.user_id).subquery()
+
+        users_ahead = db.query(func.count()).select_from(subquery).filter(
+            subquery.c.total > monthly_points
+        ).scalar()
+
+        rank_this_month = (users_ahead or 0) + 1
+
     return GamificationStatsResponse(
         activity_points=current_user.activity_points or 0,
         daily_streak=current_user.daily_streak or 0,
         monthly_points=monthly_points,
-        rank_this_month=rank
+        rank_this_month=rank_this_month
     )
 
 
@@ -405,6 +433,12 @@ async def get_leaderboard(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Not a member of this group",
                 )
+            grp = db.query(Group).filter(Group.id == group_id).first()
+            if not grp or grp.is_over or not grp.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This group has finished training or is inactive; leaderboard is unavailable",
+                )
         return _student_leaderboard_self_only(db, current_user, period, group_id, now)
 
     if period == "monthly":
@@ -424,18 +458,25 @@ async def get_leaderboard(
             extract('month', PointHistory.created_at) == now.month
         )
         
-        # Filter by group if specified
+        # Filter by group if specified (active, not finished)
         if group_id:
-            student_ids = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id == group_id
-            ).subquery()
+            student_ids = (
+                db.query(GroupStudent.student_id)
+                .join(Group, Group.id == GroupStudent.group_id)
+                .filter(
+                    GroupStudent.group_id == group_id,
+                    Group.is_over == False,
+                    Group.is_active == True,
+                )
+                .subquery()
+            )
             query = query.filter(PointHistory.user_id.in_(student_ids))
-        
+
         results = query.group_by(PointHistory.user_id).order_by(
             func.sum(PointHistory.amount).desc()
         ).limit(limit).all()
-        
-        
+
+
     elif period == "weekly":
         # Weekly leaderboard (starts Monday)
         today = date.today()
@@ -451,17 +492,24 @@ async def get_leaderboard(
             PointHistory.created_at <= datetime.combine(end_date, datetime.max.time())
         )
         
-        # Filter by group if specified
+        # Filter by group if specified (active, not finished)
         if group_id:
-            student_ids = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id == group_id
-            ).subquery()
+            student_ids = (
+                db.query(GroupStudent.student_id)
+                .join(Group, Group.id == GroupStudent.group_id)
+                .filter(
+                    GroupStudent.group_id == group_id,
+                    Group.is_over == False,
+                    Group.is_active == True,
+                )
+                .subquery()
+            )
             query = query.filter(PointHistory.user_id.in_(student_ids))
-        
+
         results = query.group_by(PointHistory.user_id).order_by(
             func.sum(PointHistory.amount).desc()
         ).limit(limit).all()
-        
+
     else:
         # All-time leaderboard from User.activity_points
         start_date = None
@@ -470,11 +518,18 @@ async def get_leaderboard(
         query = db.query(UserInDB).filter(UserInDB.role == 'student')
         
         if group_id:
-            student_ids = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id == group_id
-            ).subquery()
+            student_ids = (
+                db.query(GroupStudent.student_id)
+                .join(Group, Group.id == GroupStudent.group_id)
+                .filter(
+                    GroupStudent.group_id == group_id,
+                    Group.is_over == False,
+                    Group.is_active == True,
+                )
+                .subquery()
+            )
             query = query.filter(UserInDB.id.in_(student_ids))
-        
+
         users = query.order_by(UserInDB.activity_points.desc()).limit(limit).all()
         results = [(u.id, u.activity_points or 0) for u in users]
     
@@ -497,11 +552,10 @@ async def get_leaderboard(
     # Calculate total participants for the context
     # If filtered by group, count students in group
     # If all students, count all students
-    total_participants = 0
     if group_id:
-        total_participants = db.query(GroupStudent).filter(GroupStudent.group_id == group_id).count()
+        total_participants = _leaderboard_group_participant_count(db, group_id)
     else:
-        total_participants = db.query(UserInDB).filter(UserInDB.role == 'student', UserInDB.is_active == True).count()
+        total_participants = _leaderboard_distinct_eligible_student_count(db)
     
     return LeaderboardResponse(
         period=period,

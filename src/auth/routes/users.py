@@ -54,7 +54,11 @@ async def get_my_groups(
     if user.role == 'student':
         # Get groups via enrollment/GroupStudent
         group_ids = db.query(GroupStudent.group_id).filter(GroupStudent.student_id == user.id).subquery()
-        groups = db.query(Group).filter(Group.id.in_(group_ids), Group.is_active == True).all()
+        groups = db.query(Group).filter(
+            Group.id.in_(group_ids),
+            Group.is_active == True,
+            Group.is_over == False,
+        ).all()
         
         # Enrich with details
         result = []

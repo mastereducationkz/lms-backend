@@ -10,9 +10,14 @@ import logging
 from src.config import get_db
 from src.schemas.models import UserInDB, DailyQuestionCompletion
 from src.routes.auth import get_current_user_dependency
+from src.gamification.routes.gamification import award_points
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Gamification: once per successful daily completion (same day guarded by DB row above)
+DAILY_QUESTIONS_POINTS_MIN = 10
+DAILY_QUESTIONS_POINTS_MAX = 26
 
 # External API config
 MASTER_ED_API_URL = "https://api.mastereducation.kz/api/lms/students/question-recommendations"
@@ -251,9 +256,36 @@ async def complete_daily_questions(
     db.add(completion)
     db.commit()
 
+    score_n = int(request.score or 0)
+    total_n = int(request.total_questions or 0)
+    if total_n <= 0:
+        points_amount = DAILY_QUESTIONS_POINTS_MIN
+    else:
+        ratio = min(1.0, max(0.0, score_n / total_n))
+        points_amount = int(
+            DAILY_QUESTIONS_POINTS_MIN
+            + ratio * (DAILY_QUESTIONS_POINTS_MAX - DAILY_QUESTIONS_POINTS_MIN)
+        )
+        points_amount = max(
+            DAILY_QUESTIONS_POINTS_MIN,
+            min(DAILY_QUESTIONS_POINTS_MAX, points_amount),
+        )
+
+    try:
+        award_points(
+            db,
+            current_user.id,
+            points_amount,
+            "daily_questions",
+            f"date:{today.isoformat()}|score:{score_n}/{total_n}",
+        )
+    except Exception as e:
+        logger.warning("Failed to award daily questions points: %s", e, exc_info=True)
+
     return {
         "message": "Daily questions completed!",
         "completed_today": True,
         "score": request.score,
-        "total_questions": request.total_questions
+        "total_questions": request.total_questions,
+        "points_awarded": points_amount,
     }

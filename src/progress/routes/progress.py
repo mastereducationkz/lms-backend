@@ -3,19 +3,21 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, and_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import json
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, date, timezone
 
 from src.config import get_db
 from src.schemas.models import (
-    UserInDB, StudentProgress, Course, Module, Lesson, Step, 
+    UserInDB, StudentProgress, Course, Module, Lesson, Step,
     StepProgress, StepProgressSchema, StepProgressCreateSchema,
     Assignment, AssignmentSubmission, Enrollment,
     GroupStudent, CourseGroupAccess, ProgressSchema,
     ProgressSnapshot, QuizAttempt, QuizAttemptSchema, QuizAttemptCreateSchema,
     QuizAttemptGradeSchema, QuizAttemptUpdateSchema,
     ManualLessonUnlock, ManualLessonUnlockSchema, ManualLessonUnlockCreateSchema,
-    Group
+    Group,
+    PointHistory,
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_course_access, check_student_access, require_teacher_or_admin
@@ -24,6 +26,63 @@ from src.utils.course_access import student_has_only_special_groups
 
 
 router = APIRouter()
+_progress_log = logging.getLogger(__name__)
+
+COURSE_QUIZ_PASS_PCT = 60.0
+COURSE_QUIZ_POINTS_MIN = 8
+COURSE_QUIZ_POINTS_MAX = 24
+
+
+def _course_quiz_points_already_awarded(db: Session, user_id: int, step_id: int) -> bool:
+    return (
+        db.query(PointHistory)
+        .filter(
+            PointHistory.user_id == user_id,
+            PointHistory.reason == "course_quiz",
+            PointHistory.description.like(f"step:{step_id}|%"),
+        )
+        .first()
+        is not None
+    )
+
+
+def _maybe_award_course_quiz_points(
+    db: Session,
+    *,
+    user_id: int,
+    step_id: int,
+    course_id: int,
+    score_percentage: float,
+    is_graded: bool,
+    attempt_id: int,
+) -> None:
+    if not is_graded:
+        return
+    try:
+        pct = float(score_percentage)
+    except (TypeError, ValueError):
+        return
+    if pct < COURSE_QUIZ_PASS_PCT:
+        return
+    if _course_quiz_points_already_awarded(db, user_id, step_id):
+        return
+    from src.gamification.routes.gamification import award_points
+
+    span = 100.0 - COURSE_QUIZ_PASS_PCT
+    ratio = min(1.0, max(0.0, (pct - COURSE_QUIZ_PASS_PCT) / span)) if span > 0 else 1.0
+    amount = int(COURSE_QUIZ_POINTS_MIN + ratio * (COURSE_QUIZ_POINTS_MAX - COURSE_QUIZ_POINTS_MIN))
+    amount = max(COURSE_QUIZ_POINTS_MIN, min(COURSE_QUIZ_POINTS_MAX, amount))
+    try:
+        award_points(
+            db,
+            user_id,
+            amount,
+            "course_quiz",
+            f"step:{step_id}|course:{course_id}|attempt:{attempt_id}",
+        )
+    except Exception as e:
+        _progress_log.warning("course_quiz award_points failed: %s", e, exc_info=True)
+
 
 # =============================================================================
 # DAILY STREAK HELPER FUNCTIONS
@@ -1708,11 +1767,19 @@ async def create_quiz_attempt(
                 existing_draft.score_percentage = attempt_data.score_percentage
                 existing_draft.is_graded = attempt_data.is_graded
                 existing_draft.completed_at = datetime.now(timezone.utc)
-                
-                # Points are awarded only for assignments, not quizzes
-            
+
             db.commit()
             db.refresh(existing_draft)
+            if not attempt_data.is_draft:
+                _maybe_award_course_quiz_points(
+                    db,
+                    user_id=existing_draft.user_id,
+                    step_id=existing_draft.step_id,
+                    course_id=existing_draft.course_id,
+                    score_percentage=existing_draft.score_percentage,
+                    is_graded=bool(existing_draft.is_graded),
+                    attempt_id=existing_draft.id,
+                )
             return existing_draft
         
         # Create new quiz attempt record
@@ -1739,8 +1806,17 @@ async def create_quiz_attempt(
         db.commit()
         db.refresh(quiz_attempt)
 
-        # Points are awarded only for assignments, not quizzes
-        
+        if not attempt_data.is_draft:
+            _maybe_award_course_quiz_points(
+                db,
+                user_id=quiz_attempt.user_id,
+                step_id=quiz_attempt.step_id,
+                course_id=quiz_attempt.course_id,
+                score_percentage=quiz_attempt.score_percentage,
+                is_graded=bool(quiz_attempt.is_graded),
+                attempt_id=quiz_attempt.id,
+            )
+
         return quiz_attempt
         
     except Exception as e:
@@ -1771,20 +1847,18 @@ async def update_quiz_attempt(
     )
     
     try:
+        was_draft = attempt.is_draft
         if update_data.answers is not None:
             attempt.answers = update_data.answers
         if update_data.current_question_index is not None:
             attempt.current_question_index = update_data.current_question_index
         if update_data.time_spent_seconds is not None:
             attempt.time_spent_seconds = update_data.time_spent_seconds
-        
+
         # Handle finalization
         if update_data.is_draft is not None and not update_data.is_draft:
             attempt.is_draft = False
-            attempt.is_draft = False
             attempt.completed_at = datetime.now(timezone.utc)
-            
-            # Points are awarded only for assignments, not quizzes
             if update_data.total_questions is not None:
                 attempt.total_questions = update_data.total_questions
             if update_data.correct_answers is not None:
@@ -1793,11 +1867,22 @@ async def update_quiz_attempt(
                 attempt.score_percentage = update_data.score_percentage
             if update_data.is_graded is not None:
                 attempt.is_graded = update_data.is_graded
-        
+
         attempt.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(attempt)
-        
+
+        if was_draft and not attempt.is_draft:
+            _maybe_award_course_quiz_points(
+                db,
+                user_id=attempt.user_id,
+                step_id=attempt.step_id,
+                course_id=attempt.course_id,
+                score_percentage=attempt.score_percentage,
+                is_graded=bool(attempt.is_graded),
+                attempt_id=attempt.id,
+            )
+
         return attempt
         
     except Exception as e:
@@ -1832,9 +1917,18 @@ async def grade_quiz_attempt(
         attempt.is_graded = True
         attempt.graded_by = current_user.id
         attempt.graded_at = datetime.now(timezone.utc)
-        
+
         db.commit()
         db.refresh(attempt)
+        _maybe_award_course_quiz_points(
+            db,
+            user_id=attempt.user_id,
+            step_id=attempt.step_id,
+            course_id=attempt.course_id,
+            score_percentage=attempt.score_percentage,
+            is_graded=bool(attempt.is_graded),
+            attempt_id=attempt.id,
+        )
         return attempt
     except Exception as e:
         db.rollback()
