@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, date, timedelta, timezone
 from pydantic import BaseModel
 
@@ -46,11 +46,16 @@ class LeaderboardEntry(BaseModel):
 
 
 class LeaderboardResponse(BaseModel):
-    period: str  # 'monthly', 'all_time'
+    period: str  # 'monthly', 'weekly', 'all_time'
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     total_participants: int
     entries: List[LeaderboardEntry]
+    # Populated for students only: no classmates in `entries`, no PII in the payload.
+    self_only: bool = False
+    my_rank: Optional[int] = None
+    my_points: Optional[int] = None
+    points_to_next_rank: Optional[int] = None
 
 
 # =============================================================================
@@ -134,6 +139,124 @@ def get_teacher_weekly_bonus_given(db: Session, teacher_id: int, group_id: int =
     result = query.scalar()
     
     return int(result) if result else 0
+
+
+def _leaderboard_scope_student_ids(db: Session, group_id: Optional[int]) -> List[int]:
+    if group_id:
+        rows = db.query(GroupStudent.student_id).filter(GroupStudent.group_id == group_id).all()
+        return [r[0] for r in rows]
+    rows = db.query(UserInDB.id).filter(UserInDB.role == "student", UserInDB.is_active == True).all()
+    return [r[0] for r in rows]
+
+
+def _student_leaderboard_self_only(
+    db: Session,
+    current_user: UserInDB,
+    period: str,
+    group_id: Optional[int],
+    now: datetime,
+) -> LeaderboardResponse:
+    """
+    Rank and points for the current student only (no classmates in the response body).
+    """
+    if group_id:
+        total_participants = db.query(GroupStudent).filter(GroupStudent.group_id == group_id).count()
+    else:
+        total_participants = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True).count()
+
+    user_ids = _leaderboard_scope_student_ids(db, group_id)
+    if not user_ids or current_user.id not in user_ids:
+        return LeaderboardResponse(
+            period=period,
+            start_date=None,
+            end_date=None,
+            total_participants=total_participants,
+            entries=[],
+            self_only=True,
+            my_rank=None,
+            my_points=0,
+            points_to_next_rank=None,
+        )
+
+    scores: Dict[int, int] = {uid: 0 for uid in user_ids}
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+    if period == "monthly":
+        start_date = date(now.year, now.month, 1)
+        if now.month == 12:
+            end_date = date(now.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end_date = date(now.year, now.month + 1, 1) - timedelta(days=1)
+        rows = db.query(
+            PointHistory.user_id,
+            func.coalesce(func.sum(PointHistory.amount), 0),
+        ).filter(
+            PointHistory.user_id.in_(user_ids),
+            extract("year", PointHistory.created_at) == now.year,
+            extract("month", PointHistory.created_at) == now.month,
+        ).group_by(PointHistory.user_id).all()
+        for uid, total in rows:
+            scores[int(uid)] = int(total or 0)
+
+    elif period == "weekly":
+        today = date.today()
+        start_date = today - timedelta(days=today.weekday())
+        end_date = start_date + timedelta(days=6)
+        week_start = datetime.combine(start_date, datetime.min.time())
+        week_end = datetime.combine(end_date, datetime.max.time())
+        rows = db.query(
+            PointHistory.user_id,
+            func.coalesce(func.sum(PointHistory.amount), 0),
+        ).filter(
+            PointHistory.user_id.in_(user_ids),
+            PointHistory.created_at >= week_start,
+            PointHistory.created_at <= week_end,
+        ).group_by(PointHistory.user_id).all()
+        for uid, total in rows:
+            scores[int(uid)] = int(total or 0)
+
+    else:
+        rows = db.query(UserInDB.id, UserInDB.activity_points).filter(UserInDB.id.in_(user_ids)).all()
+        for uid, pts in rows:
+            scores[int(uid)] = int(pts or 0)
+
+    sorted_ids = sorted(user_ids, key=lambda u: (-scores[u], u))
+    my_points = scores.get(current_user.id, 0)
+    my_rank: Optional[int] = None
+    points_to_next: Optional[int] = None
+
+    try:
+        idx = sorted_ids.index(current_user.id)
+    except ValueError:
+        idx = -1
+
+    if period in ("monthly", "weekly"):
+        if my_points <= 0 or idx < 0:
+            my_rank = None
+            points_to_next = None
+        else:
+            my_rank = idx + 1
+            points_to_next = scores[sorted_ids[idx - 1]] - my_points if idx > 0 else 0
+    else:
+        if idx < 0:
+            my_rank = None
+            points_to_next = None
+        else:
+            my_rank = idx + 1
+            points_to_next = scores[sorted_ids[idx - 1]] - my_points if idx > 0 else 0
+
+    return LeaderboardResponse(
+        period=period,
+        start_date=start_date,
+        end_date=end_date,
+        total_participants=total_participants,
+        entries=[],
+        self_only=True,
+        my_rank=my_rank,
+        my_points=my_points,
+        points_to_next_rank=points_to_next,
+    )
 
 
 # =============================================================================
@@ -270,7 +393,20 @@ async def get_leaderboard(
 ):
     """Get leaderboard rankings."""
     now = datetime.now(timezone.utc)
-    
+
+    if current_user.role == "student":
+        if group_id:
+            member = db.query(GroupStudent).filter(
+                GroupStudent.group_id == group_id,
+                GroupStudent.student_id == current_user.id,
+            ).first()
+            if not member:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not a member of this group",
+                )
+        return _student_leaderboard_self_only(db, current_user, period, group_id, now)
+
     if period == "monthly":
         # Monthly leaderboard from PointHistory
         start_date = date(now.year, now.month, 1)
@@ -350,18 +486,10 @@ async def get_leaderboard(
     for rank, (user_id, points) in enumerate(results, start=1):
         user = users_map.get(user_id)
         if user:
-            # Students only need their own row for rank UI; never expose classmates'
-            # display names (often equal to email in DB) in the JSON payload.
-            if current_user.role == "student" and user.id != current_user.id:
-                display_name = "Участник"
-                display_avatar = None
-            else:
-                display_name = user.name
-                display_avatar = user.avatar_url
             entries.append(LeaderboardEntry(
                 user_id=user_id,
-                user_name=display_name,
-                avatar_url=display_avatar,
+                user_name=user.name,
+                avatar_url=user.avatar_url,
                 points=int(points),
                 rank=rank
             ))
