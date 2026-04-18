@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, time, date
 
@@ -122,6 +122,8 @@ class CreateGroupRequest(BaseModel):
     is_active: bool = True
     is_special: bool = False
     is_over: bool = False
+    group_type: Literal["group", "individual"] = "group"
+    program_type: Literal["sat", "ielts", "general_english"] = "general_english"
     # For special groups with course_id: cap on first N lessons (default 1 if omitted)
     max_open_lessons: Optional[int] = None
 
@@ -134,6 +136,8 @@ class UpdateGroupRequest(BaseModel):
     is_active: Optional[bool] = None
     is_special: Optional[bool] = None
     is_over: Optional[bool] = None
+    group_type: Optional[Literal["group", "individual"]] = None
+    program_type: Optional[Literal["sat", "ielts", "general_english"]] = None
     student_ids: Optional[List[int]] = None  # Update student list
     max_open_lessons: Optional[int] = None
 
@@ -814,6 +818,9 @@ async def get_all_groups(
     limit: int = 100,
     teacher_id: Optional[int] = None,
     is_active: Optional[bool] = None,
+    program_type: Optional[Literal["sat", "ielts", "general_english"]] = Query(
+        None, description="Фильтр по программе (SAT / IELTS / General English)"
+    ),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
 ):
@@ -829,7 +836,9 @@ async def get_all_groups(
     
     if is_active is not None:
         query = query.filter(Group.is_active == is_active)
-    
+    if program_type is not None:
+        query = query.filter(Group.program_type == program_type)
+
     groups = query.offset(skip).limit(limit).all()
     # Enrich with teacher names, curator names and student counts
     result = []
@@ -889,6 +898,8 @@ async def get_all_groups(
             is_active=group.is_active,
             is_special=group.is_special,
             is_over=group.is_over,
+            group_type=getattr(group, "group_type", None) or "group",
+            program_type=getattr(group, "program_type", None) or "general_english",
             schedule_config=group.schedule_config,
             max_open_lessons=max_open_lessons,
             course_id=linked_course_id,
@@ -970,7 +981,9 @@ async def create_group(
         curator_id=group_data.curator_id,
         is_active=group_data.is_active,
         is_special=group_data.is_special,
-        is_over=group_data.is_over
+        is_over=group_data.is_over,
+        group_type=group_data.group_type,
+        program_type=group_data.program_type,
     )
 
     db.add(new_group)
@@ -1002,6 +1015,8 @@ async def create_group(
         is_active=new_group.is_active,
         is_special=new_group.is_special,
         is_over=new_group.is_over,
+        group_type=getattr(new_group, "group_type", None) or "group",
+        program_type=getattr(new_group, "program_type", None) or "general_english",
         schedule_config=new_group.schedule_config,
         max_open_lessons=max_for_access,
         course_id=group_data.course_id,
@@ -1068,6 +1083,10 @@ async def update_group(
         group.is_special = group_data.is_special
     if group_data.is_over is not None:
         group.is_over = group_data.is_over
+    if group_data.group_type is not None:
+        group.group_type = group_data.group_type
+    if group_data.program_type is not None:
+        group.program_type = group_data.program_type
 
     if group.is_special:
         if not group.curator_id:
@@ -1175,6 +1194,8 @@ async def update_group(
         is_active=group.is_active,
         is_special=group.is_special,
         is_over=group.is_over,
+        group_type=getattr(group, "group_type", None) or "group",
+        program_type=getattr(group, "program_type", None) or "general_english",
         schedule_config=group.schedule_config,
         max_open_lessons=max_open_out,
         course_id=course_id_out,
@@ -2184,6 +2205,8 @@ async def get_admin_dashboard(
             is_active=group.is_active,
             is_special=group.is_special,
             is_over=group.is_over,
+            group_type=getattr(group, "group_type", None) or "group",
+            program_type=getattr(group, "program_type", None) or "general_english",
         )
         recent_groups_data.append(group_data)
     
@@ -2200,7 +2223,8 @@ async def get_admin_dashboard(
             "teacher_name": teacher.name if teacher else "Unknown",
             "module_count": module_count,
             "is_active": course.is_active,
-            "created_at": course.created_at
+            "created_at": course.created_at,
+            "course_type": getattr(course, "course_type", None) or "general_english",
         }
         recent_courses_data.append(course_data)
     

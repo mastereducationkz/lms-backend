@@ -246,7 +246,8 @@ async def create_course(
         cover_image_url=course_data.cover_image_url,
         teacher_id=teacher_id,
         estimated_duration_minutes=course_data.estimated_duration_minutes,
-        release_schedule=getattr(course_data, "release_schedule", None) or "all"
+        release_schedule=getattr(course_data, "release_schedule", None) or "all",
+        course_type=getattr(course_data, "course_type", None) or "general_english",
     )
     
     db.add(new_course)
@@ -316,6 +317,8 @@ async def update_course(
     course.estimated_duration_minutes = course_data.estimated_duration_minutes
     if hasattr(course_data, "release_schedule") and course_data.release_schedule:
         course.release_schedule = course_data.release_schedule
+    if hasattr(course_data, "course_type") and course_data.course_type:
+        course.course_type = course_data.course_type
 
     db.commit()
     db.refresh(course)

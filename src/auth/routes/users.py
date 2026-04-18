@@ -74,6 +74,8 @@ async def get_my_groups(
                 is_active=group.is_active,
                 is_special=group.is_special,
                 is_over=group.is_over,
+                group_type=getattr(group, "group_type", None) or "group",
+                program_type=getattr(group, "program_type", None) or "general_english",
                 student_count=0, # Not needed
                 students=[],
                 created_at=group.created_at
@@ -100,6 +102,8 @@ async def get_my_groups(
                 is_active=g.is_active,
                 is_special=g.is_special,
                 is_over=g.is_over,
+                group_type=getattr(g, "group_type", None) or "group",
+                program_type=getattr(g, "program_type", None) or "general_english",
                 students=[],
                 student_count=0,
                 created_at=g.created_at

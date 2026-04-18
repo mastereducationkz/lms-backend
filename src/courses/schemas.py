@@ -1,7 +1,12 @@
 from pydantic import BaseModel, field_validator
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 import json
+
+GroupTypeLiteral = Literal["group", "individual"]
+CourseTypeLiteral = Literal["sat", "ielts", "general_english"]
+# Та же шкала, что у курса — хранится на группе для удобного поиска/фильтрации
+ProgramTypeLiteral = CourseTypeLiteral
 
 
 class GroupSchema(BaseModel):
@@ -18,6 +23,8 @@ class GroupSchema(BaseModel):
     is_active: bool
     is_special: bool = False
     is_over: bool = False
+    group_type: GroupTypeLiteral = "group"
+    program_type: ProgramTypeLiteral = "general_english"
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None
@@ -84,6 +91,7 @@ class CourseSchema(BaseModel):
     created_at: datetime
     status: Optional[str] = None
     release_schedule: str = "all"  # "all" | "weekly"
+    course_type: CourseTypeLiteral = "general_english"
 
     class Config:
         from_attributes = True
@@ -96,6 +104,7 @@ class CourseCreateSchema(BaseModel):
     estimated_duration_minutes: int = 0
     teacher_id: Optional[int] = None
     release_schedule: str = "all"
+    course_type: CourseTypeLiteral = "general_english"
 
 
 class CourseGroupAccessSchema(BaseModel):

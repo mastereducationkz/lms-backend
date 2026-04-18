@@ -139,6 +139,8 @@ async def get_curator_groups(
             is_active=group.is_active,
             is_special=group.is_special,
             is_over=group.is_over,
+            group_type=getattr(group, "group_type", None) or "group",
+            program_type=getattr(group, "program_type", None) or "general_english",
             current_week=current_week,
             max_week=max_week
         ))
