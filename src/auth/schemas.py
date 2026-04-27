@@ -33,6 +33,7 @@ class UserSchema(BaseModel):
     no_substitutions: Optional[bool] = False
     course_ids: Optional[List[int]] = []
     created_at: datetime
+    is_analytics_hidden: Optional[bool] = False
 
     class Config:
         from_attributes = True

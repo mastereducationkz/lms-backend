@@ -214,9 +214,17 @@ async def get_my_groups(
 ):
     """Return curator's active groups with program week, total weeks, and start_date from schedule_config."""
     if current_user.role in ("admin", "head_curator"):
-        groups = db.query(Group).filter(Group.curator_id.isnot(None), Group.is_active == True).all()
+        groups = db.query(Group).filter(
+            Group.curator_id.isnot(None),
+            Group.is_active == True,
+            Group.is_over == False
+        ).all()
     else:
-        groups = db.query(Group).filter(Group.curator_id == current_user.id, Group.is_active == True).all()
+        groups = db.query(Group).filter(
+            Group.curator_id == current_user.id,
+            Group.is_active == True,
+            Group.is_over == False
+        ).all()
 
     result = []
     for g in groups:

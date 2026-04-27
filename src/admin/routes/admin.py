@@ -63,6 +63,7 @@ class UpdateUserRequest(BaseModel):
     password: Optional[str] = None
     group_ids: Optional[List[int]] = None  # Update user's groups
     course_ids: Optional[List[int]] = None  # Update head teacher's courses
+    is_analytics_hidden: Optional[bool] = None  # Hide curator from analytics/dashboard/leaderboard
 
 class CreateUserResponse(BaseModel):
     user: UserSchema
@@ -1954,6 +1955,8 @@ async def update_user(
         user.student_id = user_data.student_id
     if user_data.is_active is not None:
         user.is_active = user_data.is_active
+    if user_data.is_analytics_hidden is not None:
+        user.is_analytics_hidden = user_data.is_analytics_hidden
     if user_data.password is not None:
         user.hashed_password = hash_password(user_data.password)
         user.refresh_token = None  # Invalidate sessions
@@ -1999,6 +2002,25 @@ async def update_user(
     user_response = UserSchema.from_orm(user)
     
     return user_response
+
+@router.post("/users/{user_id}/toggle-analytics-hidden", response_model=UserSchema)
+async def toggle_curator_analytics_hidden(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin())
+):
+    """Toggle is_analytics_hidden flag for a curator (admin only)"""
+    user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_analytics_hidden = not user.is_analytics_hidden
+    user.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+
+    return UserSchema.from_orm(user)
+
 
 @router.get("/users/{user_id}/groups")
 async def get_user_groups(

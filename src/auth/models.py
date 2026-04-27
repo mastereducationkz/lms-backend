@@ -30,6 +30,7 @@ class UserInDB(Base):
     last_activity_date = Column(Date, nullable=True)
     activity_points = Column(BigInteger, default=0, nullable=False)
     no_substitutions = Column(Boolean, default=False, nullable=False)
+    is_analytics_hidden = Column(Boolean, default=False, nullable=False)
 
     groups = relationship("GroupStudent", back_populates="student", cascade="all, delete-orphan")
     enrollments = relationship("Enrollment", back_populates="user", cascade="all, delete-orphan")

@@ -464,8 +464,12 @@ def get_curator_dashboard_stats(
     from src.schemas.models import Group, Assignment, AssignmentSubmission, GroupStudent, GroupAssignment, StepProgress
     from sqlalchemy import func
     
-    # 1. Curator's Groups and Students
-    group_query = db.query(Group).filter(Group.curator_id == user.id, Group.is_active == True)
+    # 1. Curator's Groups and Students (active and not finished)
+    group_query = db.query(Group).filter(
+        Group.curator_id == user.id,
+        Group.is_active == True,
+        Group.is_over == False
+    )
     if group_id:
         group_query = group_query.filter(Group.id == group_id)
     
@@ -757,12 +761,17 @@ def get_head_curator_dashboard_stats(
     from sqlalchemy.orm import aliased
     
     # 1. Сводная статистика
-    total_curators = db.query(UserInDB).filter(UserInDB.role == "curator", UserInDB.is_active == True).count()
+    total_curators = db.query(UserInDB).filter(
+        UserInDB.role == "curator",
+        UserInDB.is_active == True,
+        UserInDB.is_analytics_hidden == False
+    ).count()
     
-    # Base query for groups
+    # Base query for groups (active and not finished)
     group_query = db.query(Group).filter(
         Group.is_active == True,
-        Group.is_special == False
+        Group.is_special == False,
+        Group.is_over == False
     )
     if group_id:
         group_query = group_query.filter(Group.id == group_id)
@@ -886,16 +895,21 @@ def get_head_curator_dashboard_stats(
             AssignmentSubmission.is_hidden == False
         ).count()
 
-    # 3. Детальная статистика по кураторам
-    curators = db.query(UserInDB).filter(UserInDB.role == "curator", UserInDB.is_active == True).all()
+    # 3. Детальная статистика по кураторам (hidden curators excluded)
+    curators = db.query(UserInDB).filter(
+        UserInDB.role == "curator",
+        UserInDB.is_active == True,
+        UserInDB.is_analytics_hidden == False
+    ).all()
     curator_performance = []
     
     for curator in curators:
-        # Группы куратора
+        # Группы куратора (active, not finished)
         c_groups_query = db.query(Group).filter(
             Group.curator_id == curator.id,
             Group.is_active == True,
-            Group.is_special == False
+            Group.is_special == False,
+            Group.is_over == False
         )
         if group_id:
             c_groups_query = c_groups_query.filter(Group.id == group_id)

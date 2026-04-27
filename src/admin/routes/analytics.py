@@ -265,9 +265,13 @@ async def get_course_analytics_overview(
             # Teacher has no groups? Then they see no students.
             enrolled_students = []
 
-    # Privacy Filter for curator: only students from curator's own groups
+    # Privacy Filter for curator: only students from active, non-finished curator's groups
     if current_user.role == "curator":
-        curator_group_ids = [g.id for g in db.query(Group.id).filter(Group.curator_id == current_user.id).all()]
+        curator_group_ids = [g.id for g in db.query(Group.id).filter(
+            Group.curator_id == current_user.id,
+            Group.is_active == True,
+            Group.is_over == False
+        ).all()]
         if curator_group_ids:
             allowed_student_ids = [gs.student_id for gs in db.query(GroupStudent.student_id).filter(
                 GroupStudent.group_id.in_(curator_group_ids)
@@ -977,8 +981,12 @@ async def get_quiz_question_errors(
                 )
             )
         elif current_user.role == "curator":
-            # Curator's groups
-            curator_groups = db.query(Group.id).filter(Group.curator_id == current_user.id).subquery()
+            # Curator's active, non-finished groups
+            curator_groups = db.query(Group.id).filter(
+                Group.curator_id == current_user.id,
+                Group.is_active == True,
+                Group.is_over == False
+            ).subquery()
             group_student_ids = db.query(GroupStudent.student_id).filter(GroupStudent.group_id.in_(curator_groups)).subquery()
             query = query.filter(QuizAttempt.user_id.in_(group_student_ids))
             
@@ -1246,8 +1254,12 @@ async def get_all_students_analytics(
         )
     
     elif current_user.role == "curator":
-        # Куратор видит студентов из своих групп
-        curator_groups = db.query(Group.id).filter(Group.curator_id == current_user.id).subquery()
+        # Куратор видит студентов из своих активных, незавершённых групп
+        curator_groups = db.query(Group.id).filter(
+            Group.curator_id == current_user.id,
+            Group.is_active == True,
+            Group.is_over == False
+        ).subquery()
         group_students = db.query(GroupStudent.student_id).filter(GroupStudent.group_id.in_(curator_groups)).subquery()
         
         students_query = students_query.filter(UserInDB.id.in_(group_students))
@@ -1425,8 +1437,8 @@ async def get_groups_analytics(
     if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Базовый запрос групп
-    groups_query = db.query(Group).filter(Group.is_active == True)
+    # Базовый запрос групп (active, not finished)
+    groups_query = db.query(Group).filter(Group.is_active == True, Group.is_over == False)
     
     # Фильтрация по ролям
     if current_user.role == "teacher":
@@ -1575,6 +1587,7 @@ async def get_course_groups_analytics(
         CourseGroupAccess, Group.id == CourseGroupAccess.group_id
     ).filter(
         Group.is_active == True,
+        Group.is_over == False,
         CourseGroupAccess.course_id == course_id,
         CourseGroupAccess.is_active == True
     )
@@ -1991,7 +2004,11 @@ async def get_student_progress_history(
             raise HTTPException(status_code=403, detail="Access denied to this student")
     
     elif current_user.role == "curator":
-        curator_groups = db.query(Group.id).filter(Group.curator_id == current_user.id).subquery()
+        curator_groups = db.query(Group.id).filter(
+            Group.curator_id == current_user.id,
+            Group.is_active == True,
+            Group.is_over == False
+        ).subquery()
         group_access = db.query(GroupStudent).filter(
             GroupStudent.student_id == student_id,
             GroupStudent.group_id.in_(curator_groups)
@@ -2366,7 +2383,11 @@ async def export_all_students_report(
             )
         
         elif current_user.role == "curator":
-            curator_groups = db.query(Group.id).filter(Group.curator_id == current_user.id).subquery()
+            curator_groups = db.query(Group.id).filter(
+                Group.curator_id == current_user.id,
+                Group.is_active == True,
+                Group.is_over == False
+            ).subquery()
             group_students = db.query(GroupStudent.student_id).filter(GroupStudent.group_id.in_(curator_groups)).subquery()
             
             students_query = students_query.filter(UserInDB.id.in_(group_students))
