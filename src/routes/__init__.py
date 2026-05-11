@@ -7,6 +7,7 @@ def register_routes(app: FastAPI):
     from src.admin.routes import (
         admin_router, dashboard_router,
         head_teacher_router, analytics_router, media_router,
+        sat_schedules_router,
     )
     from src.courses.routes import courses_router
     from src.assignments.routes import assignments_router, assignment_zero_router
@@ -43,3 +44,4 @@ def register_routes(app: FastAPI):
     app.include_router(lesson_requests_router, prefix="/lesson-requests", tags=["Lesson Requests"])
     app.include_router(curator_tasks_router, prefix="/curator-tasks", tags=["Curator Tasks"])
     app.include_router(student_journal_router, prefix="/student-journal", tags=["Student Journal"])
+    app.include_router(sat_schedules_router, prefix="/sat", tags=["SAT Schedules"])
