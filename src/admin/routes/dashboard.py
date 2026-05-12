@@ -1428,13 +1428,11 @@ async def get_curator_homework_by_group(
     
     # Get curator's groups
     if current_user.role == "head_curator":
-        # Head curator sees all groups that have a curator or all active groups? 
-        # Usually they oversee everything.
-        curator_groups_query = db.query(Group).filter(Group.is_over == False)
+        # Include completed groups too so curator can review historical homework.
+        curator_groups_query = db.query(Group)
     else:
         curator_groups_query = db.query(Group).filter(
-            Group.curator_id == current_user.id,
-            Group.is_over == False
+            Group.curator_id == current_user.id
         )
         
     if group_id:
@@ -1457,6 +1455,7 @@ async def get_curator_homework_by_group(
             result.append({
                 "group_id": group.id,
                 "group_name": group.name,
+                "is_over": group.is_over,
                 "students_count": 0,
                 "assignments": []
             })
@@ -1600,6 +1599,7 @@ async def get_curator_homework_by_group(
         result.append({
             "group_id": group.id,
             "group_name": group.name,
+            "is_over": group.is_over,
             "students_count": len(group_student_ids),
             "assignments": assignments_data
         })
