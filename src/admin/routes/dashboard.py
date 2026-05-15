@@ -16,6 +16,7 @@ from src.utils.permissions import require_role
 from src.schemas.models import GroupStudent
 from src.services.attendance_service import AttendanceService
 from src.services.group_completion_service import sync_groups_over_status
+from src.services.cache_service import cached
 
 router = APIRouter()
 
@@ -51,6 +52,11 @@ def _compute_group_program_end(group) -> Optional[date]:
     return None
 
 @router.get("/stats", response_model=DashboardStatsSchema)
+@cached(
+    namespace="dashboard:stats",
+    ttl=45,
+    key_args=("group_id", "start_date", "end_date"),
+)
 async def get_dashboard_stats(
     group_id: Optional[int] = None,
     start_date: Optional[str] = None,

@@ -11,6 +11,7 @@ import os
 
 from src.config import init_db
 from src.routes import register_routes
+from src.services import cache_service
 
 load_dotenv()
 
@@ -32,6 +33,16 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+# Warm up the Redis cache client so we surface connection issues at startup
+# instead of on the first request. Failure is non-fatal: requests still work.
+try:
+    if cache_service.is_available():
+        logging.info("Cache service ready (Redis connected)")
+    else:
+        logging.info("Cache service disabled or unreachable; running without Redis cache")
+except Exception as exc:
+    logging.warning("Cache service init failed: %s", exc)
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -62,6 +73,60 @@ async def check_file_size(request: Request, call_next):
                 content={"detail": f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)}MB"}
             )
     response = await call_next(request)
+    return response
+
+
+# Map mutation path prefixes to cache namespaces that may now be stale.
+# Keys are leading path segments after the leading slash (lowercase).
+# Values are glob patterns understood by ``cache_service.invalidate``.
+_MUTATION_INVALIDATION_RULES: dict[str, tuple[str, ...]] = {
+    "courses": ("courses:*", "progress:*", "dashboard:*", "admin:*"),
+    "modules": ("courses:*", "progress:*"),
+    "lessons": ("courses:*", "progress:*"),
+    "steps": ("courses:*", "progress:*"),
+    "assignments": ("assignments:*", "progress:*", "dashboard:*", "admin:*"),
+    "assignment-zero": ("assignment-zero:*", "dashboard:*"),
+    "progress": ("progress:*", "dashboard:*", "courses:*"),
+    "quizzes": ("progress:*", "courses:*"),
+    "events": ("events:*", "dashboard:*"),
+    "users": ("admin:*", "dashboard:*"),
+    "groups": ("courses:*", "admin:*", "dashboard:*"),
+    "admin": ("admin:*", "dashboard:*", "courses:*"),
+    "media": ("courses:*",),
+    "curator-tasks": ("curator-tasks:*", "dashboard:*"),
+    "student-journal": ("student-journal:*",),
+    "flashcards": ("flashcards:*",),
+    "lesson-requests": ("lesson-requests:*", "events:*"),
+}
+
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def invalidate_cache_on_mutation(request: Request, call_next):
+    """Drop stale cache entries after any successful mutation.
+
+    Invalidation is intentionally coarse (by domain prefix). Combined with the
+    short TTLs configured on individual cache decorators this keeps responses
+    fresh without per-endpoint bookkeeping.
+    """
+    response = await call_next(request)
+    try:
+        if request.method not in _MUTATING_METHODS:
+            return response
+        if response.status_code < 200 or response.status_code >= 300:
+            return response
+        path = request.url.path or ""
+        segments = [seg for seg in path.split("/") if seg]
+        if not segments:
+            return response
+        rule = _MUTATION_INVALIDATION_RULES.get(segments[0].lower())
+        if not rule:
+            return response
+        if cache_service.is_available():
+            cache_service.invalidate(*rule)
+    except Exception as exc:  # never let cache logic break a real response
+        logging.debug("Cache invalidation middleware failed: %s", exc)
     return response
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

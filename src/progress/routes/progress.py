@@ -22,6 +22,7 @@ from src.schemas.models import (
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_course_access, check_student_access, require_teacher_or_admin
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
+from src.services.cache_service import cached
 from src.utils.course_access import student_has_only_special_groups
 
 
@@ -765,6 +766,7 @@ async def get_progress_analytics(
     return analytics
 
 @router.get("/student/overview")
+@cached(namespace="progress:overview", ttl=45)
 async def get_student_progress_overview(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -937,6 +939,7 @@ def get_student_group_teachers(student_id: int, db: Session) -> List[Dict[str, A
     return teachers
 
 @router.get("/student/{student_id}/overview")
+@cached(namespace="progress:overview-by-id", ttl=45, key_args=("student_id",))
 async def get_student_progress_overview_by_id(
     student_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),

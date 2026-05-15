@@ -28,6 +28,7 @@ from src.utils.course_access import (
     lesson_blocked_by_special_cap,
 )
 from src.services.azure_openai_service import AzureOpenAIService
+from src.services.cache_service import cached
 from src.utils.duration_calculator import update_course_duration
 
 router = APIRouter()
@@ -37,6 +38,11 @@ router = APIRouter()
 # =============================================================================
 
 @router.get("/", response_model=List[CourseSchema])
+@cached(
+    namespace="courses:list",
+    ttl=120,
+    key_args=("skip", "limit", "teacher_id", "is_active"),
+)
 async def get_courses(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=1000),
@@ -159,6 +165,7 @@ async def get_courses(
     return courses_data
 
 @router.get("/my-courses", response_model=List[CourseSchema])
+@cached(namespace="courses:my", ttl=120)
 async def get_my_courses(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -264,6 +271,7 @@ async def create_course(
     return course_response
 
 @router.get("/{course_id}", response_model=CourseSchema)
+@cached(namespace="courses:detail", ttl=300, key_args=("course_id",))
 async def get_course(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -442,6 +450,11 @@ async def delete_course(
 # =============================================================================
 
 @router.get("/{course_id}/modules", response_model=List[ModuleSchema])
+@cached(
+    namespace="courses:modules",
+    ttl=60,
+    key_args=("course_id", "include_lessons", "student_id"),
+)
 async def get_course_modules(
     course_id: int,
     include_lessons: bool = Query(False, description="Include lessons for each module"),
@@ -947,6 +960,11 @@ async def get_module_lessons(
     return lessons_data
 
 @router.get("/{course_id}/lessons", response_model=List[LessonSchema])
+@cached(
+    namespace="courses:lessons-list",
+    ttl=120,
+    key_args=("course_id", "lightweight"),
+)
 async def get_course_lessons(
     course_id: int,
     lightweight: bool = False,

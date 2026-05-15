@@ -17,6 +17,7 @@ from src.schemas.models import (
 from src.utils.auth_utils import hash_password
 from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin
 from src.services.group_completion_service import sync_groups_over_status
+from src.services.cache_service import cached
 import secrets
 import string
 import logging
@@ -2132,6 +2133,7 @@ async def bulk_assign_users_to_group(
     return {"detail": f"{assigned_count} users assigned to group '{group.name}'"}
 
 @router.get("/dashboard", response_model=AdminDashboardResponse)
+@cached(namespace="admin:dashboard", ttl=60)
 async def get_admin_dashboard(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2259,6 +2261,7 @@ async def get_admin_dashboard(
 
 
 @router.get("/dashboard/charts", response_model=AdminDashboardChartsResponse)
+@cached(namespace="admin:dashboard-charts", ttl=120)
 async def get_admin_dashboard_charts(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin()),
