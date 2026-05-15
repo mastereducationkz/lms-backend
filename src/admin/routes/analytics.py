@@ -22,10 +22,12 @@ from src.schemas.models import (
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_course_access, check_student_access
 from src.services.excel_export_service import get_excel_export_service
+from src.services.cache_service import cached
 
 router = APIRouter()
 
 @router.get("/student/{student_id}/detailed")
+@cached(namespace="analytics:student-detailed", ttl=90, key_args=("student_id", "course_id"))
 async def get_detailed_student_analytics(
     student_id: int,
     course_id: Optional[int] = None,
@@ -164,6 +166,7 @@ async def get_detailed_student_analytics(
     return analytics_data
 
 @router.get("/course/{course_id}/overview")
+@cached(namespace="analytics:course-overview", ttl=90, key_args=("course_id",))
 async def get_course_analytics_overview(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1219,6 +1222,7 @@ async def get_quiz_question_errors(
 
 
 @router.get("/students/all")
+@cached(namespace="analytics:students-all", ttl=60, key_args=("course_id",))
 async def get_all_students_analytics(
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1427,6 +1431,7 @@ async def get_all_students_analytics(
     }
 
 @router.get("/groups")
+@cached(namespace="analytics:groups", ttl=90)
 async def get_groups_analytics(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)

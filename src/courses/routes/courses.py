@@ -927,6 +927,7 @@ async def delete_module(
 # =============================================================================
 
 @router.get("/{course_id}/modules/{module_id}/lessons", response_model=List[LessonSchema])
+@cached(namespace="courses:module-lessons", ttl=120, key_args=("course_id", "module_id"))
 async def get_module_lessons(
     course_id: int,
     module_id: int,
@@ -1064,6 +1065,7 @@ async def create_lesson(
     return lesson_schema
 
 @router.get("/lessons/{lesson_id}", response_model=LessonSchema)
+@cached(namespace="courses:lesson", ttl=300, key_args=("lesson_id",))
 async def get_lesson(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1452,6 +1454,7 @@ async def delete_lesson(
 # =============================================================================
 
 @router.get("/lessons/{lesson_id}/steps", response_model=List[StepSchema])
+@cached(namespace="courses:lesson-steps", ttl=300, key_args=("lesson_id", "include_content"))
 async def get_lesson_steps(
     lesson_id: int,
     include_content: bool = Query(True, description="Include full step content (text, video, attachments)"),
@@ -1878,6 +1881,7 @@ async def fix_lesson_order(
 # =============================================================================
 
 @router.get("/lessons/{lesson_id}/materials", response_model=List[LessonMaterialSchema])
+@cached(namespace="courses:lesson-materials", ttl=300, key_args=("lesson_id",))
 async def get_lesson_materials(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),

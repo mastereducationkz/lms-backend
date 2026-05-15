@@ -280,6 +280,11 @@ def create_progress_snapshot(user_id: int, course_id: int, db: Session):
 # =============================================================================
 
 @router.get("/my", response_model=List[ProgressSchema])
+@cached(
+    namespace="progress:my",
+    ttl=45,
+    key_args=("course_id", "lesson_id", "skip", "limit"),
+)
 async def get_my_progress(
     course_id: Optional[int] = None,
     lesson_id: Optional[int] = None,
@@ -303,6 +308,7 @@ async def get_my_progress(
     return [ProgressSchema.from_orm(record) for record in progress_records]
 
 @router.get("/course/{course_id}")
+@cached(namespace="progress:course", ttl=60, key_args=("course_id", "student_id"))
 async def get_course_progress(
     course_id: int,
     student_id: Optional[int] = None,
@@ -646,6 +652,7 @@ async def get_students_progress(
     return students_progress
 
 @router.get("/analytics")
+@cached(namespace="progress:analytics", ttl=45, key_args=("course_id", "time_range"))
 async def get_progress_analytics(
     course_id: Optional[int] = None,
     time_range: int = Query(30, description="Days to analyze"),
@@ -1389,6 +1396,7 @@ async def get_lesson_steps_progress(
     return steps_progress
 
 @router.get("/course/{course_id}/students/steps")
+@cached(namespace="progress:course-students-steps", ttl=60, key_args=("course_id",))
 async def get_course_students_steps_progress(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),

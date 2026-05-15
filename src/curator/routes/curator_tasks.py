@@ -25,6 +25,7 @@ from src.schemas.models import (
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_role
+from src.services.cache_service import cached
 
 router = APIRouter()
 
@@ -136,6 +137,14 @@ def _program_week_for_iso_week(iso_week_str: str, start_date_str: str) -> Option
 # ============================================================================
 
 @router.get("/my-tasks", summary="Get current curator's tasks")
+@cached(
+    namespace="curator-tasks:my",
+    ttl=45,
+    key_args=(
+        "status", "task_type", "student_id", "group_id", "week",
+        "program_week", "limit", "offset",
+    ),
+)
 async def get_my_tasks(
     status: Optional[str] = Query(None, description="Filter by status: pending, in_progress, completed, overdue"),
     task_type: Optional[str] = Query(None, description="Filter by type: onboarding, weekly, renewal, exam_results_collection"),
@@ -186,6 +195,7 @@ async def get_my_tasks(
 
 
 @router.get("/my-tasks/summary", summary="Get counts per status for current curator")
+@cached(namespace="curator-tasks:my-summary", ttl=30)
 async def get_my_tasks_summary(
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),
@@ -208,6 +218,7 @@ async def get_my_tasks_summary(
 
 
 @router.get("/my-groups", summary="Get groups for current curator with program week info")
+@cached(namespace="curator-tasks:my-groups", ttl=60)
 async def get_my_groups(
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),
@@ -334,6 +345,14 @@ async def update_my_task(
 # ============================================================================
 
 @router.get("/all-tasks", summary="[Head Curator / Admin] View all curator tasks")
+@cached(
+    namespace="curator-tasks:all",
+    ttl=45,
+    key_args=(
+        "curator_id", "status", "task_type", "group_id", "week",
+        "program_week", "limit", "offset",
+    ),
+)
 async def get_all_tasks(
     curator_id: Optional[int] = Query(None, description="Filter by specific curator"),
     status: Optional[str] = Query(None),
@@ -380,6 +399,7 @@ async def get_all_tasks(
 
 
 @router.get("/curators-summary", summary="[Head Curator / Admin] Stats per curator")
+@cached(namespace="curator-tasks:curators-summary", ttl=45, key_args=("week",))
 async def get_curators_summary(
     week: Optional[str] = Query(None),
     current_user: UserInDB = Depends(require_role(["head_curator", "admin"])),
@@ -447,6 +467,7 @@ def _ensure_custom_template(db: Session) -> None:
 
 
 @router.get("/templates", summary="List task templates")
+@cached(namespace="curator-tasks:templates", ttl=120, key_args=("task_type",))
 async def list_templates(
     task_type: Optional[str] = Query(None),
     current_user: UserInDB = Depends(require_role(["admin", "head_curator"])),
