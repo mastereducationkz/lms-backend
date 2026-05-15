@@ -98,6 +98,7 @@ _MUTATION_INVALIDATION_RULES: dict[str, tuple[str, ...]] = {
     "student-journal": ("student-journal:*",),
     "flashcards": ("flashcards:*",),
     "lesson-requests": ("lesson-requests:*", "events:*"),
+    "head-teacher": ("head-teacher:*", "dashboard:*", "courses:*", "events:*", "analytics:*"),
 }
 
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

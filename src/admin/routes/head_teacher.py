@@ -12,6 +12,7 @@ from src.schemas.models import (
     Event, EventGroup, EventParticipant, MissedAttendanceLog
 )
 from src.routes.auth import get_current_user_dependency
+from src.services.cache_service import cached
 from src.services.attendance_service import AttendanceService
 
 router = APIRouter()
@@ -271,6 +272,7 @@ def get_teacher_missed_attendance_stats(db: Session, teacher_id: int, group_ids:
 # ==============================================================================
 
 @router.get("/courses", response_model=List[HeadTeacherCourseSchema])
+@cached(namespace="head-teacher:courses", ttl=60)
 async def get_managed_courses(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -308,6 +310,11 @@ async def get_managed_courses(
 
 
 @router.get("/course/{course_id}/teachers", response_model=CourseTeacherStatsResponse)
+@cached(
+    namespace="head-teacher:course-teachers",
+    ttl=45,
+    key_args=("course_id", "days", "start_date", "end_date"),
+)
 async def get_course_teacher_statistics(
     course_id: int,
     days: int = Query(30, ge=0, le=365, description="Number of past days for statistics"),

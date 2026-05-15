@@ -830,9 +830,29 @@ async def get_all_groups(
     sync_groups_over_status(db)
     query = db.query(Group)
     
-    # Teachers can only see their own groups, admins and head curators can see all
+    # Teachers: own groups. Head teachers: groups linked to courses they manage.
+    # Admins / head curators: all groups (optional teacher_id / filters below).
     if current_user.role == "teacher":
         query = query.filter(Group.teacher_id == current_user.id)
+    elif current_user.role == "head_teacher":
+        managed_course_ids = [
+            row[0]
+            for row in db.query(CourseHeadTeacher.course_id).filter(
+                CourseHeadTeacher.head_teacher_id == current_user.id
+            ).all()
+        ]
+        if not managed_course_ids:
+            return []
+        group_ids = [
+            row[0]
+            for row in db.query(CourseGroupAccess.group_id).filter(
+                CourseGroupAccess.course_id.in_(managed_course_ids),
+                CourseGroupAccess.is_active == True,
+            ).distinct().all()
+        ]
+        if not group_ids:
+            return []
+        query = query.filter(Group.id.in_(group_ids))
     elif teacher_id is not None:
         query = query.filter(Group.teacher_id == teacher_id)
     

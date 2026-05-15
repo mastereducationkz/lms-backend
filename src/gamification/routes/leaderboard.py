@@ -20,6 +20,26 @@ from src.services.attendance_service import (
     ep_status_to_attendance_status,
 )
 
+
+def head_teacher_can_access_group(db: Session, head_teacher_user_id: int, group_id: int) -> bool:
+    course_accesses = db.query(CourseGroupAccess).filter(
+        CourseGroupAccess.group_id == group_id,
+        CourseGroupAccess.is_active == True,
+    ).all()
+    course_ids = [ca.course_id for ca in course_accesses]
+    if not course_ids:
+        return False
+    return (
+        db.query(CourseHeadTeacher)
+        .filter(
+            CourseHeadTeacher.course_id.in_(course_ids),
+            CourseHeadTeacher.head_teacher_id == head_teacher_user_id,
+        )
+        .first()
+        is not None
+    )
+
+
 router = APIRouter()
 
 @router.get("/curator/groups", response_model=List[GroupSchema])
@@ -796,20 +816,9 @@ async def get_group_full_attendance_matrix(
         if group_obj.teacher_id != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied to this group (Teacher mismatch)")
     elif current_user.role == "head_teacher":
-        course_accesses = db.query(CourseGroupAccess).filter(
-            CourseGroupAccess.group_id == group_id,
-            CourseGroupAccess.is_active == True
-        ).all()
-        course_ids = [ca.course_id for ca in course_accesses]
-        if not course_ids:
-            raise HTTPException(status_code=403, detail="Group not linked to any course")
-        head_teacher_access = db.query(CourseHeadTeacher).filter(
-            CourseHeadTeacher.course_id.in_(course_ids),
-            CourseHeadTeacher.head_teacher_id == current_user.id
-        ).first()
-        if not head_teacher_access:
+        if not head_teacher_can_access_group(db, current_user.id, group_id):
             raise HTTPException(status_code=403, detail="Access denied to this group")
-    elif current_user.role == "admin":
+    elif current_user.role in ("admin", "head_curator"):
         pass
     else:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -1198,7 +1207,7 @@ async def update_attendance_bulk(
     Update multiple attendance records in a single transaction.
     Supports event-based updates (preferred) and legacy schedule-based updates.
     """
-    if current_user.role not in ["curator", "admin", "teacher"]:
+    if current_user.role not in ["curator", "admin", "teacher", "head_teacher", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
 
     from src.services.event_service import EventService
@@ -1215,6 +1224,8 @@ async def update_attendance_bulk(
             # Role-based restriction
             if current_user.role == "curator" and group.curator_id != current_user.id: continue
             if current_user.role == "teacher" and group.teacher_id != current_user.id: continue
+            if current_user.role == "head_teacher" and not head_teacher_can_access_group(db, current_user.id, item.group_id):
+                continue
             cached_groups[item.group_id] = group
 
         # Priority: event_id — write to Attendance (single source of truth)
@@ -1282,7 +1293,7 @@ async def update_attendance(
     """
     
     # Auth
-    if current_user.role not in ["curator", "admin", "head_curator", "teacher"]:
+    if current_user.role not in ["curator", "admin", "head_curator", "teacher", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
     group = db.query(Group).filter(Group.id == data.group_id).first()
@@ -1294,6 +1305,9 @@ async def update_attendance(
          
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
          raise HTTPException(status_code=403, detail="Access denied to this group (Teacher mismatch)")
+
+    if current_user.role == "head_teacher" and not head_teacher_can_access_group(db, current_user.id, data.group_id):
+         raise HTTPException(status_code=403, detail="Access denied to this group")
 
     # Mode 1: Event-based — write to Attendance (single source of truth)
     if data.event_id:

@@ -28,12 +28,12 @@ def require_teacher_or_admin():
     return require_role(["teacher", "admin"])
 
 def require_teacher_or_admin_for_groups():
-    """Require teacher or admin role for group operations"""
+    """Require teacher, head teacher, head curator, or admin for group list reads."""
     def group_access_checker(current_user: UserInDB = Depends(get_current_user_dependency)):
-        if current_user.role not in ["teacher", "admin", "head_curator"]:
+        if current_user.role not in ["teacher", "head_teacher", "admin", "head_curator"]:
             raise HTTPException(
-                status_code=403, 
-                detail="Access denied. Only teachers, head curators, and admins can access groups."
+                status_code=403,
+                detail="Access denied. Only teachers, head teachers, head curators, and admins can access groups."
             )
         return current_user
     return group_access_checker

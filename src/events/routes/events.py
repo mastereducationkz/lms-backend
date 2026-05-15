@@ -9,7 +9,7 @@ from src.schemas.models import (
     UserInDB, Event, EventGroup, EventParticipant, Group, GroupStudent,
     EventSchema, EventParticipantSchema, Enrollment, EventCourse, Course,
     CreateEventRequest, Assignment, Lesson, Module, LessonSchedule,
-    AttendanceBulkUpdateSchema, EventStudentSchema, CourseGroupAccess
+    AttendanceBulkUpdateSchema, EventStudentSchema, CourseGroupAccess, CourseHeadTeacher
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_role, require_teacher_or_admin, require_teacher_curator_or_admin, check_event_access
@@ -18,6 +18,7 @@ from src.services.attendance_service import (
     attendance_status_to_ui,
     ep_status_to_attendance_status,
 )
+from src.services.cache_service import cached
 
 router = APIRouter()
 
@@ -365,6 +366,7 @@ async def get_my_events(
     return result[:limit]
 
 @router.get("/calendar", response_model=List[EventSchema])
+@cached(namespace="events:calendar", ttl=30, key_args=("year", "month"))
 async def get_calendar_events(
     year: int = Query(..., ge=2020, le=2030),
     month: int = Query(..., ge=1, le=12),
@@ -410,6 +412,25 @@ async def get_calendar_events(
         teacher_groups = db.query(Group).filter(Group.teacher_id == current_user.id).all()
         curator_groups = db.query(Group).filter(Group.curator_id == current_user.id).all()
         user_group_ids = list(set([g.id for g in teacher_groups + curator_groups]))
+
+    elif current_user.role == "head_curator":
+        user_group_ids = [g.id for g in db.query(Group).filter(Group.is_active == True).all()]
+        user_course_ids = [c.id for c in db.query(Course).filter(Course.is_active == True).all()]
+
+    elif current_user.role == "head_teacher":
+        managed_rows = db.query(CourseHeadTeacher.course_id).filter(
+            CourseHeadTeacher.head_teacher_id == current_user.id
+        ).all()
+        user_course_ids = [row[0] for row in managed_rows]
+        if user_course_ids:
+            user_group_ids = [
+                row[0] for row in db.query(CourseGroupAccess.group_id).filter(
+                    CourseGroupAccess.course_id.in_(user_course_ids),
+                    CourseGroupAccess.is_active == True,
+                ).distinct().all()
+            ]
+        else:
+            user_group_ids = []
         
     elif current_user.role == "admin":
         user_group_ids = [g.id for g in db.query(Group).all()]
@@ -437,7 +458,7 @@ async def get_calendar_events(
     )
     
     final_filter = base_access
-    if current_user.role in ["teacher", "curator"]:
+    if current_user.role in ["teacher", "curator", "head_teacher"]:
         print(f"DEBUG: Including events where teacher_id={current_user.id}")
         final_filter = or_(base_access, Event.teacher_id == current_user.id)
 
