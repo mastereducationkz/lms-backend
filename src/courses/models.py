@@ -20,7 +20,7 @@ class Group(Base):
     schedule_config = Column(JSONB, nullable=True)
     # "group" = классическая группа; "individual" = индивидуальная
     group_type = Column(String(32), nullable=False, default="group")
-    # SAT / IELTS / General English — для фильтрации и поиска (sat | ielts | general_english)
+    # SAT / IELTS / General English / NUET — для фильтрации и поиска
     program_type = Column(String(32), nullable=False, default="general_english")
 
     teacher = relationship("UserInDB", foreign_keys=[teacher_id], post_update=True)
@@ -75,7 +75,7 @@ class Course(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     # "all" = all modules open; "weekly" = modules unlock by week based on group start_date
     release_schedule = Column(String(20), default="all", nullable=False)
-    # sat | ielts | general_english
+    # sat | ielts | general_english | nuet
     course_type = Column(String(32), nullable=False, default="general_english")
 
     teacher = relationship("UserInDB", back_populates="created_courses")

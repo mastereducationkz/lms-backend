@@ -125,7 +125,7 @@ class CreateGroupRequest(BaseModel):
     is_special: bool = False
     is_over: bool = False
     group_type: Literal["group", "individual"] = "group"
-    program_type: Literal["sat", "ielts", "general_english"] = "general_english"
+    program_type: Literal["sat", "ielts", "general_english", "nuet"] = "general_english"
     # For special groups with course_id: cap on first N lessons (default 1 if omitted)
     max_open_lessons: Optional[int] = None
 
@@ -139,7 +139,7 @@ class UpdateGroupRequest(BaseModel):
     is_special: Optional[bool] = None
     is_over: Optional[bool] = None
     group_type: Optional[Literal["group", "individual"]] = None
-    program_type: Optional[Literal["sat", "ielts", "general_english"]] = None
+    program_type: Optional[Literal["sat", "ielts", "general_english", "nuet"]] = None
     student_ids: Optional[List[int]] = None  # Update student list
     max_open_lessons: Optional[int] = None
 
@@ -820,7 +820,7 @@ async def get_all_groups(
     limit: int = 100,
     teacher_id: Optional[int] = None,
     is_active: Optional[bool] = None,
-    program_type: Optional[Literal["sat", "ielts", "general_english"]] = Query(
+    program_type: Optional[Literal["sat", "ielts", "general_english", "nuet"]] = Query(
         None, description="Фильтр по программе (SAT / IELTS / General English)"
     ),
     db: Session = Depends(get_db),

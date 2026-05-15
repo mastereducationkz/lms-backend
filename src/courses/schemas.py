@@ -4,7 +4,7 @@ from typing import Optional, List, Literal
 import json
 
 GroupTypeLiteral = Literal["group", "individual"]
-CourseTypeLiteral = Literal["sat", "ielts", "general_english"]
+CourseTypeLiteral = Literal["sat", "ielts", "general_english", "nuet"]
 # Та же шкала, что у курса — хранится на группе для удобного поиска/фильтрации
 ProgramTypeLiteral = CourseTypeLiteral
 
