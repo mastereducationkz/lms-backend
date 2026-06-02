@@ -44,6 +44,9 @@ class StepProgress(Base):
 
     __table_args__ = (
         UniqueConstraint('user_id', 'step_id', name='uq_user_step_progress'),
+        Index('idx_step_progress_course_status_completed', 'course_id', 'status', 'completed_at'),
+        Index('idx_step_progress_user_course_status', 'user_id', 'course_id', 'status'),
+        Index('idx_step_progress_user_visited', 'user_id', 'visited_at'),
     )
 
 

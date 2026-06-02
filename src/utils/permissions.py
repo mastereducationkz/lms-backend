@@ -43,8 +43,8 @@ def require_curator_or_admin():
     return require_role(["curator", "admin"])
 
 def require_teacher_curator_or_admin():
-    """Require teacher, curator or admin role (includes head_curator)"""
-    return require_role(["teacher", "curator", "admin", "head_curator"])
+    """Require teacher, curator or admin role (includes head_curator and head_teacher)"""
+    return require_role(["teacher", "curator", "admin", "head_curator", "head_teacher"])
 
 def check_course_access(course_id: int, user: UserInDB, db: Session) -> bool:
     """
@@ -239,6 +239,37 @@ def check_student_access(student_id: int, user: UserInDB, db: Session) -> bool:
         ).first()
         
         return student_in_group is not None
+
+    elif user.role == "head_teacher":
+        from src.schemas.models import GroupStudent, CourseGroupAccess
+
+        assigned_course_ids = [
+            row[0]
+            for row in db.query(CourseHeadTeacher.course_id).filter(
+                CourseHeadTeacher.head_teacher_id == user.id
+            ).all()
+        ]
+
+        if not assigned_course_ids:
+            return False
+
+        student_group_ids = [
+            row[0]
+            for row in db.query(GroupStudent.group_id).filter(
+                GroupStudent.student_id == student_id
+            ).all()
+        ]
+
+        if not student_group_ids:
+            return False
+
+        has_course_access = db.query(CourseGroupAccess.id).filter(
+            CourseGroupAccess.group_id.in_(student_group_ids),
+            CourseGroupAccess.course_id.in_(assigned_course_ids),
+            CourseGroupAccess.is_active == True
+        ).first()
+
+        return has_course_access is not None
     
     return False
 

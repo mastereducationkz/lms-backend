@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, String, Integer, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime, timezone
@@ -40,6 +40,8 @@ class GroupStudent(Base):
 
     __table_args__ = (
         UniqueConstraint('group_id', 'student_id', name='uq_group_student'),
+        Index('idx_group_students_group_id', 'group_id'),
+        Index('idx_group_students_student_id', 'student_id'),
     )
 
 
@@ -186,6 +188,11 @@ class Enrollment(Base):
 
     user = relationship("UserInDB", back_populates="enrollments")
     course = relationship("Course", back_populates="enrollments")
+
+    __table_args__ = (
+        Index('idx_enrollments_course_active', 'course_id', 'is_active'),
+        Index('idx_enrollments_user_active', 'user_id', 'is_active'),
+    )
 
 
 class ManualLessonUnlock(Base):

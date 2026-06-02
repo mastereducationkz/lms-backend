@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, ARRAY, JSON
+from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, ARRAY, JSON, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -57,6 +57,12 @@ class AssignmentSubmission(Base):
     assignment = relationship("Assignment", back_populates="submissions")
     user = relationship("UserInDB", foreign_keys=[user_id], back_populates="assignment_submissions")
     grader = relationship("UserInDB", foreign_keys=[graded_by])
+
+    __table_args__ = (
+        Index('idx_assignment_submissions_user_assignment', 'user_id', 'assignment_id'),
+        Index('idx_assignment_submissions_assignment_submitted', 'assignment_id', 'submitted_at'),
+        Index('idx_assignment_submissions_user_graded', 'user_id', 'is_graded'),
+    )
 
 
 class AssignmentLinkedLesson(Base):

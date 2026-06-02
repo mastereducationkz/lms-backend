@@ -37,7 +37,7 @@ async def get_detailed_student_analytics(
     """Get comprehensive analytics for a specific student"""
     
     # Check permissions
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Verify student exists
@@ -166,15 +166,24 @@ async def get_detailed_student_analytics(
     return analytics_data
 
 @router.get("/course/{course_id}/overview")
-@cached(namespace="analytics:course-overview", ttl=90, key_args=("course_id",))
+@cached(
+    namespace="analytics:course-overview",
+    ttl=90,
+    key_args=("course_id", "group_id", "page", "page_size", "sort", "dir")
+)
 async def get_course_analytics_overview(
     course_id: int,
+    group_id: Optional[int] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    sort: str = Query("progress", pattern="^(name|progress|activity)$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """Get analytics overview for a specific course"""
     
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check course access (now properly validates curator access via group students)
@@ -286,17 +295,17 @@ async def get_course_analytics_overview(
     
     # Get course structure
     modules = db.query(Module).filter(Module.course_id == course_id).order_by(Module.order_index).all()
-    total_lessons = 0
-    total_steps = 0
-    
-    lesson_step_counts = {}
-    for module in modules:
-        lessons = db.query(Lesson).filter(Lesson.module_id == module.id).all()
-        total_lessons += len(lessons)
-        for lesson in lessons:
-            steps = db.query(Step).filter(Step.lesson_id == lesson.id).all()
-            total_steps += len(steps)
-            lesson_step_counts[lesson.id] = len(steps)
+    module_ids = [m.id for m in modules]
+    lesson_rows = db.query(Lesson.id, Lesson.title, Lesson.module_id).filter(Lesson.module_id.in_(module_ids)).all() if module_ids else []
+    lesson_ids = [row[0] for row in lesson_rows]
+    total_lessons = len(lesson_rows)
+    lesson_titles = {lid: ltitle for lid, ltitle, _ in lesson_rows}
+
+    lesson_step_rows = db.query(Step.lesson_id, func.count(Step.id)).filter(
+        Step.lesson_id.in_(lesson_ids)
+    ).group_by(Step.lesson_id).all() if lesson_ids else []
+    lesson_step_counts = {lesson_id: int(step_count) for lesson_id, step_count in lesson_step_rows}
+    total_steps = sum(lesson_step_counts.values())
     
     # Calculate engagement metrics
     step_progress_records = db.query(StepProgress).filter(
@@ -305,6 +314,10 @@ async def get_course_analytics_overview(
     
     total_time_spent = sum(sp.time_spent_minutes for sp in step_progress_records)
     completed_steps = len([sp for sp in step_progress_records if sp.status == "completed"])
+
+    step_progress_by_student = defaultdict(list)
+    for step_progress in step_progress_records:
+        step_progress_by_student[step_progress.user_id].append(step_progress)
     
     # Pre-fetch groups for students to avoid N+1
     student_ids = [s.id for s in enrolled_students]
@@ -329,15 +342,6 @@ async def get_course_analytics_overview(
     
     total_assignments_count = len(assignments)
     logger.info(f"Course {course_id}: Found {total_assignments_count} assignments")
-
-    # Pre-fetch lesson titles to map lesson_id -> title
-    # We can get all lessons in the course via Module
-    lesson_titles = {}
-    course_lessons = db.query(Lesson.id, Lesson.title).join(Module).filter(
-        Module.course_id == course_id
-    ).all()
-    for lid, ltitle in course_lessons:
-        lesson_titles[lid] = ltitle
 
     # --- External SAT Data Fetching ---
     # Fetch SAT scores for all students in parallel
@@ -588,7 +592,7 @@ async def get_course_analytics_overview(
                     latest_submission_map[key] = submission
 
     for student in enrolled_students:
-        student_steps = [sp for sp in step_progress_records if sp.user_id == student.id]
+        student_steps = step_progress_by_student.get(student.id, [])
         student_completed = len([sp for sp in student_steps if sp.status == "completed"])
         student_time = sum(sp.time_spent_minutes for sp in student_steps)
         
@@ -749,6 +753,28 @@ async def get_course_analytics_overview(
             "current_lesson_steps_total": current_lesson_steps_total,
             "last_test_result": last_test_res
         })
+
+    if group_id:
+        student_performance = [
+            student
+            for student in student_performance
+            if group_id in student.get("group_ids", [])
+        ]
+
+    if sort == "name":
+        student_performance.sort(key=lambda student: (student.get("student_name") or "").lower(), reverse=dir == "desc")
+    elif sort == "activity":
+        student_performance.sort(
+            key=lambda student: student.get("last_activity").timestamp() if student.get("last_activity") else 0,
+            reverse=dir == "desc"
+        )
+    else:
+        student_performance.sort(key=lambda student: student.get("completion_percentage") or 0, reverse=dir == "desc")
+
+    total_students_filtered = len(student_performance)
+    start = (page - 1) * page_size
+    end = start + page_size
+    student_performance_page = student_performance[start:end]
     
     return {
         "course_info": {
@@ -762,12 +788,20 @@ async def get_course_analytics_overview(
             "total_steps": total_steps
         },
         "engagement": {
-            "total_enrolled_students": len(enrolled_students),
+            "total_enrolled_students": total_students_filtered,
             "total_time_spent_minutes": total_time_spent,
             "total_completed_steps": completed_steps,
-            "average_completion_rate": (completed_steps / (total_steps * len(enrolled_students)) * 100) if total_steps > 0 and enrolled_students else 0
+            "average_completion_rate": (
+                sum(student.get("completion_percentage") or 0 for student in student_performance) / total_students_filtered
+            ) if total_students_filtered > 0 else 0
         },
-        "student_performance": student_performance
+        "student_performance": student_performance_page,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total_items": total_students_filtered,
+            "total_pages": (total_students_filtered + page_size - 1) // page_size
+        }
     }
 
 @router.get("/video-engagement/{course_id}")
@@ -778,36 +812,44 @@ async def get_video_engagement_analytics(
 ):
     """Get video engagement analytics for a course"""
     
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Properly validate access including curator permissions
     if not check_course_access(course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this course")
     
-    # Get video steps in the course
-    video_steps = db.query(Step).join(Lesson).join(Module).filter(
+    video_rows = db.query(
+        Step.id,
+        Step.title,
+        Lesson.title.label("lesson_title"),
+        Step.video_url,
+        func.count(StepProgress.id).label("total_views"),
+        func.count(StepProgress.id).filter(StepProgress.status == "completed").label("completed_views"),
+        func.coalesce(func.sum(StepProgress.time_spent_minutes), 0).label("total_watch_time_minutes")
+    ).join(
+        Lesson, Lesson.id == Step.lesson_id
+    ).join(
+        Module, Module.id == Lesson.module_id
+    ).outerjoin(
+        StepProgress, StepProgress.step_id == Step.id
+    ).filter(
         Module.course_id == course_id,
         Step.content_type == "video_text"
+    ).group_by(
+        Step.id, Step.title, Lesson.title, Step.video_url
     ).all()
-    
+
     video_analytics = []
-    
-    for step in video_steps:
-        # Get progress for this video step
-        step_progress = db.query(StepProgress).filter(
-            StepProgress.step_id == step.id
-        ).all()
-        
-        total_views = len(step_progress)
-        completed_views = len([sp for sp in step_progress if sp.status == "completed"])
-        total_time_spent = sum(sp.time_spent_minutes for sp in step_progress)
-        
+    for row in video_rows:
+        total_views = int(row.total_views or 0)
+        completed_views = int(row.completed_views or 0)
+        total_time_spent = float(row.total_watch_time_minutes or 0)
         video_analytics.append({
-            "step_id": step.id,
-            "step_title": step.title,
-            "lesson_title": step.lesson.title if step.lesson else "Unknown",
-            "video_url": step.video_url,
+            "step_id": row.id,
+            "step_title": row.title,
+            "lesson_title": row.lesson_title or "Unknown",
+            "video_url": row.video_url,
             "total_views": total_views,
             "completed_views": completed_views,
             "completion_rate": (completed_views / total_views * 100) if total_views > 0 else 0,
@@ -819,7 +861,7 @@ async def get_video_engagement_analytics(
         "course_id": course_id,
         "video_analytics": video_analytics,
         "summary": {
-            "total_videos": len(video_steps),
+            "total_videos": len(video_rows),
             "total_video_views": sum(va["total_views"] for va in video_analytics),
             "average_completion_rate": sum(va["completion_rate"] for va in video_analytics) / len(video_analytics) if video_analytics else 0
         }
@@ -833,7 +875,7 @@ async def get_quiz_performance_analytics(
 ):
     """Get quiz performance analytics for a course"""
     
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Properly validate access including curator permissions
@@ -938,11 +980,16 @@ def extract_correct_answers_from_gaps(text: str, separator: str = ',') -> List[s
     return results
 
 @router.get("/course/{course_id}/quiz-errors")
+@cached(
+    namespace="analytics:quiz-errors",
+    ttl=60,
+    key_args=("course_id", "group_id", "lesson_id", "limit")
+)
 async def get_quiz_question_errors(
     course_id: int,
     group_id: Optional[int] = None,
     lesson_id: Optional[int] = None,
-    limit: int = Query(500, description="Max number of questions to return"),
+    limit: int = Query(200, ge=1, le=500, description="Max number of questions to return"),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -951,7 +998,7 @@ async def get_quiz_question_errors(
     Helps teachers identify difficult questions students struggle with.
     """
     
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     if not check_course_access(course_id, current_user, db):
@@ -1235,7 +1282,7 @@ async def get_all_students_analytics(
     """
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Базовый запрос студентов
@@ -1271,158 +1318,182 @@ async def get_all_students_analytics(
     # Админ видит всех студентов (без дополнительной фильтрации)
     
     students = students_query.all()
-    
+    student_ids = [student.id for student in students]
+
+    student_groups_map: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    if student_ids:
+        group_rows = db.query(
+            GroupStudent.student_id,
+            Group.id,
+            Group.name
+        ).join(
+            Group, Group.id == GroupStudent.group_id
+        ).filter(
+            GroupStudent.student_id.in_(student_ids)
+        ).all()
+        for student_id_value, group_id_value, group_name in group_rows:
+            student_groups_map[student_id_value].append({"id": group_id_value, "name": group_name})
+
+    summary_map: Dict[int, Dict[str, Any]] = {}
+    if student_ids:
+        summary_rows = db.query(
+            StudentCourseSummary.user_id,
+            func.count(StudentCourseSummary.course_id).label("active_courses_count"),
+            func.coalesce(func.sum(StudentCourseSummary.total_steps), 0).label("total_steps"),
+            func.coalesce(func.sum(StudentCourseSummary.completed_steps), 0).label("completed_steps")
+        ).filter(
+            StudentCourseSummary.user_id.in_(student_ids)
+        ).group_by(
+            StudentCourseSummary.user_id
+        ).all()
+        for row in summary_rows:
+            summary_map[row.user_id] = {
+                "active_courses_count": int(row.active_courses_count or 0),
+                "total_steps": int(row.total_steps or 0),
+                "completed_steps": int(row.completed_steps or 0)
+            }
+
+    assignment_map: Dict[int, Dict[str, Any]] = {}
+    if student_ids:
+        assignment_rows = db.query(
+            AssignmentSubmission.user_id,
+            func.count(AssignmentSubmission.assignment_id).label("completed_assignments"),
+            func.coalesce(func.sum(AssignmentSubmission.score), 0).label("total_assignment_score"),
+            func.coalesce(func.sum(AssignmentSubmission.max_score), 0).label("total_max_score")
+        ).filter(
+            AssignmentSubmission.user_id.in_(student_ids),
+            AssignmentSubmission.is_graded == True
+        ).group_by(
+            AssignmentSubmission.user_id
+        ).all()
+        for row in assignment_rows:
+            assignment_map[row.user_id] = {
+                "completed_assignments": int(row.completed_assignments or 0),
+                "total_assignment_score": float(row.total_assignment_score or 0),
+                "total_max_score": float(row.total_max_score or 0)
+            }
+
+    total_assignments_map: Dict[int, int] = {}
+    if student_ids:
+        total_assignment_rows = db.query(
+            GroupStudent.student_id,
+            func.count(func.distinct(Assignment.id))
+        ).join(
+            Group, Group.id == GroupStudent.group_id
+        ).outerjoin(
+            Assignment, Assignment.group_id == Group.id
+        ).filter(
+            GroupStudent.student_id.in_(student_ids),
+            Assignment.is_active == True
+        ).group_by(
+            GroupStudent.student_id
+        ).all()
+        total_assignments_map = {student_id_value: int(total_value or 0) for student_id_value, total_value in total_assignment_rows}
+
+    last_step_subquery = db.query(
+        StepProgress.user_id.label("user_id"),
+        func.max(StepProgress.visited_at).label("last_visited_at")
+    ).filter(
+        StepProgress.user_id.in_(student_ids)
+    )
+    if course_id:
+        last_step_subquery = last_step_subquery.join(
+            Step, Step.id == StepProgress.step_id
+        ).join(
+            Lesson, Lesson.id == Step.lesson_id
+        ).join(
+            Module, Module.id == Lesson.module_id
+        ).filter(
+            Module.course_id == course_id
+        )
+    last_step_subquery = last_step_subquery.group_by(StepProgress.user_id).subquery()
+
+    last_step_rows = db.query(
+        StepProgress.user_id,
+        Step.lesson_id,
+        Lesson.title
+    ).join(
+        last_step_subquery,
+        and_(
+            last_step_subquery.c.user_id == StepProgress.user_id,
+            last_step_subquery.c.last_visited_at == StepProgress.visited_at
+        )
+    ).join(
+        Step, Step.id == StepProgress.step_id
+    ).join(
+        Lesson, Lesson.id == Step.lesson_id
+    ).all() if student_ids else []
+
+    last_lesson_map: Dict[int, Dict[str, Any]] = {}
+    lesson_ids = [row.lesson_id for row in last_step_rows]
+    lesson_steps_counts = {}
+    if lesson_ids:
+        lesson_steps_counts = {
+            lesson_id_value: int(total_steps_value or 0)
+            for lesson_id_value, total_steps_value in db.query(
+                Step.lesson_id, func.count(Step.id)
+            ).filter(
+                Step.lesson_id.in_(lesson_ids)
+            ).group_by(
+                Step.lesson_id
+            ).all()
+        }
+
+    completed_lesson_rows = db.query(
+        StepProgress.user_id,
+        Step.lesson_id,
+        func.count(StepProgress.id)
+    ).join(
+        Step, Step.id == StepProgress.step_id
+    ).filter(
+        StepProgress.user_id.in_(student_ids),
+        StepProgress.status == "completed",
+        Step.lesson_id.in_(lesson_ids)
+    ).group_by(
+        StepProgress.user_id, Step.lesson_id
+    ).all() if lesson_ids else []
+    completed_lesson_map = {(row[0], row[1]): int(row[2] or 0) for row in completed_lesson_rows}
+
+    for row in last_step_rows:
+        total_lesson_steps = lesson_steps_counts.get(row.lesson_id, 0)
+        completed_lesson_steps = completed_lesson_map.get((row.user_id, row.lesson_id), 0)
+        lesson_progress_percentage = (completed_lesson_steps / total_lesson_steps * 100) if total_lesson_steps > 0 else 0
+        last_lesson_map[row.user_id] = {
+            "lesson_title": row.title,
+            "lesson_progress_percentage": round(lesson_progress_percentage, 1),
+            "completed_steps": completed_lesson_steps,
+            "total_steps": total_lesson_steps
+        }
+
     students_analytics = []
     for student in students:
-        # Получаем группы студента
-        student_groups = db.query(Group).join(GroupStudent).filter(
-            GroupStudent.student_id == student.id
-        ).all()
-        
-        # Получаем ВСЕ курсы где есть прогресс студента для подсчета общего прогресса
-        all_courses_query = db.query(Course).join(
-            Module, Module.course_id == Course.id
-        ).join(
-            Lesson, Lesson.module_id == Module.id
-        ).join(
-            Step, Step.lesson_id == Lesson.id
-        ).join(
-            StepProgress, StepProgress.step_id == Step.id
-        ).filter(
-            StepProgress.user_id == student.id
-        )
-        
-        all_courses_with_progress = all_courses_query.distinct().all()
-        
-        # Если нет прогресса, пробуем через Enrollment для общего прогресса
-        if not all_courses_with_progress:
-            enrollment_query = db.query(Course).join(Enrollment).filter(
-                Enrollment.user_id == student.id,
-                Course.is_active == True
-            )
-            all_courses_with_progress = enrollment_query.all()
-        
-        active_courses = all_courses_with_progress
-        
-        # Получаем курсы для фильтрации last_lesson (если указан course_id)
-        last_lesson_courses = active_courses
-        if course_id:
-            last_lesson_courses = [c for c in active_courses if c.id == course_id]
-        
-        # Подсчитываем общий прогресс
-        total_steps = 0
-        completed_steps = 0
-        total_assignments = 0
-        completed_assignments = 0
-        total_assignment_score = 0
-        total_max_score = 0
-        
-        for course in active_courses:
-            # Подсчет шагов
-            course_steps = db.query(Step).join(Lesson).join(Module).filter(
-                Module.course_id == course.id
-            ).count()
-            total_steps += course_steps
-            
-            # Правильный подсчет завершенных шагов через JOIN (как в детальном прогрессе)
-            course_completed_steps = db.query(StepProgress).join(
-                Step, StepProgress.step_id == Step.id
-            ).join(
-                Lesson, Step.lesson_id == Lesson.id
-            ).join(
-                Module, Lesson.module_id == Module.id
-            ).filter(
-                StepProgress.user_id == student.id,
-                Module.course_id == course.id,
-                StepProgress.status == "completed"
-            ).count()
-            completed_steps += course_completed_steps
-            
-            # Подсчет заданий
-            course_assignments = db.query(Assignment).join(Lesson).join(Module).filter(
-                Module.course_id == course.id
-            ).all()
-            total_assignments += len(course_assignments)
-            
-            for assignment in course_assignments:
-                submission = db.query(AssignmentSubmission).filter(
-                    AssignmentSubmission.assignment_id == assignment.id,
-                    AssignmentSubmission.user_id == student.id
-                ).first()
-                
-                if submission and submission.is_graded:
-                    completed_assignments += 1
-                    total_assignment_score += submission.score or 0
-                    total_max_score += assignment.max_score or 0
-        
-        # Вычисляем проценты
+        summary = summary_map.get(student.id, {"active_courses_count": 0, "total_steps": 0, "completed_steps": 0})
+        assignments = assignment_map.get(student.id, {"completed_assignments": 0, "total_assignment_score": 0, "total_max_score": 0})
+
+        total_steps = summary["total_steps"]
+        completed_steps = summary["completed_steps"]
         completion_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
-        assignment_score_percentage = (total_assignment_score / total_max_score * 100) if total_max_score > 0 else 0
-        
-        # Получаем информацию о последнем уроке (фильтруем по курсу если указан)
-        last_lesson_info = None
-        
-        # Build query with optional course filter
-        step_progress_query = db.query(StepProgress).join(
-            Step, StepProgress.step_id == Step.id
-        ).join(
-            Lesson, Step.lesson_id == Lesson.id
-        ).join(
-            Module, Lesson.module_id == Module.id
-        ).filter(
-            StepProgress.user_id == student.id
-        )
-        
-        # Filter by course if provided
-        if course_id:
-            step_progress_query = step_progress_query.filter(Module.course_id == course_id)
-            
-        last_step_progress = step_progress_query.order_by(StepProgress.visited_at.desc()).first()
-        
-        if last_step_progress:
-            # Получаем информацию об уроке
-            lesson = db.query(Lesson).join(Step).filter(
-                Step.id == last_step_progress.step_id
-            ).first()
-            
-            if lesson:
-                # Считаем прогресс урока
-                total_lesson_steps = db.query(Step).filter(
-                    Step.lesson_id == lesson.id
-                ).count()
-                
-                completed_lesson_steps = db.query(StepProgress).join(Step).filter(
-                    StepProgress.user_id == student.id,
-                    Step.lesson_id == lesson.id,
-                    StepProgress.status == "completed"
-                ).count()
-                
-                lesson_progress_percentage = (completed_lesson_steps / total_lesson_steps * 100) if total_lesson_steps > 0 else 0
-                
-                last_lesson_info = {
-                    "lesson_title": lesson.title,
-                    "lesson_progress_percentage": round(lesson_progress_percentage, 1),
-                    "completed_steps": completed_lesson_steps,
-                    "total_steps": total_lesson_steps
-                }
-        
+        assignment_score_percentage = (
+            assignments["total_assignment_score"] / assignments["total_max_score"] * 100
+        ) if assignments["total_max_score"] > 0 else 0
+
         students_analytics.append({
             "student_id": student.id,
             "student_name": student.name,
             "student_email": student.email,
             "student_number": student.student_id,
-            "groups": [{"id": g.id, "name": g.name} for g in student_groups],
-            "active_courses_count": len(active_courses),
+            "groups": student_groups_map.get(student.id, []),
+            "active_courses_count": summary["active_courses_count"],
             "total_steps": total_steps,
             "completed_steps": completed_steps,
             "completion_percentage": round(completion_percentage, 1),
-            "total_assignments": total_assignments,
-            "completed_assignments": completed_assignments,
+            "total_assignments": total_assignments_map.get(student.id, 0),
+            "completed_assignments": assignments["completed_assignments"],
             "assignment_score_percentage": round(assignment_score_percentage, 1),
             "total_study_time_minutes": student.total_study_time_minutes,
             "daily_streak": student.daily_streak,
             "last_activity_date": student.last_activity_date,
-            "last_lesson": last_lesson_info
+            "last_lesson": last_lesson_map.get(student.id)
         })
     
     return {
@@ -1439,7 +1510,7 @@ async def get_groups_analytics(
     """Получить аналитику по всем доступным группам"""
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Базовый запрос групп (active, not finished)
@@ -1578,7 +1649,7 @@ async def get_course_groups_analytics(
 ):
     """Get analytics for groups in a specific course"""
     
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check course access
@@ -1785,7 +1856,7 @@ async def get_group_students_analytics(
     """
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Проверяем доступ к группе
@@ -1979,7 +2050,7 @@ async def get_student_progress_history(
     """Получить историю прогресса студента"""
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Проверяем доступ к студенту (аналогично другим эндпоинтам)
@@ -2197,7 +2268,7 @@ async def export_student_report(
     """Экспорт PDF отчета по студенту"""
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Получаем данные студента (используем существующий эндпоинт)
@@ -2241,7 +2312,7 @@ async def export_group_report(
     """Экспорт PDF отчета по группе"""
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     try:
@@ -2365,7 +2436,7 @@ async def export_all_students_report(
     """Экспорт PDF отчета по всем доступным студентам"""
     
     # Проверка прав доступа
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     try:
@@ -2690,7 +2761,7 @@ async def get_student_detailed_progress(
     """
     
     # Check role-based access
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Validate student access (now properly checks curator permissions)
@@ -3028,7 +3099,7 @@ async def get_student_learning_path(
     """
     
     # Check role-based access
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Validate student access (now properly checks curator permissions)
@@ -3114,7 +3185,7 @@ async def export_analytics_to_excel(
     """
     
     # Check permissions
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check course access
@@ -3588,7 +3659,7 @@ async def get_student_sat_scores(
     """Get SAT scores for a student from external platform"""
     
     # Check permissions
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Verify student exists
@@ -3665,7 +3736,7 @@ async def get_course_progress_history(
     Get cumulative progress history for the course (all time).
     Optionally filtered by group.
     """
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
 
     # 1. Determine the set of student IDs to consider
