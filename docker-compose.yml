@@ -67,6 +67,8 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./scripts:/app/scripts:ro
+      - ./backups:/app/backups
+      - ./logs:/app/logs
     expose:
       - "8000"
 
