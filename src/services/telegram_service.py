@@ -5,6 +5,7 @@ import os
 import httpx
 import asyncio
 import logging
+from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,119 @@ async def send_telegram_message(chat_id: str, message: str, parse_mode: str = "H
     except Exception as e:
         logger.error(f"Error sending Telegram message: {e}")
         return False
+
+
+async def send_telegram_file(
+    chat_id: str,
+    file_path: str,
+    caption: Optional[str] = None,
+    parse_mode: str = "HTML"
+) -> bool:
+    """
+    Send a file to a specific Telegram chat.
+    
+    Args:
+        chat_id: The Telegram chat ID to send the file to
+        file_path: Path to the file to send
+        caption: Optional caption for the file (supports HTML formatting)
+        parse_mode: Caption parse mode (HTML or Markdown)
+    
+    Returns:
+        True if file was sent successfully, False otherwise
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN not configured, skipping file upload")
+        return False
+    
+    file_path_obj = Path(file_path)
+    if not file_path_obj.exists():
+        logger.error(f"File not found: {file_path}")
+        return False
+    
+    # Check file size (Telegram limit is 50MB)
+    file_size = file_path_obj.stat().st_size
+    max_size = 50 * 1024 * 1024  # 50 MB
+    if file_size > max_size:
+        logger.error(f"File too large: {file_size} bytes (max {max_size} bytes)")
+        return False
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            with open(file_path, 'rb') as f:
+                files = {'document': (file_path_obj.name, f, 'application/octet-stream')}
+                data = {'chat_id': chat_id}
+                if caption:
+                    data['caption'] = caption
+                    data['parse_mode'] = parse_mode
+                
+                response = await client.post(url, files=files, data=data)
+                
+                if response.status_code == 200:
+                    logger.info(f"File sent to {chat_id}: {file_path}")
+                    return True
+                else:
+                    logger.error(f"Failed to send file: {response.text}")
+                    return False
+    except Exception as e:
+        logger.error(f"Error sending file to Telegram: {e}")
+        return False
+
+
+async def send_backup_to_admins(
+    file_path: str,
+    db_name: str,
+    file_size: int,
+    checksum: str,
+    timestamp: str
+) -> int:
+    """
+    Send backup file to all admin chat IDs.
+    
+    Args:
+        file_path: Path to the backup file
+        db_name: Database name
+        file_size: File size in bytes
+        checksum: MD5 checksum of the file
+        timestamp: Backup timestamp
+    
+    Returns:
+        Number of successful sends
+    """
+    admin_chat_ids = get_admin_chat_ids()
+    
+    if not admin_chat_ids:
+        logger.warning("No admin chat IDs configured, skipping backup upload")
+        return 0
+    
+    # Format file size
+    if file_size < 1024:
+        size_str = f"{file_size} B"
+    elif file_size < 1024 * 1024:
+        size_str = f"{file_size / 1024:.2f} KB"
+    else:
+        size_str = f"{file_size / (1024 * 1024):.2f} MB"
+    
+    # Build caption
+    caption = f"""💾 <b>Database Backup</b>
+
+📊 <b>Database:</b> {db_name}
+🕐 <b>Timestamp:</b> {timestamp}
+📦 <b>Size:</b> {size_str}
+🔒 <b>MD5:</b> <code>{checksum}</code>
+
+✅ Backup completed successfully"""
+    
+    # Send to all admins
+    success_count = 0
+    for chat_id in admin_chat_ids:
+        if await send_telegram_file(chat_id, file_path, caption):
+            success_count += 1
+        else:
+            logger.error(f"Failed to send backup to chat_id: {chat_id}")
+    
+    return success_count
 
 
 async def notify_admins_about_error_report(
