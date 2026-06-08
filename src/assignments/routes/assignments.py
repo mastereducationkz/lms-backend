@@ -256,6 +256,7 @@ async def get_assigned_lessons_for_course(
     Get all lessons of a course that have already been assigned in homework.
     Returns a list of { lesson_id, assignment_id, assignment_title, group_id, group_name, created_at }.
     Helps teachers avoid assigning the same lesson twice.
+    Excludes assignments from groups that have finished training (is_over=True).
     """
     from src.schemas.models import Group
 
@@ -286,10 +287,12 @@ async def get_assigned_lessons_for_course(
             Assignment.created_at,
         )
         .join(Assignment, AssignmentLinkedLesson.assignment_id == Assignment.id)
+        .join(Group, Assignment.group_id == Group.id)
         .filter(
             AssignmentLinkedLesson.lesson_id.in_(course_lesson_ids),
             Assignment.is_active == True,
             (Assignment.is_hidden == False) | (Assignment.is_hidden == None),
+            Group.is_over == False,
         )
     )
 
