@@ -80,23 +80,24 @@ fi
 # Send to Telegram
 log "Sending backup to Telegram..."
 
-# Load environment variables
-if [ -f "${BACKEND_DIR}/.env" ]; then
-    export $(grep -v '^#' "${BACKEND_DIR}/.env" | xargs)
-fi
-
-# Check if Python is available
-if ! command -v python3 &> /dev/null; then
-    log_error "python3 not found"
-    exit 1
-fi
-
-# Send via Python script
-if python3 "${SCRIPT_DIR}/send_backup_telegram.py" "$BACKUP_FILE" >> "$LOG_FILE" 2>&1; then
-    log "✓ Backup sent to Telegram successfully"
+# Check if backend container is running
+if ! docker ps | grep -q "lms-backend\|backend"; then
+    log_error "Backend container is not running, skipping Telegram upload"
 else
-    log_error "Failed to send backup to Telegram (backup file preserved)"
-    # Don't exit - backup is still saved locally
+    # Detect backend container name
+    if docker ps | grep -q "lms-backend"; then
+        BACKEND_CONTAINER="lms-backend"
+    else
+        BACKEND_CONTAINER="backend"
+    fi
+    
+    # Send via Python script inside Docker container
+    if docker exec "$BACKEND_CONTAINER" python scripts/send_backup_telegram.py "$BACKUP_FILE" >> "$LOG_FILE" 2>&1; then
+        log "✓ Backup sent to Telegram successfully"
+    else
+        log_error "Failed to send backup to Telegram (backup file preserved)"
+        # Don't exit - backup is still saved locally
+    fi
 fi
 
 # Cleanup old backups
