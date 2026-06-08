@@ -91,8 +91,12 @@ else
         BACKEND_CONTAINER="backend"
     fi
     
+    # Convert host path to container path
+    BACKUP_FILENAME=$(basename "$BACKUP_FILE")
+    CONTAINER_BACKUP_PATH="/app/backups/${BACKUP_FILENAME}"
+    
     # Send via Python script inside Docker container
-    if docker exec "$BACKEND_CONTAINER" python scripts/send_backup_telegram.py "$BACKUP_FILE" >> "$LOG_FILE" 2>&1; then
+    if docker exec "$BACKEND_CONTAINER" python scripts/send_backup_telegram.py "$CONTAINER_BACKUP_PATH" >> "$LOG_FILE" 2>&1; then
         log "✓ Backup sent to Telegram successfully"
     else
         log_error "Failed to send backup to Telegram (backup file preserved)"
