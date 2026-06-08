@@ -27,9 +27,18 @@ jobs:
           git fetch origin main
           git checkout main
           git pull --ff-only origin main
+          
+          echo "📝 Setting script permissions..."
+          chmod +x scripts/*.sh scripts/*.py || true
+          
+          echo "📦 Creating required directories..."
+          mkdir -p backups logs
+          
+          echo "🐳 Building and starting Docker containers..."
           docker compose pull || true
           docker compose build
           docker compose up -d
+          
           echo "✅ Backend deployment completed!"
 
     - name: Health Check
