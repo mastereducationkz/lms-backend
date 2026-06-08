@@ -97,13 +97,15 @@ def main():
     
     if success_count == 0:
         print("Error: Failed to send backup to any admin", file=sys.stderr)
+        print("Tip: blocked bots or invalid chat IDs cause this. Check TELEGRAM_ADMIN_CHAT_IDS in .env", file=sys.stderr)
         sys.exit(4)
-    elif success_count < len(admin_chat_ids):
-        print(f"Warning: Sent to {success_count}/{len(admin_chat_ids)} admins", file=sys.stderr)
-        sys.exit(4)
-    else:
-        print(f"✓ Successfully sent backup to {success_count} admin(s)")
-        sys.exit(0)
+
+    if success_count < len(admin_chat_ids):
+        failed_count = len(admin_chat_ids) - success_count
+        print(f"Warning: sent to {success_count}/{len(admin_chat_ids)} admins ({failed_count} failed — bot blocked or invalid chat ID)", file=sys.stderr)
+
+    print(f"✓ Successfully sent backup to {success_count} admin(s)")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
