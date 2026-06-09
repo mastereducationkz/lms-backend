@@ -5,13 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
-from datetime import datetime
-
 from src.config import get_db
-from src.schemas.models import (
-    UserInDB, StepProgress, Step, Lesson, Course, Module
-)
+from src.schemas.models import UserInDB, Course
 from src.utils.permissions import require_admin
+from src.progress.services.lesson_completion import (
+    complete_steps_for_user,
+    reset_steps_for_user,
+    get_user_lesson_progress_summary,
+)
 
 router = APIRouter()
 
@@ -54,68 +55,22 @@ def admin_complete_steps_for_user(
             detail=f"Курс с ID {request.course_id} не найден"
         )
     
-    # Получаем шаги для завершения
-    query = db.query(Step).join(Lesson).join(Module).filter(
-        Module.course_id == request.course_id
+    statistics = complete_steps_for_user(
+        db,
+        request.user_id,
+        request.course_id,
+        lesson_ids=request.lesson_ids,
+        step_ids=request.step_ids,
     )
-    
-    if request.step_ids:
-        # Завершаем конкретные шаги
-        query = query.filter(Step.id.in_(request.step_ids))
-    elif request.lesson_ids:
-        # Завершаем все шаги в указанных уроках
-        query = query.filter(Lesson.id.in_(request.lesson_ids))
-    # Иначе завершаем все шаги курса
-    
-    steps = query.all()
-    
-    if not steps:
+
+    if statistics["total_steps"] == 0:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Не найдено шагов для завершения"
         )
-    
-    completed_count = 0
-    updated_count = 0
-    skipped_count = 0
-    
-    now = datetime.utcnow()
-    
-    for step in steps:
-        # Проверяем, есть ли уже запись прогресса
-        progress = db.query(StepProgress).filter(
-            StepProgress.user_id == request.user_id,
-            StepProgress.step_id == step.id
-        ).first()
-        
-        if progress:
-            if progress.status == "completed":
-                # Уже завершен, пропускаем
-                skipped_count += 1
-            else:
-                # Обновляем существующую запись
-                progress.status = "completed"
-                progress.completed_at = now
-                if not progress.visited_at:
-                    progress.visited_at = now
-                updated_count += 1
-        else:
-            # Создаем новую запись прогресса
-            new_progress = StepProgress(
-                user_id=request.user_id,
-                course_id=request.course_id,
-                lesson_id=step.lesson_id,
-                step_id=step.id,
-                status="completed",
-                visited_at=now,
-                completed_at=now,
-                time_spent_minutes=0
-            )
-            db.add(new_progress)
-            completed_count += 1
-    
+
     db.commit()
-    
+
     return {
         "success": True,
         "message": f"Прогресс обновлен для пользователя {user.name}",
@@ -128,12 +83,7 @@ def admin_complete_steps_for_user(
             "id": course.id,
             "title": course.title
         },
-        "statistics": {
-            "total_steps": len(steps),
-            "newly_completed": completed_count,
-            "updated": updated_count,
-            "already_completed": skipped_count
-        }
+        "statistics": statistics
     }
 
 
@@ -155,24 +105,20 @@ def admin_reset_steps_for_user(
             detail=f"Пользователь с ID {request.user_id} не найден"
         )
     
-    # Получаем записи прогресса для удаления
-    query = db.query(StepProgress).filter(
-        StepProgress.user_id == request.user_id,
-        StepProgress.course_id == request.course_id
+    reset_stats = reset_steps_for_user(
+        db,
+        request.user_id,
+        request.course_id,
+        lesson_ids=request.lesson_ids,
+        step_ids=request.step_ids,
     )
-    
-    if request.step_ids:
-        query = query.filter(StepProgress.step_id.in_(request.step_ids))
-    elif request.lesson_ids:
-        query = query.filter(StepProgress.lesson_id.in_(request.lesson_ids))
-    
-    deleted_count = query.delete(synchronize_session=False)
     db.commit()
-    
+
     return {
         "success": True,
         "message": f"Прогресс сброшен для пользователя {user.name}",
-        "deleted_records": deleted_count
+        "deleted_records": reset_stats["deleted_step_records"],
+        "deleted_lesson_records": reset_stats["deleted_lesson_records"],
     }
 
 
@@ -203,55 +149,4 @@ def get_user_progress_summary(
             detail=f"Курс с ID {course_id} не найден"
         )
     
-    # Получаем все модули курса
-    modules = db.query(Module).filter(Module.course_id == course_id).all()
-    
-    lessons_summary = []
-    total_steps = 0
-    completed_steps = 0
-    
-    for module in modules:
-        lessons = db.query(Lesson).filter(Lesson.module_id == module.id).all()
-        
-        for lesson in lessons:
-            steps = db.query(Step).filter(Step.lesson_id == lesson.id).all()
-            lesson_total = len(steps)
-            total_steps += lesson_total
-            
-            # Получаем прогресс по этому уроку
-            progress_records = db.query(StepProgress).filter(
-                StepProgress.user_id == user_id,
-                StepProgress.lesson_id == lesson.id,
-                StepProgress.status == "completed"
-            ).count()
-            
-            completed_steps += progress_records
-            
-            lessons_summary.append({
-                "lesson_id": lesson.id,
-                "lesson_title": lesson.title,
-                "module_title": module.title,
-                "total_steps": lesson_total,
-                "completed_steps": progress_records,
-                "completion_percentage": round((progress_records / lesson_total * 100), 1) if lesson_total > 0 else 0
-            })
-    
-    overall_percentage = round((completed_steps / total_steps * 100), 1) if total_steps > 0 else 0
-    
-    return {
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email
-        },
-        "course": {
-            "id": course.id,
-            "title": course.title
-        },
-        "overall": {
-            "total_steps": total_steps,
-            "completed_steps": completed_steps,
-            "completion_percentage": overall_percentage
-        },
-        "lessons": lessons_summary
-    }
+    return get_user_lesson_progress_summary(db, user_id, course_id)

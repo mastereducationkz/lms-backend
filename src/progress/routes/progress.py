@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, and_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -20,7 +21,13 @@ from src.schemas.models import (
     PointHistory,
 )
 from src.routes.auth import get_current_user_dependency
-from src.utils.permissions import check_course_access, check_student_access, require_teacher_or_admin
+from src.utils.permissions import check_course_access, check_student_access, check_group_access, require_teacher_or_admin
+from src.progress.services.lesson_completion import (
+    complete_steps_for_user,
+    reset_steps_for_user,
+    get_user_lesson_progress_summary,
+    get_group_lesson_progress_summary,
+)
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
 from src.services.cache_service import cached
 from src.utils.course_access import student_has_only_special_groups
@@ -2614,3 +2621,174 @@ async def get_manual_unlocks(
         query = query.filter(ManualLessonUnlock.group_id == group_id)
         
     return query.all()
+
+
+class CompleteLessonsRequest(BaseModel):
+    course_id: int
+    lesson_ids: List[int]
+    user_id: Optional[int] = None
+    group_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if bool(self.user_id) == bool(self.group_id):
+            raise ValueError("Specify exactly one of user_id or group_id")
+        if not self.lesson_ids:
+            raise ValueError("lesson_ids must not be empty")
+        return self
+
+
+@router.post("/complete-lessons", status_code=200)
+async def complete_lessons_for_target(
+    request: CompleteLessonsRequest,
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """Mark all steps in selected lessons as completed for a student or all students in a group."""
+    course = db.query(Course).filter(Course.id == request.course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    if request.user_id:
+        if not check_student_access(request.user_id, current_user, db):
+            raise HTTPException(status_code=403, detail="Access denied to this student")
+
+        stats = complete_steps_for_user(
+            db,
+            request.user_id,
+            request.course_id,
+            lesson_ids=request.lesson_ids,
+        )
+        db.commit()
+
+        return {
+            "success": True,
+            "target_type": "user",
+            "target_id": request.user_id,
+            "statistics": stats,
+        }
+
+    if not check_group_access(request.group_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+
+    student_ids = [
+        gs.student_id
+        for gs in db.query(GroupStudent).filter(GroupStudent.group_id == request.group_id).all()
+    ]
+
+    if not student_ids:
+        raise HTTPException(status_code=400, detail="Group has no students")
+
+    per_student_stats = []
+    for student_id in student_ids:
+        stats = complete_steps_for_user(
+            db,
+            student_id,
+            request.course_id,
+            lesson_ids=request.lesson_ids,
+        )
+        per_student_stats.append({"user_id": student_id, **stats})
+
+    db.commit()
+
+    return {
+        "success": True,
+        "target_type": "group",
+        "target_id": request.group_id,
+        "student_count": len(student_ids),
+        "lesson_ids": request.lesson_ids,
+        "students": per_student_stats,
+    }
+
+
+@router.post("/reset-lessons", status_code=200)
+async def reset_lessons_for_target(
+    request: CompleteLessonsRequest,
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """Reset step progress for selected lessons for a student or all students in a group."""
+    course = db.query(Course).filter(Course.id == request.course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    if request.user_id:
+        if not check_student_access(request.user_id, current_user, db):
+            raise HTTPException(status_code=403, detail="Access denied to this student")
+
+        stats = reset_steps_for_user(
+            db,
+            request.user_id,
+            request.course_id,
+            lesson_ids=request.lesson_ids,
+        )
+        db.commit()
+
+        return {
+            "success": True,
+            "target_type": "user",
+            "target_id": request.user_id,
+            "statistics": stats,
+        }
+
+    if not check_group_access(request.group_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+
+    student_ids = [
+        gs.student_id
+        for gs in db.query(GroupStudent).filter(GroupStudent.group_id == request.group_id).all()
+    ]
+
+    if not student_ids:
+        raise HTTPException(status_code=400, detail="Group has no students")
+
+    per_student_stats = []
+    for student_id in student_ids:
+        stats = reset_steps_for_user(
+            db,
+            student_id,
+            request.course_id,
+            lesson_ids=request.lesson_ids,
+        )
+        per_student_stats.append({"user_id": student_id, **stats})
+
+    db.commit()
+
+    return {
+        "success": True,
+        "target_type": "group",
+        "target_id": request.group_id,
+        "student_count": len(student_ids),
+        "lesson_ids": request.lesson_ids,
+        "students": per_student_stats,
+    }
+
+
+@router.get("/lesson-progress-summary")
+async def get_lesson_progress_summary(
+    course_id: int,
+    user_id: Optional[int] = None,
+    group_id: Optional[int] = None,
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """Get per-lesson completion summary for a student or group."""
+    if bool(user_id) == bool(group_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Specify exactly one of user_id or group_id",
+        )
+
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    if user_id:
+        if not check_student_access(user_id, current_user, db):
+            raise HTTPException(status_code=403, detail="Access denied to this student")
+        return get_user_lesson_progress_summary(db, user_id, course_id)
+
+    if not check_group_access(group_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+
+    return get_group_lesson_progress_summary(db, group_id, course_id)
