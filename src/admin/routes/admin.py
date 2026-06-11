@@ -835,21 +835,9 @@ async def get_all_groups(
     if current_user.role == "teacher":
         query = query.filter(Group.teacher_id == current_user.id)
     elif current_user.role == "head_teacher":
-        managed_course_ids = [
-            row[0]
-            for row in db.query(CourseHeadTeacher.course_id).filter(
-                CourseHeadTeacher.head_teacher_id == current_user.id
-            ).all()
-        ]
-        if not managed_course_ids:
-            return []
-        group_ids = [
-            row[0]
-            for row in db.query(CourseGroupAccess.group_id).filter(
-                CourseGroupAccess.course_id.in_(managed_course_ids),
-                CourseGroupAccess.is_active == True,
-            ).distinct().all()
-        ]
+        from src.utils.permissions import get_head_teacher_group_ids
+
+        group_ids = get_head_teacher_group_ids(current_user, db)
         if not group_ids:
             return []
         query = query.filter(Group.id.in_(group_ids))
@@ -1679,6 +1667,18 @@ async def get_all_users(
         # Filter by students in groups managed by this curator
         curator_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.curator_id == current_user.id).subquery()
         query = query.filter(UserInDB.id.in_(curator_group_student_ids))
+    elif current_user.role == "head_teacher":
+        role = "student"
+        from src.utils.permissions import get_head_teacher_group_ids
+
+        head_teacher_group_ids = get_head_teacher_group_ids(current_user, db)
+        if not head_teacher_group_ids:
+            return UserListResponse(users=[], total=0, skip=skip, limit=limit)
+
+        head_teacher_group_student_ids = db.query(GroupStudent.student_id).filter(
+            GroupStudent.group_id.in_(head_teacher_group_ids)
+        ).subquery()
+        query = query.filter(UserInDB.id.in_(head_teacher_group_student_ids))
 
     # Apply filters
     if role:

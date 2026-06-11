@@ -2498,6 +2498,9 @@ async def manual_unlock_lesson(
              # User specifically mentioned "all groups which he teaches".
              teacher_groups = db.query(Group).all() # Admin sees everything
              target_group_ids = [g.id for g in teacher_groups]
+        elif current_user.role == "head_teacher":
+            from src.utils.permissions import get_head_teacher_group_ids
+            target_group_ids = get_head_teacher_group_ids(current_user, db)
         else:
             teacher_groups = db.query(Group).filter(Group.teacher_id == current_user.id).all()
             target_group_ids = [g.id for g in teacher_groups]
@@ -2510,9 +2513,9 @@ async def manual_unlock_lesson(
     for group_id in target_group_ids:
         # Check permission to unlock for this group
         if current_user.role != "admin":
-            group = db.query(Group).filter(Group.id == group_id).first()
-            if not group or group.teacher_id != current_user.id:
-                continue # Skip groups teacher doesn't teach
+            from src.utils.permissions import check_group_access
+            if not check_group_access(group_id, current_user, db):
+                continue
         
         # Check if already exists
         existing = db.query(ManualLessonUnlock).filter(

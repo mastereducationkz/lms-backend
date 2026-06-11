@@ -130,6 +130,31 @@ def reset_steps_for_user(
     }
 
 
+def _get_completed_lesson_ids_for_user(
+    db: Session,
+    user_id: int,
+    course_id: int,
+) -> set[int]:
+    rows = db.query(StudentProgress.lesson_id).filter(
+        StudentProgress.user_id == user_id,
+        StudentProgress.course_id == course_id,
+        StudentProgress.lesson_id.isnot(None),
+        StudentProgress.status == "completed",
+    ).all()
+    return {row[0] for row in rows}
+
+
+def _is_lesson_complete_for_user(
+    lesson_id: int,
+    lesson_total: int,
+    completed_step_count: int,
+    completed_lesson_ids: set[int],
+) -> bool:
+    if lesson_id in completed_lesson_ids:
+        return True
+    return lesson_total > 0 and completed_step_count >= lesson_total
+
+
 def get_user_lesson_progress_summary(
     db: Session,
     user_id: int,
@@ -137,6 +162,7 @@ def get_user_lesson_progress_summary(
 ) -> Dict[str, Any]:
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
     course = db.query(Course).filter(Course.id == course_id).first()
+    completed_lesson_ids = _get_completed_lesson_ids_for_user(db, user_id, course_id)
 
     modules = db.query(Module).filter(Module.course_id == course_id).all()
     lessons_summary = []
@@ -157,8 +183,22 @@ def get_user_lesson_progress_summary(
                 StepProgress.status == "completed",
             ).count()
 
-            completed_steps += progress_records
-            is_complete = lesson_total > 0 and progress_records >= lesson_total
+            is_complete = _is_lesson_complete_for_user(
+                lesson.id,
+                lesson_total,
+                progress_records,
+                completed_lesson_ids,
+            )
+
+            display_completed_steps = lesson_total if is_complete and lesson_total > 0 else progress_records
+            completed_steps += display_completed_steps if is_complete else progress_records
+
+            if is_complete:
+                completion_percentage = 100.0
+            else:
+                completion_percentage = (
+                    round((progress_records / lesson_total * 100), 1) if lesson_total > 0 else 0
+                )
 
             lessons_summary.append({
                 "lesson_id": lesson.id,
@@ -166,12 +206,16 @@ def get_user_lesson_progress_summary(
                 "module_title": module.title,
                 "order_index": lesson.order_index,
                 "total_steps": lesson_total,
-                "completed_steps": progress_records,
-                "completion_percentage": round((progress_records / lesson_total * 100), 1) if lesson_total > 0 else 0,
+                "completed_steps": display_completed_steps,
+                "completion_percentage": completion_percentage,
                 "is_complete": is_complete,
             })
 
     overall_percentage = round((completed_steps / total_steps * 100), 1) if total_steps > 0 else 0
+    completed_lesson_count = sum(1 for lesson in lessons_summary if lesson["is_complete"])
+
+    if total_steps == 0 and lessons_summary:
+        overall_percentage = round((completed_lesson_count / len(lessons_summary) * 100), 1)
 
     return {
         "user": {
@@ -210,6 +254,11 @@ def get_group_lesson_progress_summary(
             "lessons": [],
         }
 
+    completed_lessons_by_user = {
+        student_id: _get_completed_lesson_ids_for_user(db, student_id, course_id)
+        for student_id in student_ids
+    }
+
     modules = db.query(Module).filter(Module.course_id == course_id).all()
     lessons_summary = []
 
@@ -221,15 +270,22 @@ def get_group_lesson_progress_summary(
             lesson_total = len(steps)
 
             completed_students = 0
-            if lesson_total > 0:
-                for student_id in student_ids:
-                    progress_records = db.query(StepProgress).filter(
-                        StepProgress.user_id == student_id,
-                        StepProgress.lesson_id == lesson.id,
-                        StepProgress.status == "completed",
-                    ).count()
-                    if progress_records >= lesson_total:
-                        completed_students += 1
+            for student_id in student_ids:
+                progress_records = db.query(StepProgress).filter(
+                    StepProgress.user_id == student_id,
+                    StepProgress.lesson_id == lesson.id,
+                    StepProgress.status == "completed",
+                ).count()
+
+                if _is_lesson_complete_for_user(
+                    lesson.id,
+                    lesson_total,
+                    progress_records,
+                    completed_lessons_by_user.get(student_id, set()),
+                ):
+                    completed_students += 1
+
+            completion_percentage = round((completed_students / len(student_ids) * 100), 1)
 
             lessons_summary.append({
                 "lesson_id": lesson.id,
@@ -239,7 +295,7 @@ def get_group_lesson_progress_summary(
                 "total_steps": lesson_total,
                 "student_count": len(student_ids),
                 "completed_students": completed_students,
-                "completion_percentage": round((completed_students / len(student_ids) * 100), 1),
+                "completion_percentage": completion_percentage,
                 "is_complete": completed_students == len(student_ids),
             })
 

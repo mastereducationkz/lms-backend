@@ -24,8 +24,8 @@ def require_admin():
     return require_role(["admin"])
 
 def require_teacher_or_admin():
-    """Require teacher or admin role"""
-    return require_role(["teacher", "admin"])
+    """Require teacher, head teacher, or admin role"""
+    return require_role(["teacher", "head_teacher", "admin"])
 
 def require_teacher_or_admin_for_groups():
     """Require teacher, head teacher, head curator, or admin for group list reads."""
@@ -290,31 +290,52 @@ def require_student_access(student_id: int):
         return current_user
     return student_access_checker
 
+def get_head_teacher_group_ids(user: UserInDB, db: Session) -> List[int]:
+    """Groups linked to courses managed by the head teacher."""
+    from src.schemas.models import CourseGroupAccess
+
+    managed_course_ids = [
+        row[0]
+        for row in db.query(CourseHeadTeacher.course_id).filter(
+            CourseHeadTeacher.head_teacher_id == user.id
+        ).all()
+    ]
+    if not managed_course_ids:
+        return []
+
+    return [
+        row[0]
+        for row in db.query(CourseGroupAccess.group_id).filter(
+            CourseGroupAccess.course_id.in_(managed_course_ids),
+            CourseGroupAccess.is_active == True,
+        ).distinct().all()
+    ]
+
+
 def check_group_access(group_id: int, user: UserInDB, db: Session) -> bool:
     """
     Check if user has access to a specific group
     - Teachers: only if they created the group
+    - Head teachers: groups linked to their managed courses
     - Curators: only their assigned groups
-    - Admins: all groups
+    - Head curators / admins: all groups
     """
-    if user.role == "admin":
+    if user.role in ["admin", "head_curator"]:
         return True
-    
+
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         return False
-    
+
     if user.role == "teacher":
         return group.teacher_id == user.id
-    
-    elif user.role == "curator":
-        # Curators can access their assigned groups
+
+    if user.role == "head_teacher":
+        return group_id in get_head_teacher_group_ids(user, db)
+
+    if user.role == "curator":
         return group.curator_id == user.id
-    
-    elif user.role == "head_curator":
-        # Head curators can access all groups
-        return True
-    
+
     return False
 
 def check_event_access(event_id: int, user: UserInDB, db: Session) -> bool:
