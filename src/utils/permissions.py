@@ -290,6 +290,18 @@ def require_student_access(student_id: int):
         return current_user
     return student_access_checker
 
+def get_group_course_ids(db: Session, group_id: int) -> List[int]:
+    from src.schemas.models import CourseGroupAccess
+
+    return [
+        row[0]
+        for row in db.query(CourseGroupAccess.course_id).filter(
+            CourseGroupAccess.group_id == group_id,
+            CourseGroupAccess.is_active == True,
+        ).all()
+    ]
+
+
 def get_head_teacher_group_ids(user: UserInDB, db: Session) -> List[int]:
     """Groups linked to courses managed by the head teacher."""
     from src.schemas.models import CourseGroupAccess

@@ -863,8 +863,15 @@ async def get_all_groups(
             )
             .first()
         )
+        linked_course_ids = [
+            row[0]
+            for row in db.query(CourseGroupAccess.course_id).filter(
+                CourseGroupAccess.group_id == group.id,
+                CourseGroupAccess.is_active == True,
+            ).all()
+        ]
         max_open_lessons = cga.max_open_lessons if cga else None
-        linked_course_id = cga.course_id if cga else None
+        linked_course_id = linked_course_ids[0] if linked_course_ids else None
         # Get students for this group
         group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group.id).all()
         student_count = len(group_students)
@@ -913,6 +920,7 @@ async def get_all_groups(
             schedule_config=group.schedule_config,
             max_open_lessons=max_open_lessons,
             course_id=linked_course_id,
+            course_ids=linked_course_ids or None,
         )
         
         result.append(group_data)

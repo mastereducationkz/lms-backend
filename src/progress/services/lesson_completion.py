@@ -246,14 +246,6 @@ def get_group_lesson_progress_summary(
         for gs in db.query(GroupStudent).filter(GroupStudent.group_id == group_id).all()
     ]
 
-    if not student_ids:
-        return {
-            "group_id": group_id,
-            "course_id": course_id,
-            "student_count": 0,
-            "lessons": [],
-        }
-
     completed_lessons_by_user = {
         student_id: _get_completed_lesson_ids_for_user(db, student_id, course_id)
         for student_id in student_ids
@@ -285,7 +277,10 @@ def get_group_lesson_progress_summary(
                 ):
                     completed_students += 1
 
-            completion_percentage = round((completed_students / len(student_ids) * 100), 1)
+            student_count = len(student_ids)
+            completion_percentage = (
+                round((completed_students / student_count * 100), 1) if student_count > 0 else 0
+            )
 
             lessons_summary.append({
                 "lesson_id": lesson.id,
@@ -293,10 +288,10 @@ def get_group_lesson_progress_summary(
                 "module_title": module.title,
                 "order_index": lesson.order_index,
                 "total_steps": lesson_total,
-                "student_count": len(student_ids),
+                "student_count": student_count,
                 "completed_students": completed_students,
                 "completion_percentage": completion_percentage,
-                "is_complete": completed_students == len(student_ids),
+                "is_complete": student_count > 0 and completed_students == student_count,
             })
 
     return {

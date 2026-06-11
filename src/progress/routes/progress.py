@@ -2786,6 +2786,9 @@ async def get_lesson_progress_summary(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
+    if not check_course_access(course_id, current_user, db):
+        raise HTTPException(status_code=403, detail="Access denied to this course")
+
     if user_id:
         if not check_student_access(user_id, current_user, db):
             raise HTTPException(status_code=403, detail="Access denied to this student")
@@ -2793,5 +2796,14 @@ async def get_lesson_progress_summary(
 
     if not check_group_access(group_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this group")
+
+    from src.utils.permissions import get_group_course_ids
+
+    group_course_ids = get_group_course_ids(db, group_id)
+    if group_course_ids and course_id not in group_course_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="This group is not linked to the selected course",
+        )
 
     return get_group_lesson_progress_summary(db, group_id, course_id)

@@ -124,7 +124,20 @@ async def get_courses(
         ).subquery()
         
         query = query.filter(Course.id.in_(group_courses), Course.is_active == True)
-    
+
+    elif current_user.role == "head_teacher":
+        from src.courses.models import CourseHeadTeacher
+
+        managed_course_ids = [
+            row[0]
+            for row in db.query(CourseHeadTeacher.course_id).filter(
+                CourseHeadTeacher.head_teacher_id == current_user.id
+            ).all()
+        ]
+        if not managed_course_ids:
+            return []
+        query = query.filter(Course.id.in_(managed_course_ids))
+
     # Apply filters
     if teacher_id is not None:
         query = query.filter(Course.teacher_id == teacher_id)
@@ -473,7 +486,7 @@ async def get_course_modules(
 
     target_user_id = current_user.id
     if student_id:
-        if current_user.role not in ["teacher", "admin", "head_curator"]:
+        if current_user.role not in ["teacher", "admin", "head_curator", "head_teacher"]:
             raise HTTPException(status_code=403, detail="Only teachers, admins, and head curators can view other students' progress")
         target_user_id = student_id
 

@@ -30,6 +30,7 @@ class GroupSchema(BaseModel):
     max_week: Optional[int] = None
     max_open_lessons: Optional[int] = None
     course_id: Optional[int] = None
+    course_ids: Optional[List[int]] = None
 
     class Config:
         from_attributes = True
