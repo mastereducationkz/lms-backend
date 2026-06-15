@@ -26,6 +26,64 @@ from datetime import timezone as _tz
 logger = logging.getLogger(__name__)
 
 
+def _sync_group_students(db: Session, group_id: int, desired_student_ids: List[int]) -> None:
+    """Add/remove group members by diff; skip when unchanged."""
+    desired_ids = set(desired_student_ids)
+    current_ids = {
+        row[0]
+        for row in db.query(GroupStudent.student_id).filter(
+            GroupStudent.group_id == group_id
+        ).all()
+    }
+    if desired_ids == current_ids:
+        return
+
+    to_remove = current_ids - desired_ids
+    to_add = desired_ids - current_ids
+
+    if to_remove:
+        db.query(GroupStudent).filter(
+            GroupStudent.group_id == group_id,
+            GroupStudent.student_id.in_(to_remove),
+        ).delete(synchronize_session=False)
+
+    for student_id in to_add:
+        student = db.query(UserInDB).filter(
+            UserInDB.id == student_id,
+            UserInDB.role == "student",
+            UserInDB.is_active == True,
+        ).first()
+        if student:
+            db.add(GroupStudent(group_id=group_id, student_id=student_id))
+
+
+def _sync_student_groups(db: Session, user_id: int, desired_group_ids: List[int]) -> None:
+    """Add/remove a student's group memberships by diff; skip when unchanged."""
+    desired_ids = set(desired_group_ids)
+    current_ids = {
+        row[0]
+        for row in db.query(GroupStudent.group_id).filter(
+            GroupStudent.student_id == user_id
+        ).all()
+    }
+    if desired_ids == current_ids:
+        return
+
+    to_remove = current_ids - desired_ids
+    to_add = desired_ids - current_ids
+
+    if to_remove:
+        db.query(GroupStudent).filter(
+            GroupStudent.student_id == user_id,
+            GroupStudent.group_id.in_(to_remove),
+        ).delete(synchronize_session=False)
+
+    for group_id in to_add:
+        group = db.query(Group).filter(Group.id == group_id).first()
+        if group:
+            db.add(GroupStudent(group_id=group_id, student_id=user_id))
+
+
 router = APIRouter()
 
 # Pydantic models for admin operations
@@ -1143,25 +1201,8 @@ async def update_group(
         for row in q.all():
             row.max_open_lessons = mo
     
-    # Update student list if provided
-    if group_data.student_ids is not None:
-        # Remove all existing students from this group
-        db.query(GroupStudent).filter(GroupStudent.group_id == group_id).delete()
-        
-        # Add new students
-        for student_id in group_data.student_ids:
-            # Verify student exists and is active
-            student = db.query(UserInDB).filter(
-                UserInDB.id == student_id,
-                UserInDB.role == "student",
-                UserInDB.is_active == True
-            ).first()
-            if student:
-                group_student = GroupStudent(
-                    group_id=group_id,
-                    student_id=student_id
-                )
-                db.add(group_student)
+    if "student_ids" in patch:
+        _sync_group_students(db, group_id, patch["student_ids"])
     
     db.commit()
     db.refresh(group)
@@ -1994,21 +2035,11 @@ async def update_user(
     db.commit()
     db.refresh(user)
     
-    # Update user's groups - check the FINAL role after updates
+    user_patch = user_data.model_dump(exclude_unset=True)
     final_role = user_data.role if user_data.role is not None else user.role
-    
-    # Always update groups if group_ids is provided (even if empty array to clear groups)
-    if user_data.group_ids is not None and final_role == "student":
-        # Remove all existing groups
-        db.query(GroupStudent).filter(GroupStudent.student_id == user_id).delete()
-        db.flush()
-        
-        # Add new groups
-        for group_id in user_data.group_ids:
-            group = db.query(Group).filter(Group.id == group_id).first()
-            if group:
-                db.add(GroupStudent(group_id=group_id, student_id=user_id))
-        
+
+    if "group_ids" in user_patch and final_role == "student":
+        _sync_student_groups(db, user_id, user_patch["group_ids"])
         db.commit()
     
     # Update managed courses for Head Teacher
