@@ -15,7 +15,7 @@ from src.schemas.models import (
     QuestionErrorReport, LessonRequest,
 )
 from src.utils.auth_utils import hash_password
-from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin
+from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin, require_admin_or_head_curator
 from src.services.group_completion_service import sync_groups_over_status
 from src.services.cache_service import cached
 import secrets
@@ -337,9 +337,11 @@ def get_non_special_group_ids(db: Session, group_ids: List[int]) -> List[int]:
 async def create_single_user(
     user_data: CreateUserRequest,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin())
+    current_user: UserInDB = Depends(require_admin_or_head_curator())
 ):
-    """Create a single user (admin only)"""
+    """Create a single user (admin or head_curator)"""
+    if current_user.role == "head_curator" and user_data.role != "curator":
+        raise HTTPException(status_code=403, detail="Head curators can only create curator accounts")
     try:
         # Normalize email
         user_data.email = user_data.email.lower()
@@ -712,13 +714,16 @@ async def create_admin(
 async def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin())
+    current_user: UserInDB = Depends(require_admin_or_head_curator())
 ):
-    """Delete user (admin only)"""
+    """Delete user (admin or head_curator for curators only)"""
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
+    if current_user.role == "head_curator" and user.role != "curator":
+        raise HTTPException(status_code=403, detail="Head curators can only delete curator accounts")
+
     # Prevent deleting the last admin
     if user.role == "admin":
         admin_count = db.query(UserInDB).filter(UserInDB.role == "admin").count()
@@ -1997,13 +2002,19 @@ async def update_user(
     user_id: int,
     user_data: UpdateUserRequest,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin())
+    current_user: UserInDB = Depends(require_admin_or_head_curator())
 ):
-    """Update a user (admin only)"""
-    
+    """Update a user (admin or head_curator for curators only)"""
+
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role == "head_curator":
+        if user.role != "curator":
+            raise HTTPException(status_code=403, detail="Head curators can only edit curator accounts")
+        if user_data.role is not None and user_data.role != "curator":
+            raise HTTPException(status_code=403, detail="Head curators cannot change a curator's role to another role")
     
     # Check if email already exists (if changing email)
     if user_data.email and user_data.email != user.email:

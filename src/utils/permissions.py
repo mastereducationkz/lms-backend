@@ -42,6 +42,10 @@ def require_curator_or_admin():
     """Require curator or admin role"""
     return require_role(["curator", "admin"])
 
+def require_admin_or_head_curator():
+    """Require admin or head_curator role (for curator account management)"""
+    return require_role(["admin", "head_curator"])
+
 def require_teacher_curator_or_admin():
     """Require teacher, curator or admin role (includes head_curator and head_teacher)"""
     return require_role(["teacher", "curator", "admin", "head_curator", "head_teacher"])
