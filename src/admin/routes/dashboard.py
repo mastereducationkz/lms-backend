@@ -756,284 +756,304 @@ def get_curator_dashboard_stats(
     )
 
 def get_head_curator_dashboard_stats(
-    user: UserInDB, 
-    db: Session, 
+    user: UserInDB,
+    db: Session,
     group_id: Optional[int] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
 ) -> DashboardStatsSchema:
-    """Get dashboard stats for Head of Curators"""
-    from src.schemas.models import Group, Assignment, AssignmentSubmission, GroupStudent, GroupAssignment, StepProgress
+    """Get dashboard stats for Head of Curators — batch-SQL rewrite (~20 queries total)."""
+    from src.schemas.models import (
+        Group, Assignment, AssignmentSubmission, GroupStudent, GroupAssignment, StepProgress,
+        EventGroup, Event, Attendance,
+    )
     from sqlalchemy.orm import aliased
-    
-    # 1. Сводная статистика
-    total_curators = db.query(UserInDB).filter(
-        UserInDB.role == "curator",
-        UserInDB.is_active == True,
-        UserInDB.is_analytics_hidden == False
-    ).count()
-    
-    # Base query for groups (active and not finished)
-    group_query = db.query(Group).filter(
+
+    now = datetime.utcnow()
+
+    try:
+        date_start = datetime.fromisoformat(start_date) if start_date else now - timedelta(days=7)
+    except Exception:
+        date_start = now - timedelta(days=7)
+    try:
+        date_end = datetime.fromisoformat(end_date) if end_date else now
+    except Exception:
+        date_end = now
+
+    # ── 1. Groups (ids + names + curator mapping) — 1 query ──────────
+    group_filter = [
         Group.is_active == True,
         Group.is_special == False,
-        Group.is_over == False
+        Group.is_over == False,
+    ]
+    if group_id:
+        group_filter.append(Group.id == group_id)
+
+    group_rows = db.query(Group.id, Group.curator_id, Group.name).filter(*group_filter).all()
+    current_group_ids = [r.id for r in group_rows]
+    group_curator_map = {r.id: r.curator_id for r in group_rows}
+    group_name_map = {r.id: r.name for r in group_rows}
+    total_groups = len(current_group_ids)
+
+    # ── 2. Active students (IDs only) — 1 query ──────────────────────
+    student_q = db.query(UserInDB.id).filter(
+        UserInDB.role == "student", UserInDB.is_active == True
     )
     if group_id:
-        group_query = group_query.filter(Group.id == group_id)
-    
-    current_groups = group_query.all()
-    total_groups = len(current_groups)
-    current_group_ids = [g.id for g in current_groups]
-    
-    # Base query for students
-    student_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True)
-    if group_id:
-        student_query = student_query.join(GroupStudent, UserInDB.id == GroupStudent.student_id).filter(GroupStudent.group_id == group_id)
-    
-    current_students = student_query.all()
-    total_students = len(current_students)
-    current_student_ids = [s.id for s in current_students]
-    
-    # Активность за 7 дней (Active criteria: activity in last 7 days)
-    # Use provided date range or default to last 7 days
-    if start_date:
-        try:
-            date_start = datetime.fromisoformat(start_date)
-        except:
-            date_start = datetime.utcnow() - timedelta(days=7)
-    else:
-        date_start = datetime.utcnow() - timedelta(days=7)
-    
-    if end_date:
-        try:
-            date_end = datetime.fromisoformat(end_date)
-        except:
-            date_end = datetime.utcnow()
-    else:
-        date_end = datetime.utcnow()
-    
-    seven_days_ago = date_start
-    
-    # Count active vs inactive students
-    active_student_ids_set = set()
+        student_q = student_q.join(
+            GroupStudent, UserInDB.id == GroupStudent.student_id
+        ).filter(GroupStudent.group_id == group_id)
+    current_student_ids = [r[0] for r in student_q.all()]
+    total_students = len(current_student_ids)
+
+    # ── 3. Group → students mapping — 1 query ────────────────────────
+    gs_rows = (
+        db.query(GroupStudent.group_id, GroupStudent.student_id)
+        .filter(GroupStudent.group_id.in_(current_group_ids))
+        .all()
+    ) if current_group_ids else []
+
+    group_students_map = {}
+    for gs in gs_rows:
+        group_students_map.setdefault(gs.group_id, []).append(gs.student_id)
+
+    # Curator → groups/students mapping (Python, no extra query)
+    curator_group_ids_map = {}
+    for gid, cid in group_curator_map.items():
+        if cid:
+            curator_group_ids_map.setdefault(cid, []).append(gid)
+
+    curator_student_ids_map = {}
+    for cid, gids in curator_group_ids_map.items():
+        students = set()
+        for gid in gids:
+            students.update(group_students_map.get(gid, []))
+        curator_student_ids_map[cid] = students
+
+    # ── 4. Active students (2 queries, no per-student loop) ──────────
     if current_student_ids:
-        # Step progress activity
-        active_steps = db.query(StepProgress.user_id).filter(
-            StepProgress.user_id.in_(current_student_ids),
-            StepProgress.visited_at >= seven_days_ago
-        ).distinct().all()
-        for s in active_steps: active_student_ids_set.add(s[0])
-        
-        # Assignment submission activity
-        active_submissions = db.query(AssignmentSubmission.user_id).filter(
-            AssignmentSubmission.user_id.in_(current_student_ids),
-            AssignmentSubmission.submitted_at >= seven_days_ago,
-            AssignmentSubmission.is_hidden == False
-        ).distinct().all()
-        for s in active_submissions: active_student_ids_set.add(s[0])
+        active_step_ids = {
+            r[0]
+            for r in db.query(StepProgress.user_id)
+            .filter(
+                StepProgress.user_id.in_(current_student_ids),
+                StepProgress.visited_at >= date_start,
+            )
+            .distinct()
+            .all()
+        }
+        active_sub_ids = {
+            r[0]
+            for r in db.query(AssignmentSubmission.user_id)
+            .filter(
+                AssignmentSubmission.user_id.in_(current_student_ids),
+                AssignmentSubmission.submitted_at >= date_start,
+                AssignmentSubmission.is_hidden == False,
+            )
+            .distinct()
+            .all()
+        }
+        active_student_ids_set = active_step_ids | active_sub_ids
+    else:
+        active_student_ids_set = set()
 
     total_active_students = len(active_student_ids_set)
     total_inactive_students = total_students - total_active_students
-    
-    # 2. Global stats for KPIs (includes all groups, not just those with curators)
-    total_overdue_global = 0
-    total_pending_global = 0
-    
-    if current_group_ids and current_student_ids:
-        # --- 1. From GroupAssignment (Lesson-based assignments assigned to groups) ---
-        unsubmitted_ga = db.query(GroupAssignment, GroupStudent).join(
-            GroupStudent, GroupAssignment.group_id == GroupStudent.group_id
-        ).filter(
-            GroupAssignment.group_id.in_(current_group_ids),
-            GroupAssignment.due_date < datetime.utcnow(),
-            GroupAssignment.is_active == True,
-            GroupStudent.student_id.in_(current_student_ids),
-            ~db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
-                AssignmentSubmission.user_id == GroupStudent.student_id,
-                AssignmentSubmission.is_hidden == False
-            ).exists()
-        ).count()
-        
-        late_ga = db.query(AssignmentSubmission).join(
-            GroupAssignment, AssignmentSubmission.assignment_id == GroupAssignment.assignment_id
-        ).filter(
-            AssignmentSubmission.user_id.in_(current_student_ids),
-            AssignmentSubmission.submitted_at > GroupAssignment.due_date,
-            GroupAssignment.group_id.in_(current_group_ids),
-            AssignmentSubmission.is_hidden == False
-        ).count()
 
-        # --- 2. From Assignment directly (Group-specific assignments) ---
-        unsubmitted_direct = db.query(Assignment, GroupStudent).join(
-            GroupStudent, Assignment.group_id == GroupStudent.group_id
-        ).filter(
-            Assignment.group_id.in_(current_group_ids),
-            Assignment.due_date < datetime.utcnow(),
-            Assignment.is_active == True,
-            Assignment.is_hidden == False,
-            GroupStudent.student_id.in_(current_student_ids),
-            ~db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id == Assignment.id,
-                AssignmentSubmission.user_id == GroupStudent.student_id,
-                AssignmentSubmission.is_hidden == False
-            ).exists()
-        ).count()
-        
-        late_direct = db.query(AssignmentSubmission).join(
-            Assignment, AssignmentSubmission.assignment_id == Assignment.id
-        ).filter(
-            AssignmentSubmission.user_id.in_(current_student_ids),
-            AssignmentSubmission.submitted_at > Assignment.due_date,
-            Assignment.group_id.in_(current_group_ids),
-            Assignment.is_active == True,
-            Assignment.is_hidden == False,
-            AssignmentSubmission.is_hidden == False
-        ).count()
-        
-        total_overdue_global = unsubmitted_ga + late_ga + unsubmitted_direct + late_direct
-        
-        # Global Pending Grading
-        total_pending_global = db.query(AssignmentSubmission).filter(
-            AssignmentSubmission.user_id.in_(current_student_ids),
-            AssignmentSubmission.is_graded == False,
-            AssignmentSubmission.is_hidden == False
-        ).count()
-
-    # 3. Детальная статистика по кураторам (hidden curators excluded)
-    curators = db.query(UserInDB).filter(
-        UserInDB.role == "curator",
-        UserInDB.is_active == True,
-        UserInDB.is_analytics_hidden == False
-    ).all()
-    curator_performance = []
-    
-    for curator in curators:
-        # Группы куратора (active, not finished)
-        c_groups_query = db.query(Group).filter(
-            Group.curator_id == curator.id,
-            Group.is_active == True,
-            Group.is_special == False,
-            Group.is_over == False
+    # ── 5. Batch overdue/pending per group (8 queries) ───────────────
+    # Unsubmitted GA per group: LEFT JOIN submission, filter NULL
+    SubGA = aliased(AssignmentSubmission)
+    unsubmitted_ga_rows = (
+        db.query(GroupAssignment.group_id, func.count().label("cnt"))
+        .join(GroupStudent, GroupAssignment.group_id == GroupStudent.group_id)
+        .outerjoin(
+            SubGA,
+            and_(
+                SubGA.assignment_id == GroupAssignment.assignment_id,
+                SubGA.user_id == GroupStudent.student_id,
+                SubGA.is_hidden == False,
+            ),
         )
-        if group_id:
-            c_groups_query = c_groups_query.filter(Group.id == group_id)
-        
-        c_groups = c_groups_query.all()
-        c_group_ids = [g.id for g in c_groups]
-        
-        # Студенты куратора
-        c_student_ids = [gs.student_id for gs in db.query(GroupStudent).filter(GroupStudent.group_id.in_(c_group_ids)).all()] if c_group_ids else []
-        
-        avg_progress = 0
-        overdue_count = 0
-        pending_grading = 0
-        overdue_perc = 0
-        pending_perc = 0
-        
-        if c_student_ids:
-            # Средний прогресс (за все время, так как это статус завершенности)
-            progress_records = db.query(StudentProgress).filter(StudentProgress.user_id.in_(c_student_ids)).all()
-            if progress_records:
-                avg_progress = sum(p.completion_percentage for p in progress_records) / len(progress_records)
-            
-            # Просроченные задания (Overdue)
-            # 1. Lesson assignments via GroupAssignment
-            unsubmitted_ga = db.query(GroupAssignment, GroupStudent).join(
-                GroupStudent, GroupAssignment.group_id == GroupStudent.group_id
-            ).filter(
-                GroupAssignment.group_id.in_(c_group_ids),
-                GroupAssignment.due_date < datetime.utcnow(),
-                GroupAssignment.is_active == True,
-                GroupStudent.student_id.in_(c_student_ids),
-                ~db.query(AssignmentSubmission).filter(
-                    AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
-                    AssignmentSubmission.user_id == GroupStudent.student_id,
-                    AssignmentSubmission.is_hidden == False
-                ).exists()
-            ).count()
-            
-            late_ga = db.query(AssignmentSubmission).join(
-                GroupAssignment, AssignmentSubmission.assignment_id == GroupAssignment.assignment_id
-            ).filter(
-                AssignmentSubmission.user_id.in_(c_student_ids),
-                AssignmentSubmission.submitted_at > GroupAssignment.due_date,
-                GroupAssignment.group_id.in_(c_group_ids),
-                AssignmentSubmission.is_hidden == False
-            ).count()
+        .filter(
+            GroupAssignment.group_id.in_(current_group_ids),
+            GroupAssignment.due_date < now,
+            GroupAssignment.is_active == True,
+            SubGA.id == None,
+        )
+        .group_by(GroupAssignment.group_id)
+        .all()
+    ) if current_group_ids else []
+    unsubmitted_ga_pg = {r.group_id: r.cnt for r in unsubmitted_ga_rows}
 
-            # 2. Group-specific assignments directly in Assignment table
-            unsubmitted_direct = db.query(Assignment, GroupStudent).join(
-                GroupStudent, Assignment.group_id == GroupStudent.group_id
-            ).filter(
-                Assignment.group_id.in_(c_group_ids),
-                Assignment.due_date < datetime.utcnow(),
-                Assignment.is_active == True,
-                Assignment.is_hidden == False,
-                GroupStudent.student_id.in_(c_student_ids),
-                ~db.query(AssignmentSubmission).filter(
-                    AssignmentSubmission.assignment_id == Assignment.id,
-                    AssignmentSubmission.user_id == GroupStudent.student_id,
-                    AssignmentSubmission.is_hidden == False
-                ).exists()
-            ).count()
-            
-            late_direct = db.query(AssignmentSubmission).join(
-                Assignment, AssignmentSubmission.assignment_id == Assignment.id
-            ).filter(
-                AssignmentSubmission.user_id.in_(c_student_ids),
-                AssignmentSubmission.submitted_at > Assignment.due_date,
-                Assignment.group_id.in_(c_group_ids),
-                Assignment.is_active == True,
-                Assignment.is_hidden == False,
-                AssignmentSubmission.is_hidden == False
-            ).count()
-            
-            overdue_count = unsubmitted_ga + late_ga + unsubmitted_direct + late_direct
-            
-            # Ожидают проверки (все активные, так как их нужно проверить)
-            pending_grading = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.user_id.in_(c_student_ids),
-                AssignmentSubmission.is_graded == False,
-                AssignmentSubmission.is_hidden == False
-            ).count()
-            
-            # --- Percentages Calculations ---
-            # Total Due (Universe for Overdue)
-            total_due_ga = db.query(GroupAssignment, GroupStudent).join(
-                GroupStudent, GroupAssignment.group_id == GroupStudent.group_id
-            ).filter(
-                GroupAssignment.group_id.in_(c_group_ids),
-                GroupAssignment.due_date < datetime.utcnow(),
-                GroupAssignment.is_active == True,
-                GroupStudent.student_id.in_(c_student_ids)
-            ).count()
-            
-            total_due_direct = db.query(Assignment, GroupStudent).join(
-                GroupStudent, Assignment.group_id == GroupStudent.group_id
-            ).filter(
-                Assignment.group_id.in_(c_group_ids),
-                Assignment.due_date < datetime.utcnow(),
-                Assignment.is_active == True,
-                Assignment.is_hidden == False,
-                GroupStudent.student_id.in_(c_student_ids)
-            ).count()
-            
-            total_due = total_due_ga + total_due_direct
-            overdue_perc = round((overdue_count / total_due * 100), 1) if total_due > 0 else 0
-            
-            # Total Submissions (Universe for Pending Grading)
-            total_submissions = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.user_id.in_(c_student_ids),
-                AssignmentSubmission.is_hidden == False
-            ).count()
-            pending_perc = round((pending_grading / total_submissions * 100), 1) if total_submissions > 0 else 0
+    # Late GA per group
+    late_ga_rows = (
+        db.query(GroupAssignment.group_id, func.count(AssignmentSubmission.id).label("cnt"))
+        .join(AssignmentSubmission, AssignmentSubmission.assignment_id == GroupAssignment.assignment_id)
+        .filter(
+            GroupAssignment.group_id.in_(current_group_ids),
+            AssignmentSubmission.submitted_at > GroupAssignment.due_date,
+            AssignmentSubmission.is_hidden == False,
+        )
+        .group_by(GroupAssignment.group_id)
+        .all()
+    ) if current_group_ids else []
+    late_ga_pg = {r.group_id: r.cnt for r in late_ga_rows}
+
+    # Unsubmitted direct Assignment per group: LEFT JOIN submission, filter NULL
+    SubDirect = aliased(AssignmentSubmission)
+    unsubmitted_direct_rows = (
+        db.query(Assignment.group_id, func.count().label("cnt"))
+        .join(GroupStudent, Assignment.group_id == GroupStudent.group_id)
+        .outerjoin(
+            SubDirect,
+            and_(
+                SubDirect.assignment_id == Assignment.id,
+                SubDirect.user_id == GroupStudent.student_id,
+                SubDirect.is_hidden == False,
+            ),
+        )
+        .filter(
+            Assignment.group_id.in_(current_group_ids),
+            Assignment.due_date < now,
+            Assignment.is_active == True,
+            Assignment.is_hidden == False,
+            SubDirect.id == None,
+        )
+        .group_by(Assignment.group_id)
+        .all()
+    ) if current_group_ids else []
+    unsubmitted_direct_pg = {r.group_id: r.cnt for r in unsubmitted_direct_rows}
+
+    # Late direct Assignment per group
+    late_direct_rows = (
+        db.query(Assignment.group_id, func.count(AssignmentSubmission.id).label("cnt"))
+        .join(AssignmentSubmission, AssignmentSubmission.assignment_id == Assignment.id)
+        .filter(
+            Assignment.group_id.in_(current_group_ids),
+            AssignmentSubmission.submitted_at > Assignment.due_date,
+            Assignment.is_active == True,
+            Assignment.is_hidden == False,
+            AssignmentSubmission.is_hidden == False,
+        )
+        .group_by(Assignment.group_id)
+        .all()
+    ) if current_group_ids else []
+    late_direct_pg = {r.group_id: r.cnt for r in late_direct_rows}
+
+    # Total due GA per group (for % denominator)
+    total_due_ga_rows = (
+        db.query(GroupAssignment.group_id, func.count().label("cnt"))
+        .join(GroupStudent, GroupAssignment.group_id == GroupStudent.group_id)
+        .filter(
+            GroupAssignment.group_id.in_(current_group_ids),
+            GroupAssignment.due_date < now,
+            GroupAssignment.is_active == True,
+        )
+        .group_by(GroupAssignment.group_id)
+        .all()
+    ) if current_group_ids else []
+    total_due_ga_pg = {r.group_id: r.cnt for r in total_due_ga_rows}
+
+    # Total due direct per group
+    total_due_direct_rows = (
+        db.query(Assignment.group_id, func.count().label("cnt"))
+        .join(GroupStudent, Assignment.group_id == GroupStudent.group_id)
+        .filter(
+            Assignment.group_id.in_(current_group_ids),
+            Assignment.due_date < now,
+            Assignment.is_active == True,
+            Assignment.is_hidden == False,
+        )
+        .group_by(Assignment.group_id)
+        .all()
+    ) if current_group_ids else []
+    total_due_direct_pg = {r.group_id: r.cnt for r in total_due_direct_rows}
+
+    # Pending grading per group
+    pending_rows = (
+        db.query(GroupStudent.group_id, func.count(AssignmentSubmission.id).label("cnt"))
+        .join(AssignmentSubmission, AssignmentSubmission.user_id == GroupStudent.student_id)
+        .filter(
+            GroupStudent.group_id.in_(current_group_ids),
+            AssignmentSubmission.is_graded == False,
+            AssignmentSubmission.is_hidden == False,
+        )
+        .group_by(GroupStudent.group_id)
+        .all()
+    ) if current_group_ids else []
+    pending_pg = {r.group_id: r.cnt for r in pending_rows}
+
+    # Total submissions per group
+    total_subs_rows = (
+        db.query(GroupStudent.group_id, func.count(AssignmentSubmission.id).label("cnt"))
+        .join(AssignmentSubmission, AssignmentSubmission.user_id == GroupStudent.student_id)
+        .filter(
+            GroupStudent.group_id.in_(current_group_ids),
+            AssignmentSubmission.is_hidden == False,
+        )
+        .group_by(GroupStudent.group_id)
+        .all()
+    ) if current_group_ids else []
+    total_subs_pg = {r.group_id: r.cnt for r in total_subs_rows}
+
+    # Global KPI totals (sum per-group maps)
+    total_overdue_global = sum(
+        unsubmitted_ga_pg.get(g, 0) + late_ga_pg.get(g, 0) +
+        unsubmitted_direct_pg.get(g, 0) + late_direct_pg.get(g, 0)
+        for g in current_group_ids
+    )
+    total_pending_global = sum(pending_pg.get(g, 0) for g in current_group_ids)
+
+    # ── 6. Student progress — 1 query ────────────────────────────────
+    progress_rows = (
+        db.query(StudentProgress.user_id, StudentProgress.completion_percentage)
+        .filter(StudentProgress.user_id.in_(current_student_ids))
+        .all()
+    ) if current_student_ids else []
+    student_progress_map = {r.user_id: r.completion_percentage for r in progress_rows}
+
+    # ── 7. Curators list — 1 query ───────────────────────────────────
+    curators = (
+        db.query(UserInDB.id, UserInDB.name)
+        .filter(
+            UserInDB.role == "curator",
+            UserInDB.is_active == True,
+            UserInDB.is_analytics_hidden == False,
+        )
+        .all()
+    )
+    total_curators = len(curators)
+
+    # Curator performance — pure Python aggregation, no extra queries
+    curator_performance = []
+    for c in curators:
+        c_group_ids = curator_group_ids_map.get(c.id, [])
+        c_student_ids = list(curator_student_ids_map.get(c.id, set()))
+
+        avg_progress = 0.0
+        if c_student_ids:
+            progs = [student_progress_map.get(sid, 0.0) for sid in c_student_ids]
+            avg_progress = sum(progs) / len(progs)
+
+        overdue_count = sum(
+            unsubmitted_ga_pg.get(gid, 0) + late_ga_pg.get(gid, 0) +
+            unsubmitted_direct_pg.get(gid, 0) + late_direct_pg.get(gid, 0)
+            for gid in c_group_ids
+        )
+        total_due = sum(
+            total_due_ga_pg.get(gid, 0) + total_due_direct_pg.get(gid, 0)
+            for gid in c_group_ids
+        )
+        pending_grading = sum(pending_pg.get(gid, 0) for gid in c_group_ids)
+        total_submissions = sum(total_subs_pg.get(gid, 0) for gid in c_group_ids)
+
+        overdue_perc = round(overdue_count / total_due * 100, 1) if total_due else 0
+        pending_perc = round(pending_grading / total_submissions * 100, 1) if total_submissions else 0
 
         curator_performance.append({
-            "id": curator.id,
-            "name": curator.name,
-            "groups_count": len(c_groups),
+            "id": c.id,
+            "name": c.name,
+            "groups_count": len(c_group_ids),
             "students_count": len(c_student_ids),
             "avg_progress": round(avg_progress, 1),
             "overdue_count": overdue_count,
@@ -1041,157 +1061,138 @@ def get_head_curator_dashboard_stats(
             "overdue_perc": overdue_perc,
             "pending_grading": pending_grading,
             "total_submissions": total_submissions,
-            "pending_perc": pending_perc
+            "pending_perc": pending_perc,
         })
 
-    # 4. Активность за 14 дней (Engagement Trends in PERCENTAGE)
-    activity_trends = []
-    
-    # Calculate number of days in range
+    # ── 8. Activity trends — 1 GROUP BY query (was 1 per day) ────────
     days_diff = (date_end.date() - date_start.date()).days
-    # Limit to reasonable range (max 90 days)
     days_to_show = min(days_diff + 1, 90) if days_diff > 0 else 14
-    
+
+    trend_rows = (
+        db.query(
+            func.date(StepProgress.visited_at).label("day"),
+            func.count(func.distinct(StepProgress.user_id)).label("cnt"),
+        )
+        .filter(
+            StepProgress.user_id.in_(current_student_ids),
+            StepProgress.visited_at >= date_start,
+            StepProgress.visited_at <= date_end,
+        )
+        .group_by(func.date(StepProgress.visited_at))
+        .all()
+    ) if current_student_ids else []
+
+    trend_map = {str(r.day): r.cnt for r in trend_rows}
+
+    activity_trends = []
     for i in range(days_to_show):
         day = date_start.date() + timedelta(days=i)
         if day > date_end.date():
             break
-        # Count unique students active on that day
-        day_active_count = db.query(func.count(func.distinct(StepProgress.user_id))).filter(
-            func.date(StepProgress.visited_at) == day,
-            StepProgress.user_id.in_(current_student_ids) if current_student_ids else False
-        ).scalar() or 0
-        
-        percentage = round((day_active_count / total_students) * 100, 1) if total_students > 0 else 0
-        activity_trends.append({
-            "date": day.isoformat(),
-            "count": day_active_count,
-            "percentage": percentage
-        })
+        day_str = day.isoformat()
+        cnt = trend_map.get(day_str, 0)
+        pct = round(cnt / total_students * 100, 1) if total_students else 0
+        activity_trends.append({"date": day_str, "count": cnt, "percentage": pct})
 
-    at_risk_groups = []
-    if current_group_ids:
-        # Calculate overdue per group (including both GA and Direct)
-        temp_group_overdue = {}
-        for gid in current_group_ids:
-            # 1. GA source
-            u_ga = db.query(GroupAssignment, GroupStudent).join(
-                GroupStudent, GroupAssignment.group_id == GroupStudent.group_id
-            ).filter(
-                GroupAssignment.group_id == gid,
-                GroupAssignment.due_date < datetime.utcnow(),
-                GroupAssignment.is_active == True,
-                ~db.query(AssignmentSubmission).filter(
-                    AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
-                    AssignmentSubmission.user_id == GroupStudent.student_id,
-                    AssignmentSubmission.is_hidden == False
-                ).exists()
-            ).count()
-            
-            l_ga = db.query(AssignmentSubmission).join(
-                GroupAssignment, AssignmentSubmission.assignment_id == GroupAssignment.assignment_id
-            ).filter(
-                GroupAssignment.group_id == gid,
-                AssignmentSubmission.submitted_at > GroupAssignment.due_date,
-                AssignmentSubmission.is_hidden == False
-            ).count()
-            
-            # 2. Direct source
-            u_direct = db.query(Assignment, GroupStudent).join(
-                GroupStudent, Assignment.group_id == GroupStudent.group_id
-            ).filter(
-                Assignment.group_id == gid,
-                Assignment.due_date < datetime.utcnow(),
-                Assignment.is_active == True,
-                Assignment.is_hidden == False,
-                ~db.query(AssignmentSubmission).filter(
-                    AssignmentSubmission.assignment_id == Assignment.id,
-                    AssignmentSubmission.user_id == GroupStudent.student_id,
-                    AssignmentSubmission.is_hidden == False
-                ).exists()
-            ).count()
-            
-            l_direct = db.query(AssignmentSubmission).join(
-                Assignment, AssignmentSubmission.assignment_id == Assignment.id
-            ).filter(
-                Assignment.group_id == gid,
-                AssignmentSubmission.submitted_at > Assignment.due_date,
-                Assignment.is_active == True,
-                Assignment.is_hidden == False,
-                AssignmentSubmission.is_hidden == False
-            ).count()
-            
-            total = u_ga + l_ga + u_direct + l_direct
-            if total > 0:
-                temp_group_overdue[gid] = total
+    # ── 9. At-risk groups — reuse per-group data, no extra loop ──────
+    group_overdue_map = {
+        gid: (
+            unsubmitted_ga_pg.get(gid, 0) + late_ga_pg.get(gid, 0) +
+            unsubmitted_direct_pg.get(gid, 0) + late_direct_pg.get(gid, 0)
+        )
+        for gid in current_group_ids
+    }
+    top_gids = sorted(
+        (gid for gid, v in group_overdue_map.items() if v > 0),
+        key=lambda x: group_overdue_map[x],
+        reverse=True,
+    )[:10]
 
-        if temp_group_overdue:
-            # Sort and pick top 10
-            sorted_gids = sorted(temp_group_overdue.keys(), key=lambda x: temp_group_overdue[x], reverse=True)[:10]
-            for gid in sorted_gids:
-                group = db.query(Group).filter(Group.id == gid).first()
-                curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first() if group.curator_id else None
-                at_risk_groups.append({
-                    "id": gid,
-                    "title": group.name,
-                    "curator": curator.name if curator else "No Curator",
-                    "overdue_count": temp_group_overdue[gid],
-                    "status": "critical" if temp_group_overdue[gid] > 5 else "warning"
-                })
+    top_curator_ids = list({group_curator_map[gid] for gid in top_gids if group_curator_map.get(gid)})
+    curator_name_map = {}
+    if top_curator_ids:
+        curator_name_map = {
+            r.id: r.name
+            for r in db.query(UserInDB.id, UserInDB.name)
+            .filter(UserInDB.id.in_(top_curator_ids))
+            .all()
+        }
 
-    # 5. Missing Attendance Reminders (similar to teacher/curator)
-    from src.schemas.models import EventGroup, Event
+    at_risk_groups = [
+        {
+            "id": gid,
+            "title": group_name_map.get(gid, ""),
+            "curator": curator_name_map.get(group_curator_map.get(gid), "No Curator"),
+            "overdue_count": group_overdue_map[gid],
+            "status": "critical" if group_overdue_map[gid] > 5 else "warning",
+        }
+        for gid in top_gids
+    ]
+
+    # ── 10. Missing attendance — batch (2 queries, no per-event loop) ─
+    cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
     missing_attendance_reminders = []
 
-    cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
-
     if current_group_ids:
-        past_events_rem = db.query(Event).join(EventGroup).filter(
-            EventGroup.group_id.in_(current_group_ids),
-            Event.event_type == "class",
-            Event.end_datetime <= datetime.utcnow(),
-            Event.end_datetime >= cutoff_date,
-            Event.is_active == True
-        ).all()
-
-        for event in past_events_rem:
-            eg_ids = [eg.group_id for eg in event.event_groups if eg.group_id in current_group_ids]
-            if not eg_ids:
-                continue
-
-            e_expected_students = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id.in_(eg_ids)
-            ).all()
-            e_expected_count = len(e_expected_students)
-
-            e_attendance_count = AttendanceService.count_for_event(
-                db, event.id, statuses=["present", "late", "absent"]
+        past_event_rows = (
+            db.query(Event.id, Event.title, Event.start_datetime, EventGroup.group_id)
+            .join(EventGroup, Event.id == EventGroup.event_id)
+            .filter(
+                EventGroup.group_id.in_(current_group_ids),
+                Event.event_type == "class",
+                Event.end_datetime <= now,
+                Event.end_datetime >= cutoff_date,
+                Event.is_active == True,
             )
+            .all()
+        )
 
-            if e_attendance_count < e_expected_count:
-                g_name = ""
-                g_id = None
-                if event.event_groups:
-                    target_eg = next((eg for eg in event.event_groups if eg.group_id in current_group_ids), event.event_groups[0])
-                    g_name = target_eg.group.name if target_eg.group else ""
-                    g_id = target_eg.group.id if target_eg.group else None
-                
-                missing_attendance_reminders.append({
-                    "event_id": event.id,
-                    "title": event.title,
-                    "group_name": g_name,
-                    "group_id": g_id,
-                    "event_date": event.start_datetime.isoformat(),
-                    "expected_students": e_expected_count,
-                    "recorded_students": e_attendance_count
-                })
+        if past_event_rows:
+            event_ids = list({r.id for r in past_event_rows})
+
+            att_rows = (
+                db.query(
+                    Attendance.event_id,
+                    func.count(Attendance.id).label("cnt"),
+                )
+                .filter(
+                    Attendance.event_id.in_(event_ids),
+                    Attendance.status.in_(["present", "late", "absent"]),
+                )
+                .group_by(Attendance.event_id)
+                .all()
+            )
+            att_map = {r.event_id: r.cnt for r in att_rows}
+
+            # Pick first group_id per event
+            event_group_map = {}
+            for r in past_event_rows:
+                if r.id not in event_group_map:
+                    event_group_map[r.id] = (r.title, r.start_datetime, r.group_id)
+
+            current_group_ids_set = set(current_group_ids)
+            for eid, (title, start_dt, grp_id) in event_group_map.items():
+                if grp_id not in current_group_ids_set:
+                    continue
+                expected = len(group_students_map.get(grp_id, []))
+                recorded = att_map.get(eid, 0)
+                if recorded < expected:
+                    missing_attendance_reminders.append({
+                        "event_id": eid,
+                        "title": title,
+                        "group_name": group_name_map.get(grp_id, ""),
+                        "group_id": grp_id,
+                        "event_date": start_dt.isoformat(),
+                        "expected_students": expected,
+                        "recorded_students": recorded,
+                    })
 
     return DashboardStatsSchema(
         user={
             "name": user.name.split()[0],
             "full_name": user.name,
             "role": user.role,
-            "avatar_url": user.avatar_url
+            "avatar_url": user.avatar_url,
         },
         stats={
             "total_curators": total_curators,
@@ -1203,9 +1204,9 @@ def get_head_curator_dashboard_stats(
             "total_pending": total_pending_global,
             "curator_performance": curator_performance,
             "activity_trends": activity_trends,
-            "missing_attendance_reminders": missing_attendance_reminders
+            "missing_attendance_reminders": missing_attendance_reminders,
         },
-        recent_courses=at_risk_groups
+        recent_courses=at_risk_groups,
     )
 
 def get_head_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSchema:
