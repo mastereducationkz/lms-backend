@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, and_, or_, desc
 from typing import List, Optional
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from pydantic import BaseModel
 
 from src.config import get_db
@@ -130,6 +130,42 @@ def _program_week_for_iso_week(iso_week_str: str, start_date_str: str) -> Option
     if delta_days < 0:
         return None
     return delta_days // 7 + 1
+
+
+def _almaty_due_date_expr():
+    """Due date as calendar date in Asia/Almaty (matches frontend getDueDayIndex)."""
+    return func.date(func.timezone("Asia/Almaty", CuratorTaskInstance.due_date))
+
+
+def _apply_task_week_filters(
+    q,
+    *,
+    week: Optional[str],
+    program_week: Optional[int],
+):
+    if program_week is not None:
+        return q.filter(CuratorTaskInstance.program_week == program_week)
+    if week:
+        return q.filter(CuratorTaskInstance.week_reference == week)
+    return q
+
+
+def _apply_due_day_filter(q, week: Optional[str], due_day: Optional[int]):
+    """Filter tasks to a weekday within an ISO week (0=Mon … 6=Sun). Null due_date → Monday."""
+    if due_day is None or not week:
+        return q
+    if due_day < 0 or due_day > 6:
+        raise HTTPException(status_code=400, detail="due_day must be 0–6 (Mon–Sun)")
+
+    monday = _monday_of_iso_week(week)
+    if not monday:
+        raise HTTPException(status_code=400, detail="Invalid week format, expected YYYY-Www")
+
+    target = monday + timedelta(days=due_day)
+    almaty_date = _almaty_due_date_expr()
+    if due_day == 0:
+        return q.filter(or_(almaty_date == target, CuratorTaskInstance.due_date.is_(None)))
+    return q.filter(almaty_date == target)
 
 
 # ============================================================================
@@ -350,7 +386,7 @@ async def update_my_task(
     ttl=45,
     key_args=(
         "curator_id", "status", "task_type", "group_id", "week",
-        "program_week", "limit", "offset",
+        "program_week", "due_day", "limit", "offset",
     ),
 )
 async def get_all_tasks(
@@ -360,7 +396,8 @@ async def get_all_tasks(
     group_id: Optional[int] = Query(None),
     week: Optional[str] = Query(None, description="ISO week reference, e.g. 2026-W08"),
     program_week: Optional[int] = Query(None, description="Program week number (relative to group start_date)"),
-    limit: int = Query(50, ge=1, le=200),
+    due_day: Optional[int] = Query(None, ge=0, le=6, description="Weekday 0=Mon … 6=Sun (Asia/Almaty)"),
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     current_user: UserInDB = Depends(require_role(["head_curator", "admin"])),
     db: Session = Depends(get_db),
@@ -384,10 +421,8 @@ async def get_all_tasks(
         q = q.join(CuratorTaskTemplate).filter(CuratorTaskTemplate.task_type == task_type)
     if group_id:
         q = q.filter(CuratorTaskInstance.group_id == group_id)
-    if program_week is not None:
-        q = q.filter(CuratorTaskInstance.program_week == program_week)
-    elif week:
-        q = q.filter(CuratorTaskInstance.week_reference == week)
+    q = _apply_task_week_filters(q, week=week, program_week=program_week)
+    q = _apply_due_day_filter(q, week, due_day)
 
     total = q.count()
     instances = q.order_by(CuratorTaskInstance.due_date.asc().nullslast(), CuratorTaskInstance.id.desc()).offset(offset).limit(limit).all()
@@ -396,6 +431,62 @@ async def get_all_tasks(
         "total": total,
         "tasks": [_instance_to_schema(i) for i in instances],
     }
+
+
+@router.get("/all-tasks/day-summary", summary="[Head Curator / Admin] Task counts per weekday")
+@cached(
+    namespace="curator-tasks:all-day-summary",
+    ttl=45,
+    key_args=("curator_id", "status", "group_id", "week", "program_week"),
+)
+async def get_all_tasks_day_summary(
+    curator_id: Optional[int] = Query(None),
+    status: Optional[str] = Query(None),
+    group_id: Optional[int] = Query(None),
+    week: Optional[str] = Query(None),
+    program_week: Optional[int] = Query(None),
+    current_user: UserInDB = Depends(require_role(["head_curator", "admin"])),
+    db: Session = Depends(get_db),
+):
+    """Lightweight counts per weekday for the task board (avoids loading all tasks at once)."""
+    q = db.query(CuratorTaskInstance)
+    if curator_id:
+        q = q.filter(CuratorTaskInstance.curator_id == curator_id)
+    if status:
+        q = q.filter(CuratorTaskInstance.status == status)
+    if group_id:
+        q = q.filter(CuratorTaskInstance.group_id == group_id)
+    q = _apply_task_week_filters(q, week=week, program_week=program_week)
+
+    almaty_date = _almaty_due_date_expr()
+    rows = (
+        q.with_entities(
+            almaty_date.label("due_day_date"),
+            CuratorTaskInstance.due_date,
+            CuratorTaskInstance.status,
+            func.count(CuratorTaskInstance.id),
+        )
+        .group_by(almaty_date, CuratorTaskInstance.due_date, CuratorTaskInstance.status)
+        .all()
+    )
+
+    monday = _monday_of_iso_week(week) if week else None
+    day_stats = {i: {"day": i, "total": 0, "completed": 0} for i in range(7)}
+
+    for due_day_date, raw_due, task_status, cnt in rows:
+        if raw_due is None:
+            day_idx = 0
+        elif monday and due_day_date:
+            day_idx = (due_day_date - monday).days
+            if day_idx < 0 or day_idx > 6:
+                continue
+        else:
+            continue
+        day_stats[day_idx]["total"] += cnt
+        if task_status == "completed":
+            day_stats[day_idx]["completed"] += cnt
+
+    return {"days": list(day_stats.values())}
 
 
 @router.get("/curators-summary", summary="[Head Curator / Admin] Stats per curator")

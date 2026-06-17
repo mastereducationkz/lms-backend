@@ -2767,7 +2767,8 @@ async def get_teacher_students_progress(
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
     
-    from src.schemas.models import CourseGroupAccess, Group
+    from src.schemas.models import CourseGroupAccess, Group, StudentCourseSummary
+    from src.progress.services.lesson_completion import calculate_student_module_progress
     
     # Get teacher's groups (groups where this teacher is the owner)
     teacher_groups = db.query(Group).filter(
@@ -2838,50 +2839,21 @@ async def get_teacher_students_progress(
             
             if not course:
                 continue
-            
-            # Find last accessed lesson through StepProgress
-            last_step_progress = db.query(StepProgress).filter(
+
+            module_progress = calculate_student_module_progress(db, student.id, course.id)
+
+            last_activity = db.query(func.max(StepProgress.visited_at)).filter(
                 StepProgress.user_id == student.id,
-                StepProgress.course_id == course.id
-            ).order_by(desc(StepProgress.visited_at)).first()
-            
-            current_lesson_title = None
-            current_lesson_id = None
-            lesson_progress_percentage = 0
-            
-            if last_step_progress:
-                # Get the lesson from the step
-                step = db.query(Step).filter(Step.id == last_step_progress.step_id).first()
-                if step:
-                    lesson = db.query(Lesson).filter(Lesson.id == step.lesson_id).first()
-                    if lesson:
-                        current_lesson_title = lesson.title
-                        current_lesson_id = lesson.id
-                        
-                        # Calculate lesson progress (completed steps / total steps in lesson)
-                        lesson_steps = db.query(Step).filter(Step.lesson_id == lesson.id).count()
-                        completed_lesson_steps = db.query(StepProgress).filter(
-                            StepProgress.user_id == student.id,
-                            StepProgress.step_id.in_(
-                                db.query(Step.id).filter(Step.lesson_id == lesson.id)
-                            ),
-                            StepProgress.status == 'completed'
-                        ).count()
-                        
-                        lesson_progress_percentage = round((completed_lesson_steps / lesson_steps) * 100) if lesson_steps > 0 else 0
-            
-            # Calculate overall course progress and get last activity
-            all_progress = db.query(StudentProgress).filter(
-                StudentProgress.user_id == student.id,
-                StudentProgress.course_id == course.id
-            ).all()
-            
-            overall_progress = 0
-            last_activity = None
-            
-            if all_progress:
-                overall_progress = round(sum(p.completion_percentage for p in all_progress) / len(all_progress))
-                last_activity = max(p.last_accessed for p in all_progress if p.last_accessed)
+                StepProgress.course_id == course.id,
+            ).scalar()
+
+            if not last_activity:
+                summary = db.query(StudentCourseSummary).filter(
+                    StudentCourseSummary.user_id == student.id,
+                    StudentCourseSummary.course_id == course.id,
+                ).first()
+                if summary:
+                    last_activity = summary.last_activity_at
 
             students_data.append({
                 "student_id": student.id,
@@ -2891,11 +2863,13 @@ async def get_teacher_students_progress(
                 "group_name": group_name,
                 "course_id": course.id,
                 "course_title": course.title,
-                "current_lesson_id": current_lesson_id,
-                "current_lesson_title": current_lesson_title or "Not started",
-                "lesson_progress": lesson_progress_percentage,
-                "overall_progress": overall_progress,
-                "last_activity": last_activity
+                "current_lesson_id": module_progress["current_module_id"],
+                "current_lesson_title": module_progress["current_module_title"] or "Not started",
+                "lesson_progress": module_progress["current_module_progress"],
+                "overall_progress": module_progress["overall_progress"],
+                "completed_modules": module_progress["completed_modules"],
+                "total_modules": module_progress["total_modules"],
+                "last_activity": last_activity,
             })
         
         student_ids_seen.add(gs.student_id)

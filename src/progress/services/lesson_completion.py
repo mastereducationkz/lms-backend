@@ -155,6 +155,95 @@ def _is_lesson_complete_for_user(
     return lesson_total > 0 and completed_step_count >= lesson_total
 
 
+def calculate_student_module_progress(
+    db: Session,
+    user_id: int,
+    course_id: int,
+) -> Dict[str, Any]:
+    """
+    Course progress by units (modules): completed modules / total modules.
+    A module counts as completed when all its lessons are fully done.
+    """
+    completed_lesson_ids = _get_completed_lesson_ids_for_user(db, user_id, course_id)
+    modules = (
+        db.query(Module)
+        .filter(Module.course_id == course_id)
+        .order_by(Module.order_index)
+        .all()
+    )
+
+    total_modules = 0
+    completed_modules = 0
+    current_module_title: Optional[str] = None
+    current_module_id: Optional[int] = None
+    current_module_progress = 0
+
+    for module in modules:
+        lessons = (
+            db.query(Lesson)
+            .filter(Lesson.module_id == module.id)
+            .order_by(Lesson.order_index)
+            .all()
+        )
+        if not lessons:
+            continue
+
+        total_modules += 1
+        module_complete = True
+        completed_lessons_in_module = 0
+
+        for lesson in lessons:
+            lesson_total = db.query(Step).filter(Step.lesson_id == lesson.id).count()
+            completed_steps = db.query(StepProgress).filter(
+                StepProgress.user_id == user_id,
+                StepProgress.lesson_id == lesson.id,
+                StepProgress.status == "completed",
+            ).count()
+            is_complete = _is_lesson_complete_for_user(
+                lesson.id,
+                lesson_total,
+                completed_steps,
+                completed_lesson_ids,
+            )
+            if is_complete:
+                completed_lessons_in_module += 1
+            else:
+                module_complete = False
+
+        if module_complete:
+            completed_modules += 1
+        elif current_module_title is None:
+            current_module_title = module.title
+            current_module_id = module.id
+            current_module_progress = (
+                round((completed_lessons_in_module / len(lessons)) * 100)
+                if lessons else 0
+            )
+
+    if current_module_title is None and total_modules > 0:
+        for module in reversed(modules):
+            lessons = db.query(Lesson).filter(Lesson.module_id == module.id).count()
+            if lessons > 0:
+                current_module_title = module.title
+                current_module_id = module.id
+                current_module_progress = 100
+                break
+
+    overall_progress = (
+        round((completed_modules / total_modules) * 100)
+        if total_modules > 0 else 0
+    )
+
+    return {
+        "overall_progress": overall_progress,
+        "completed_modules": completed_modules,
+        "total_modules": total_modules,
+        "current_module_title": current_module_title,
+        "current_module_id": current_module_id,
+        "current_module_progress": current_module_progress,
+    }
+
+
 def get_user_lesson_progress_summary(
     db: Session,
     user_id: int,
