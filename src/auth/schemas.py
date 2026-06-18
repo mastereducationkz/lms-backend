@@ -32,7 +32,7 @@ class UserSchema(BaseModel):
     activity_points: Optional[int] = 0
     no_substitutions: Optional[bool] = False
     course_ids: Optional[List[int]] = []
-    created_at: datetime
+    created_at: Optional[datetime] = None
     is_analytics_hidden: Optional[bool] = False
 
     class Config:

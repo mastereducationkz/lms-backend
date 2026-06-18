@@ -1825,7 +1825,12 @@ async def get_admin_dashboard(
     )
     
     # Recent users (last 5)
-    recent_users = db.query(UserInDB).order_by(desc(UserInDB.created_at)).limit(5).all()
+    recent_users = (
+        db.query(UserInDB)
+        .order_by(UserInDB.created_at.desc().nullslast(), UserInDB.id.desc())
+        .limit(5)
+        .all()
+    )
     recent_users_data = [UserSchema.from_orm(user) for user in recent_users]
     
     # Recent groups (last 5)
