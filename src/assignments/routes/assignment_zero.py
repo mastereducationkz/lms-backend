@@ -154,10 +154,12 @@ async def get_assignment_zero_status(
     user_groups = []
     for gs in user_group_students:
         group = db.query(Group).filter(Group.id == gs.group_id).first()
-        if group:
+        if group and group.is_active:
             user_groups.append({
                 "id": group.id,
-                "name": group.name
+                "name": group.name,
+                "program_type": getattr(group, "program_type", None) or "general_english",
+                "is_special": bool(getattr(group, "is_special", False)),
             })
     
     return {
