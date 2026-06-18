@@ -161,8 +161,8 @@ def calculate_student_module_progress(
     course_id: int,
 ) -> Dict[str, Any]:
     """
-    Course progress by units (modules): completed modules / total modules.
-    A module counts as completed when all its lessons are fully done.
+    Course progress by units (lessons): completed lessons / total lessons.
+    Current unit = first incomplete lesson with step-level progress.
     """
     completed_lesson_ids = _get_completed_lesson_ids_for_user(db, user_id, course_id)
     modules = (
@@ -172,11 +172,13 @@ def calculate_student_module_progress(
         .all()
     )
 
-    total_modules = 0
-    completed_modules = 0
-    current_module_title: Optional[str] = None
-    current_module_id: Optional[int] = None
-    current_module_progress = 0
+    total_lessons = 0
+    completed_lessons = 0
+    current_lesson_title: Optional[str] = None
+    current_lesson_id: Optional[int] = None
+    current_lesson_progress = 0
+    last_lesson_title: Optional[str] = None
+    last_lesson_id: Optional[int] = None
 
     for module in modules:
         lessons = (
@@ -185,15 +187,16 @@ def calculate_student_module_progress(
             .order_by(Lesson.order_index)
             .all()
         )
-        if not lessons:
-            continue
-
-        total_modules += 1
-        module_complete = True
-        completed_lessons_in_module = 0
 
         for lesson in lessons:
             lesson_total = db.query(Step).filter(Step.lesson_id == lesson.id).count()
+            if lesson_total == 0:
+                continue
+
+            total_lessons += 1
+            last_lesson_title = lesson.title
+            last_lesson_id = lesson.id
+
             completed_steps = db.query(StepProgress).filter(
                 StepProgress.user_id == user_id,
                 StepProgress.lesson_id == lesson.id,
@@ -205,42 +208,31 @@ def calculate_student_module_progress(
                 completed_steps,
                 completed_lesson_ids,
             )
+
             if is_complete:
-                completed_lessons_in_module += 1
-            else:
-                module_complete = False
+                completed_lessons += 1
+            elif current_lesson_title is None:
+                current_lesson_title = lesson.title
+                current_lesson_id = lesson.id
+                current_lesson_progress = round((completed_steps / lesson_total) * 100)
 
-        if module_complete:
-            completed_modules += 1
-        elif current_module_title is None:
-            current_module_title = module.title
-            current_module_id = module.id
-            current_module_progress = (
-                round((completed_lessons_in_module / len(lessons)) * 100)
-                if lessons else 0
-            )
-
-    if current_module_title is None and total_modules > 0:
-        for module in reversed(modules):
-            lessons = db.query(Lesson).filter(Lesson.module_id == module.id).count()
-            if lessons > 0:
-                current_module_title = module.title
-                current_module_id = module.id
-                current_module_progress = 100
-                break
+    if current_lesson_title is None and total_lessons > 0:
+        current_lesson_title = last_lesson_title
+        current_lesson_id = last_lesson_id
+        current_lesson_progress = 100
 
     overall_progress = (
-        round((completed_modules / total_modules) * 100)
-        if total_modules > 0 else 0
+        round((completed_lessons / total_lessons) * 100)
+        if total_lessons > 0 else 0
     )
 
     return {
         "overall_progress": overall_progress,
-        "completed_modules": completed_modules,
-        "total_modules": total_modules,
-        "current_module_title": current_module_title,
-        "current_module_id": current_module_id,
-        "current_module_progress": current_module_progress,
+        "completed_modules": completed_lessons,
+        "total_modules": total_lessons,
+        "current_module_title": current_lesson_title,
+        "current_module_id": current_lesson_id,
+        "current_module_progress": current_lesson_progress,
     }
 
 
