@@ -58,7 +58,11 @@ def _sync_group_students(db: Session, group_id: int, desired_student_ids: List[i
 
 
 def _sync_student_groups(db: Session, user_id: int, desired_group_ids: List[int]) -> None:
-    """Add/remove a student's group memberships by diff; skip when unchanged."""
+    """Add/remove a student's group memberships by diff; skip when unchanged.
+
+    Submissions are tied to assignment_id and are never moved or deleted here —
+    old group homework stays in the DB; new group gets its own assignments.
+    """
     desired_ids = set(desired_group_ids)
     current_ids = {
         row[0]

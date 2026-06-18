@@ -45,6 +45,8 @@ def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
 
 
 def assignment_visible_to_student(user_id: int, assignment: Assignment, db: Session) -> bool:
+    if _student_has_visible_submission(user_id, assignment.id, db):
+        return True
     cid = _assignment_course_id(assignment, db)
     if cid is None:
         return True
@@ -57,6 +59,79 @@ def assignment_visible_to_student(user_id: int, assignment: Assignment, db: Sess
     if assignment.lesson_id:
         return False
     return True
+
+
+def _student_has_visible_submission(user_id: int, assignment_id: int, db: Session) -> bool:
+    return (
+        db.query(AssignmentSubmission.id)
+        .filter(
+            AssignmentSubmission.user_id == user_id,
+            AssignmentSubmission.assignment_id == assignment_id,
+            AssignmentSubmission.is_hidden == False,
+        )
+        .first()
+        is not None
+    )
+
+
+def _student_in_assignment_group(user_id: int, assignment: Assignment, db: Session) -> bool:
+    if not assignment.group_id:
+        return False
+    return (
+        db.query(GroupStudent.id)
+        .filter(
+            GroupStudent.group_id == assignment.group_id,
+            GroupStudent.student_id == user_id,
+        )
+        .first()
+        is not None
+    )
+
+
+def _student_has_active_assignment_access(user: UserInDB, assignment: Assignment, db: Session) -> bool:
+    if assignment.lesson_id:
+        lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
+        if lesson:
+            module = db.query(Module).filter(Module.id == lesson.module_id).first()
+            if module and check_course_access(module.course_id, user, db):
+                return True
+
+    if assignment.group_id:
+        return _student_in_assignment_group(user.id, assignment, db)
+
+    return False
+
+
+def _student_can_view_assignment(user: UserInDB, assignment: Assignment, db: Session) -> bool:
+    if _student_has_active_assignment_access(user, assignment, db):
+        return True
+    return _student_has_visible_submission(user.id, assignment.id, db)
+
+
+def _build_student_assignment_status(submission: Optional[AssignmentSubmission], assignment: Assignment) -> Dict[str, Any]:
+    status = "not_submitted"
+    score = None
+    submitted_at = None
+    graded_at = None
+    has_file_submission = False
+
+    if submission:
+        if submission.is_graded and submission.score is not None:
+            status = "graded"
+            score = submission.score
+            graded_at = submission.graded_at
+        else:
+            status = "submitted"
+        submitted_at = submission.submitted_at
+        has_file_submission = bool(submission.file_url)
+
+    return {
+        "status": status,
+        "score": score,
+        "submitted_at": submitted_at,
+        "graded_at": graded_at,
+        "has_file_submission": has_file_submission,
+    }
 
 
 def _to_enriched_schema(assignment: Assignment) -> AssignmentSchema:
@@ -323,6 +398,73 @@ async def get_assigned_lessons_for_course(
     return result
 
 
+@router.get("/previous-homework")
+async def get_student_previous_homework(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Homework from past groups where the student still has a submission."""
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can access previous homework")
+
+    current_group_ids = {
+        row[0]
+        for row in db.query(GroupStudent.group_id).filter(
+            GroupStudent.student_id == current_user.id
+        ).all()
+    }
+
+    submissions = (
+        db.query(AssignmentSubmission)
+        .filter(
+            AssignmentSubmission.user_id == current_user.id,
+            AssignmentSubmission.is_hidden == False,
+        )
+        .order_by(desc(AssignmentSubmission.submitted_at))
+        .all()
+    )
+    if not submissions:
+        return []
+
+    submission_by_assignment = {sub.assignment_id: sub for sub in submissions}
+    assignment_ids = list(submission_by_assignment.keys())
+
+    assignments = (
+        db.query(Assignment)
+        .options(joinedload(Assignment.event), joinedload(Assignment.group))
+        .filter(Assignment.id.in_(assignment_ids))
+        .all()
+    )
+
+    result = []
+    for assignment in assignments:
+        if not assignment.group_id:
+            continue
+        if assignment.group_id in current_group_ids:
+            continue
+        if not assignment_visible_to_student(current_user.id, assignment, db):
+            continue
+
+        submission = submission_by_assignment.get(assignment.id)
+        if not submission:
+            continue
+
+        schema = _to_enriched_schema(assignment)
+        status_data = _build_student_assignment_status(submission, assignment)
+        result.append({
+            **schema.model_dump(),
+            **status_data,
+            "is_previous": True,
+            "previous_group_name": schema.group_name,
+        })
+
+    result.sort(
+        key=lambda item: item.get("submitted_at") or item.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return result
+
+
 @router.post("/", response_model=AssignmentSchema)
 async def create_assignment(
     assignment_data: AssignmentCreateSchema,
@@ -581,22 +723,21 @@ async def get_assignment(
     if current_user.role == "student" and not assignment_visible_to_student(current_user.id, assignment, db):
         raise HTTPException(status_code=403, detail="Access denied to this assignment")
 
-    # Check access permissions
     has_access = False
-    
-    # Check course access if assignment is linked to lesson
-    if assignment.lesson_id:
+
+    if current_user.role == "student":
+        has_access = _student_can_view_assignment(current_user, assignment, db)
+    elif assignment.lesson_id:
         lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
         if lesson:
             module = db.query(Module).filter(Module.id == lesson.module_id).first()
             if module and check_course_access(module.course_id, current_user, db):
                 has_access = True
                 print(f"Access granted via course: {module.course_id}")
-    
-    # Check group access if assignment is linked to group
-    if assignment.group_id:
-        from src.schemas.models import Group, GroupStudent
-        
+
+    if not has_access and assignment.group_id and current_user.role != "student":
+        from src.schemas.models import Group
+
         if current_user.role == "admin":
             has_access = True
             print("Access granted via admin role")
@@ -605,14 +746,10 @@ async def get_assignment(
             if group and group.teacher_id == current_user.id:
                 has_access = True
                 print(f"Access granted via teacher role for group: {assignment.group_id}")
-        elif current_user.role == "student":
-            group_member = db.query(GroupStudent).filter(
-                GroupStudent.group_id == assignment.group_id,
-                GroupStudent.student_id == current_user.id
-            ).first()
-            if group_member:
+        elif current_user.role == "curator":
+            group = db.query(Group).filter(Group.id == assignment.group_id).first()
+            if group and group.curator_id == current_user.id:
                 has_access = True
-                print(f"Access granted via student role for group: {assignment.group_id}")
     
     if not has_access:
         print(f"Access denied for user {current_user.id} to assignment {assignment_id}")
@@ -1793,36 +1930,22 @@ async def get_assignment_status_for_student(
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can access assignment status")
     
-    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    assignment = (
+        db.query(Assignment)
+        .options(joinedload(Assignment.group))
+        .filter(Assignment.id == assignment_id)
+        .first()
+    )
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     if not assignment_visible_to_student(current_user.id, assignment, db):
         raise HTTPException(status_code=403, detail="Access denied to this assignment")
     
-    # Check if student has access to this assignment
-    has_access = False
-    
-    # Check course access if assignment is linked to lesson
-    if assignment.lesson_id:
-        lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
-        if lesson:
-            module = db.query(Module).filter(Module.id == lesson.module_id).first()
-            if module and check_course_access(module.course_id, current_user, db):
-                has_access = True
-    
-    # Check group access if assignment is linked to group
-    if assignment.group_id:
-        from src.schemas.models import GroupStudent
-        group_member = db.query(GroupStudent).filter(
-            GroupStudent.group_id == assignment.group_id,
-            GroupStudent.student_id == current_user.id
-        ).first()
-        if group_member:
-            has_access = True
-    
-    if not has_access:
+    if not _student_can_view_assignment(current_user, assignment, db):
         raise HTTPException(status_code=403, detail="Access denied to this assignment")
+    
+    is_read_only = not _student_has_active_assignment_access(current_user, assignment, db)
     
     # Get existing submission (exclude hidden submissions - student should not see them)
     submission = db.query(AssignmentSubmission).filter(
@@ -1865,6 +1988,8 @@ async def get_assignment_status_for_student(
         "submitted_at": submission.submitted_at if submission else None,
         "score": submission.score if submission else None,
         "max_score": assignment.max_score,
+        "is_read_only": is_read_only,
+        "previous_group_name": assignment.group.name if is_read_only and assignment.group else None,
         # Include submission details for displaying student's answers
         "submission_id": submission.id if submission else None,
         "answers": json.loads(submission.answers) if submission and submission.answers else None,

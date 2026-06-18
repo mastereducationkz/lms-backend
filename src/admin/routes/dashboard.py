@@ -2467,8 +2467,27 @@ async def auto_grade_teacher_unit_homework(
     eligible_submissions = []
     for submission in pending_submissions:
         assignment = assignment_map.get(submission.assignment_id)
-        if assignment and is_unit_only_multitask(assignment):
-            eligible_submissions.append(submission)
+        if not assignment or not is_unit_only_multitask(assignment):
+            continue
+
+        if assignment.group_id:
+            membership = db.query(GroupStudent).filter(
+                GroupStudent.group_id == assignment.group_id,
+                GroupStudent.student_id == submission.user_id,
+            ).first()
+            if not membership:
+                continue
+            if submission.submitted_at and membership.created_at:
+                submitted_at = submission.submitted_at
+                joined_at = membership.created_at
+                if submitted_at.tzinfo is None and joined_at.tzinfo is not None:
+                    submitted_at = submitted_at.replace(tzinfo=joined_at.tzinfo)
+                elif submitted_at.tzinfo is not None and joined_at.tzinfo is None:
+                    joined_at = joined_at.replace(tzinfo=submitted_at.tzinfo)
+                if submitted_at < joined_at:
+                    continue
+
+        eligible_submissions.append(submission)
 
     if not eligible_submissions:
         return {"graded_count": 0, "eligible_count": 0}
