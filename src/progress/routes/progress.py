@@ -31,12 +31,12 @@ from src.progress.services.lesson_completion import (
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
 from src.services.cache_service import cached
 from src.utils.course_access import student_has_only_special_groups
+from src.utils.quiz_passing_score import resolve_quiz_passing_score_percent
 
 
 router = APIRouter()
 _progress_log = logging.getLogger(__name__)
 
-COURSE_QUIZ_PASS_PCT = 60.0
 COURSE_QUIZ_POINTS_MIN = 8
 COURSE_QUIZ_POINTS_MAX = 24
 
@@ -70,14 +70,20 @@ def _maybe_award_course_quiz_points(
         pct = float(score_percentage)
     except (TypeError, ValueError):
         return
-    if pct < COURSE_QUIZ_PASS_PCT:
+
+    step = db.query(Step).filter(Step.id == step_id).first()
+    pass_pct = resolve_quiz_passing_score_percent(
+        step.content_text if step else None,
+        is_optional=bool(step.is_optional) if step else False,
+    )
+    if pct < pass_pct:
         return
     if _course_quiz_points_already_awarded(db, user_id, step_id):
         return
     from src.gamification.routes.gamification import award_points
 
-    span = 100.0 - COURSE_QUIZ_PASS_PCT
-    ratio = min(1.0, max(0.0, (pct - COURSE_QUIZ_PASS_PCT) / span)) if span > 0 else 1.0
+    span = 100.0 - pass_pct
+    ratio = min(1.0, max(0.0, (pct - pass_pct) / span)) if span > 0 else 1.0
     amount = int(COURSE_QUIZ_POINTS_MIN + ratio * (COURSE_QUIZ_POINTS_MAX - COURSE_QUIZ_POINTS_MIN))
     amount = max(COURSE_QUIZ_POINTS_MIN, min(COURSE_QUIZ_POINTS_MAX, amount))
     try:
