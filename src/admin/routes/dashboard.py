@@ -17,6 +17,7 @@ from src.schemas.models import GroupStudent
 from src.services.attendance_service import AttendanceService
 from src.services.group_completion_service import sync_groups_over_status
 from src.services.cache_service import cached
+from src.utils.course_access import get_user_courses
 
 router = APIRouter()
 
@@ -85,52 +86,7 @@ async def get_dashboard_stats(
 
 def get_student_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSchema:
     """Get dashboard stats for student"""
-    # Get student's active enrollments
-    enrollments = db.query(Enrollment).filter(
-        Enrollment.user_id == user.id,
-        Enrollment.is_active == True
-    ).all()
-    
-    # Get group access courses
-    from src.schemas.models import GroupStudent, CourseGroupAccess
-    
-    group_student = db.query(GroupStudent).filter(
-        GroupStudent.student_id == user.id
-    ).first()
-    
-    group_courses = []
-    if group_student:
-        group_access = db.query(CourseGroupAccess).filter(
-            CourseGroupAccess.group_id == group_student.group_id,
-            CourseGroupAccess.is_active == True
-        ).all()
-        
-        for access in group_access:
-            course = db.query(Course).filter(
-                Course.id == access.course_id,
-                Course.is_active == True
-            ).first()
-            if course:
-                group_courses.append(course)
-    
-    # Combine both sets of courses (enrollment + group access)
-    all_courses = []
-    
-    # Add enrollment courses
-    for enrollment in enrollments:
-        course = db.query(Course).filter(
-            Course.id == enrollment.course_id,
-            Course.is_active == True
-        ).first()
-        if course:
-            all_courses.append(course)
-    
-    # Add group access courses (avoid duplicates)
-    enrollment_course_ids = [e.course_id for e in enrollments]
-    for course in group_courses:
-        if course.id not in enrollment_course_ids:
-            all_courses.append(course)
-    
+    all_courses = get_user_courses(user.id, db)
     enrolled_courses_count = len(all_courses)
     
     # Calculate total study time (convert minutes to hours)
@@ -1965,51 +1921,7 @@ async def get_my_courses(
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can access this endpoint")
     
-    # Get student's enrollments
-    enrollments = db.query(Enrollment).filter(
-        Enrollment.user_id == current_user.id,
-        Enrollment.is_active == True
-    ).all()
-    
-    # Get group access courses
-    from src.schemas.models import GroupStudent, CourseGroupAccess
-    
-    group_student = db.query(GroupStudent).filter(
-        GroupStudent.student_id == current_user.id
-    ).first()
-    
-    group_courses = []
-    if group_student:
-        group_access = db.query(CourseGroupAccess).filter(
-            CourseGroupAccess.group_id == group_student.group_id,
-            CourseGroupAccess.is_active == True
-        ).all()
-        
-        for access in group_access:
-            course = db.query(Course).filter(
-                Course.id == access.course_id,
-                Course.is_active == True
-            ).first()
-            if course:
-                group_courses.append(course)
-    
-    # Combine both sets of courses (enrollment + group access)
-    all_courses = []
-    
-    # Add enrollment courses
-    for enrollment in enrollments:
-        course = db.query(Course).filter(
-            Course.id == enrollment.course_id,
-            Course.is_active == True
-        ).first()
-        if course:
-            all_courses.append(course)
-    
-    # Add group access courses (avoid duplicates)
-    enrollment_course_ids = [e.course_id for e in enrollments]
-    for course in group_courses:
-        if course.id not in enrollment_course_ids:
-            all_courses.append(course)
+    all_courses = get_user_courses(current_user.id, db)
     
     courses_with_progress = []
     

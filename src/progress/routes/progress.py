@@ -30,7 +30,7 @@ from src.progress.services.lesson_completion import (
 )
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
 from src.services.cache_service import cached
-from src.utils.course_access import student_has_only_special_groups
+from src.utils.course_access import get_user_courses, student_has_only_special_groups
 from src.utils.quiz_passing_score import resolve_quiz_passing_score_percent
 
 
@@ -795,43 +795,7 @@ async def get_student_progress_overview(
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can access this endpoint")
     
-    # Получаем все курсы студента (через enrollments и group access)
-    from src.schemas.models import GroupStudent, CourseGroupAccess
-    
-    # Get enrolled course IDs
-    enrolled_course_ids = db.query(Enrollment.course_id).filter(
-        Enrollment.user_id == current_user.id,
-        Enrollment.is_active == True
-    ).subquery()
-    
-    # Get group access course IDs
-    group_student = db.query(GroupStudent).filter(
-        GroupStudent.student_id == current_user.id
-    ).first()
-    
-    group_course_ids = None
-    if group_student:
-        group_course_ids = db.query(CourseGroupAccess.course_id).filter(
-            CourseGroupAccess.group_id == group_student.group_id,
-            CourseGroupAccess.is_active == True
-        ).subquery()
-    
-    # Combine both sets of course IDs
-    if group_student and group_course_ids is not None:
-        from sqlalchemy import union
-        combined_course_ids = db.query(union(
-            enrolled_course_ids.select(),
-            group_course_ids.select()
-        ).alias('course_id')).subquery()
-        courses = db.query(Course).filter(
-            Course.id.in_(select(combined_course_ids)), 
-            Course.is_active == True
-        ).all()
-    else:
-        courses = db.query(Course).filter(
-            Course.id.in_(select(enrolled_course_ids)), 
-            Course.is_active == True
-        ).all()
+    courses = get_user_courses(current_user.id, db)
     
     # Calculate overall statistics
     total_courses = len(courses)
@@ -987,43 +951,7 @@ async def get_student_progress_overview_by_id(
         if not group_student:
             raise HTTPException(status_code=403, detail="Access denied to this student")
     
-    # Получаем все курсы студента (через enrollments и group access)
-    from src.schemas.models import GroupStudent, CourseGroupAccess
-    
-    # Get enrolled course IDs
-    enrolled_course_ids = db.query(Enrollment.course_id).filter(
-        Enrollment.user_id == student_id,
-        Enrollment.is_active == True
-    ).subquery()
-    
-    # Get group access course IDs
-    group_student = db.query(GroupStudent).filter(
-        GroupStudent.student_id == student_id
-    ).first()
-    
-    group_course_ids = None
-    if group_student:
-        group_course_ids = db.query(CourseGroupAccess.course_id).filter(
-            CourseGroupAccess.group_id == group_student.group_id,
-            CourseGroupAccess.is_active == True
-        ).subquery()
-    
-    # Combine both sets of course IDs
-    if group_student and group_course_ids is not None:
-        from sqlalchemy import union
-        combined_course_ids = db.query(union(
-            enrolled_course_ids.select(),
-            group_course_ids.select()
-        ).alias('course_id')).subquery()
-        courses = db.query(Course).filter(
-            Course.id.in_(select(combined_course_ids)), 
-            Course.is_active == True
-        ).all()
-    else:
-        courses = db.query(Course).filter(
-            Course.id.in_(select(enrolled_course_ids)), 
-            Course.is_active == True
-        ).all()
+    courses = get_user_courses(student_id, db)
     
     # Calculate overall statistics
     total_courses = len(courses)
