@@ -164,6 +164,7 @@ class ModuleCreateSchema(BaseModel):
 class BaseLessonSchema(BaseModel):
     id: int
     module_id: int
+    course_id: Optional[int] = None
     title: str
     description: Optional[str] = None
     duration_minutes: int

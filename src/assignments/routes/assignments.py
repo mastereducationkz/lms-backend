@@ -505,6 +505,7 @@ async def create_assignment(
             raise HTTPException(status_code=403, detail="Access denied")
     
     # Validate assignment content based on type
+    assignment_data.content = normalize_multi_task_content(assignment_data.content or {}, db)
     validate_assignment_content(assignment_data.assignment_type, assignment_data.content)
     
     # Validate due date
@@ -758,6 +759,9 @@ async def get_assignment(
     print(f"Access granted, returning assignment data")
     
     assignment_data = _to_enriched_schema(assignment)
+
+    if isinstance(assignment_data.content, dict):
+        assignment_data.content = normalize_multi_task_content(assignment_data.content, db)
     
     # Hide correct answers from students
     if current_user.role == "student":
@@ -798,6 +802,7 @@ async def update_assignment(
                 raise HTTPException(status_code=403, detail="Access denied")
     
     # Validate content
+    assignment_data.content = normalize_multi_task_content(assignment_data.content or {}, db)
     validate_assignment_content(assignment_data.assignment_type, assignment_data.content)
     
     # Validate due date
@@ -2008,6 +2013,36 @@ async def get_assignment_status_for_student(
 # HELPER FUNCTIONS
 # =============================================================================
 
+def normalize_multi_task_content(content: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """Fill missing course_id on course_unit tasks from linked lesson ids."""
+    if not content or not isinstance(content.get("tasks"), list):
+        return content
+
+    for task in content["tasks"]:
+        if not isinstance(task, dict) or task.get("task_type") != "course_unit":
+            continue
+
+        task_content = task.get("content")
+        if not isinstance(task_content, dict):
+            continue
+
+        lesson_ids = task_content.get("lesson_ids") or []
+        course_id = task_content.get("course_id")
+        if course_id or not lesson_ids:
+            continue
+
+        first_lesson_id = lesson_ids[0]
+        lesson = db.query(Lesson).filter(Lesson.id == first_lesson_id).first()
+        if not lesson:
+            continue
+
+        module = db.query(Module).filter(Module.id == lesson.module_id).first()
+        if module:
+            task_content["course_id"] = module.course_id
+
+    return content
+
+
 def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
     """Validate assignment content based on type"""
     required_fields = {
@@ -2059,10 +2094,17 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
             # Validate task-specific content
             task_content = task.get("content", {})
             if task_type == "course_unit":
-                if "course_id" not in task_content or "lesson_ids" not in task_content:
+                lesson_ids = task_content.get("lesson_ids")
+                course_id = task_content.get("course_id")
+                if not isinstance(lesson_ids, list) or len(lesson_ids) == 0:
                     raise HTTPException(
-                        status_code=400, 
-                        detail=f"Task {i+1} (course_unit) must have 'course_id' and 'lesson_ids' in content"
+                        status_code=400,
+                        detail=f"Task {i+1} (course_unit) must include at least one lesson in 'lesson_ids'",
+                    )
+                if not course_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Task {i+1} (course_unit) must have a valid 'course_id'",
                     )
             elif task_type == "file_task":
                 if "question" not in task_content:

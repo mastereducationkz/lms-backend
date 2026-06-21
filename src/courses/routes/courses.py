@@ -1105,6 +1105,7 @@ async def get_lesson(
     total_steps = db.query(Step).filter(Step.lesson_id == lesson_id).count()
     
     lesson_schema = LessonSchema.from_orm(lesson)
+    lesson_schema.course_id = module.course_id
     lesson_schema.steps = []
     lesson_schema.total_steps = total_steps
     
