@@ -1369,7 +1369,8 @@ async def get_lesson_steps(
             Step.title,
             Step.content_type,
             Step.order_index,
-            Step.created_at
+            Step.created_at,
+            Step.is_optional,
         ).filter(
             Step.lesson_id == lesson_id
         ).order_by(Step.order_index).all()
@@ -1383,6 +1384,7 @@ async def get_lesson_steps(
                 content_type=s.content_type,
                 order_index=s.order_index,
                 created_at=s.created_at,
+                is_optional=bool(s.is_optional),
                 video_url=None,
                 content_text=None,
                 original_image_url=None,
