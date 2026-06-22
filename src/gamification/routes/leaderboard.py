@@ -478,13 +478,14 @@ async def get_weekly_lessons_with_hw_status(
     Dynamically assumes the group's first event is Week 1.
     """
     # 1. Authorization
-    # 1. Authorization
     if current_user.role == "curator":
         group = db.query(Group).filter(Group.id == group_id, Group.curator_id == current_user.id).first()
         if not group:
             raise HTTPException(status_code=403, detail="Access denied to this group")
     elif current_user.role in ["admin", "head_curator"]:
-        pass
+        group = db.query(Group).filter(Group.id == group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
     else:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -699,29 +700,72 @@ async def get_weekly_lessons_with_hw_status(
 
     # 9.5 FETCH SAT DATA
     from src.services.sat_service import SATService
-    sat_results_map = {} # user_id -> combinedScore
+    sat_results_map = {}  # user_id -> combined percentage score
+    sat_section_scores_map = {}  # user_id -> math/verbal counts
     
     if student_ids and week_start_date and week_end_date:
         emails = [s.email.lower() for s in students_list if s.email]
         if emails:
-            # Fetch all results for these emails
-            batch_data = await SATService.fetch_batch_test_results(emails)
-            results = batch_data.get("results", [])
-            
-            # Map email -> data
             email_to_id = {s.email.lower(): s.id for s in students_list if s.email}
-            
-            # Convert dates to datetime for get_score_for_week
-            w_start = datetime.combine(week_start_date, datetime.min.time())
-            w_end = datetime.combine(week_end_date, datetime.min.time())
-            
-            for res in results:
-                email = res.get("email", "").lower()
-                student_id = email_to_id.get(email)
-                if student_id and res.get("data"):
-                    pct = SATService.get_percentage_for_week(res["data"], w_start, w_end)
-                    if pct is not None:
-                        sat_results_map[student_id] = pct
+            group_program_type = (getattr(group, "program_type", None) or "").lower()
+            is_sat_group = group_program_type == "sat" or "sat" in (group.name or "").lower()
+
+            if is_sat_group:
+                # SAT score-by-date endpoint uses DD.MM — try configured date, then class days
+                candidate_dates = []
+                if config and config.curator_hour_date:
+                    candidate_dates.append(config.curator_hour_date)
+                for event in events:
+                    event_date = event.start_datetime.date()
+                    if event_date not in candidate_dates:
+                        candidate_dates.append(event_date)
+                if week_start_date and week_start_date not in candidate_dates:
+                    candidate_dates.append(week_start_date)
+                candidate_dates.sort(reverse=True)
+
+                for score_date_obj in candidate_dates:
+                    score_date = score_date_obj.strftime("%d.%m")
+                    score_payload = await SATService.fetch_batch_scores_by_date(emails, score_date)
+                    score_results = score_payload.get("results") or score_payload.get("data") or []
+                    if not score_results:
+                        continue
+
+                    for item in score_results:
+                        email = (item.get("email") or "").lower()
+                        student_id = email_to_id.get(email)
+                        if not student_id or student_id in sat_section_scores_map:
+                            continue
+
+                        section_scores = SATService.extract_section_scores(item)
+                        sat_section_scores_map[student_id] = section_scores
+
+                        math_correct = section_scores.get("math_correct")
+                        verbal_correct = section_scores.get("verbal_correct")
+                        math_total = section_scores.get("math_total")
+                        verbal_total = section_scores.get("verbal_total")
+                        pct_values = []
+                        if math_correct is not None and math_total:
+                            pct_values.append((math_correct / math_total) * 100)
+                        if verbal_correct is not None and verbal_total:
+                            pct_values.append((verbal_correct / verbal_total) * 100)
+                        if pct_values:
+                            sat_results_map[student_id] = round(sum(pct_values) / len(pct_values), 1)
+            else:
+                # Legacy percentile endpoint
+                batch_data = await SATService.fetch_batch_test_results(emails)
+                results = batch_data.get("results", [])
+
+                # Convert dates to datetime for get_score_for_week
+                w_start = datetime.combine(week_start_date, datetime.min.time())
+                w_end = datetime.combine(week_end_date, datetime.min.time())
+
+                for res in results:
+                    email = res.get("email", "").lower()
+                    student_id = email_to_id.get(email)
+                    if student_id and res.get("data"):
+                        pct = SATService.get_percentage_for_week(res["data"], w_start, w_end)
+                        if pct is not None:
+                            sat_results_map[student_id] = pct
 
     # 10. Build Student Rows
     student_rows = []
@@ -733,9 +777,14 @@ async def get_weekly_lessons_with_hw_status(
         sat_score = sat_results_map.get(student.id)
         mock_exam_score = sat_score if sat_score is not None else (manual.mock_exam if manual else 0)
 
+        sat_sections = sat_section_scores_map.get(student.id, {})
         manual_data = {
             "curator_hour": manual.curator_hour if manual else 0,
             "mock_exam": mock_exam_score,
+            "sat_math_correct_count": sat_sections.get("math_correct"),
+            "sat_math_total_count": sat_sections.get("math_total"),
+            "sat_verbal_correct_count": sat_sections.get("verbal_correct"),
+            "sat_verbal_total_count": sat_sections.get("verbal_total"),
             "study_buddy": manual.study_buddy if manual else 0,
             "self_reflection_journal": manual.self_reflection_journal if manual else 0,
             "weekly_evaluation": manual.weekly_evaluation if manual else 0,

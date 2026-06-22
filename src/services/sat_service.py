@@ -12,29 +12,39 @@ SAT_API_KEY = os.getenv("MASTEREDU_API_KEY", "")
 
 class SATService:
     @staticmethod
-    async def fetch_batch_latest_test_details(emails: List[str]) -> Dict[str, Any]:
-        """Fetch latest test details for a batch of student emails"""
-        url = f"{SAT_API_BASE_URL}/students/latest-test-details"
+    async def _post(path: str, payload: Dict[str, Any], timeout: float = 20.0) -> Dict[str, Any]:
+        url = f"{SAT_API_BASE_URL}{path}"
         headers = {
             "X-API-Key": SAT_API_KEY,
             "Content-Type": "application/json"
         }
+        safe_payload = dict(payload)
+        if isinstance(safe_payload.get("emails"), list):
+            safe_payload["emails_count"] = len(safe_payload["emails"])
+        logger.info(f"SAT API request ({path}): url={url}, payload={safe_payload}")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=payload, timeout=timeout)
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code == 404:
+                    logger.debug(f"SAT API no data ({path}): {response.text}")
+                    return {}
+                logger.error(f"SAT API error ({path}): {response.status_code} - {response.text}")
+                return {}
+        except Exception as e:
+            logger.error(f"SAT API exception ({path}): {e}")
+            return {}
+
+    @staticmethod
+    async def fetch_batch_latest_test_details(emails: List[str]) -> Dict[str, Any]:
+        """Fetch latest test details for a batch of student emails"""
         payload = {
             "emails": emails,
             "limit": 100
         }
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, headers=headers, json=payload, timeout=15.0)
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    logger.error(f"SAT Batch API error: {response.status_code} - {response.text}")
-                    return {"results": []}
-        except Exception as e:
-            logger.error(f"SAT Batch API exception: {e}")
-            return {"results": []}
+        response = await SATService._post("/students/latest-test-details", payload, timeout=15.0)
+        return response if response else {"results": []}
 
     @staticmethod
     async def fetch_batch_test_results(emails: List[str]) -> Dict[str, Any]:
@@ -42,12 +52,6 @@ class SATService:
         if not emails:
             return {"results": []}
             
-        url = f"{SAT_API_BASE_URL}/students/test-results"
-        headers = {
-            "X-API-Key": SAT_API_KEY,
-            "Content-Type": "application/json"
-        }
-        
         all_results = []
         # Chunk emails into 50 (based on documentation limit)
         for i in range(0, len(emails), 50):
@@ -57,18 +61,53 @@ class SATService:
                 "limit": 50
             }
             
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(url, headers=headers, json=payload, timeout=20.0)
-                    if response.status_code == 200:
-                        data = response.json()
-                        all_results.extend(data.get("results", []))
-                    else:
-                        logger.error(f"SAT Batch API error (chunk {i}): {response.status_code} - {response.text}")
-            except Exception as e:
-                logger.error(f"SAT Batch API exception (chunk {i}): {e}")
+            data = await SATService._post("/students/test-results", payload, timeout=20.0)
+            all_results.extend(data.get("results", []))
         
         return {"results": all_results}
+
+    @staticmethod
+    async def fetch_batch_scores_by_date(emails: List[str], date_str: str) -> Dict[str, Any]:
+        """
+        Fetch SAT section scores by date for a batch of students.
+        Expected endpoint:
+          POST /api/lms/students/batch-scores-by-date
+        """
+        if not emails:
+            return {"results": []}
+
+        payload = {
+            "emails": emails,
+            "date": date_str,
+        }
+        data = await SATService._post("/students/batch-scores-by-date", payload, timeout=20.0)
+        return data if data else {"results": []}
+
+    @staticmethod
+    async def fetch_scores_by_date(email: str, date_str: str) -> Dict[str, Any]:
+        """
+        Fetch SAT section scores by date for one student.
+        Expected endpoint:
+          POST /api/lms/students/scores-by-date
+        """
+        payload = {
+            "email": email,
+            "date": date_str,
+        }
+        data = await SATService._post("/students/scores-by-date", payload, timeout=15.0)
+        return data if data else {}
+
+    @staticmethod
+    def extract_section_scores(item: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        """
+        Normalize SAT section scores from different API response shapes.
+        """
+        return {
+            "math_correct": item.get("mathCorrectCount"),
+            "verbal_correct": item.get("verbalCorrectCount"),
+            "math_total": item.get("mathTotalCount") or item.get("mathQuestionCount"),
+            "verbal_total": item.get("verbalTotalCount") or item.get("verbalQuestionCount"),
+        }
 
     @staticmethod
     def get_percentage_for_week(student_data: Dict[str, Any], week_start: datetime, week_end: datetime) -> Optional[float]:
