@@ -702,6 +702,7 @@ async def get_weekly_lessons_with_hw_status(
     from src.services.sat_service import SATService
     sat_results_map = {}  # user_id -> combined percentage score
     sat_section_scores_map = {}  # user_id -> math/verbal counts
+    sat_feedback_map = {}  # user_id -> {math_feedback, verbal_feedback}
     
     if student_ids and week_start_date and week_end_date:
         emails = [s.email.lower() for s in students_list if s.email]
@@ -738,6 +739,18 @@ async def get_weekly_lessons_with_hw_status(
 
                         section_scores = SATService.extract_section_scores(item)
                         sat_section_scores_map[student_id] = section_scores
+
+                        # Store feedback texts
+                        math_fb = item.get("mathFeedback") or {}
+                        verbal_fb = item.get("verbalFeedback") or {}
+                        sat_feedback_map[student_id] = {
+                            "math_feedback": math_fb.get("feedbackText"),
+                            "verbal_feedback": verbal_fb.get("feedbackText"),
+                            "math_test_name": item.get("mathTestName"),
+                            "verbal_test_name": item.get("verbalTestName"),
+                            "math_completed_at": item.get("mathCompletedAt"),
+                            "verbal_completed_at": item.get("verbalCompletedAt"),
+                        }
 
                         math_correct = section_scores.get("math_correct")
                         verbal_correct = section_scores.get("verbal_correct")
@@ -778,6 +791,7 @@ async def get_weekly_lessons_with_hw_status(
         mock_exam_score = sat_score if sat_score is not None else (manual.mock_exam if manual else 0)
 
         sat_sections = sat_section_scores_map.get(student.id, {})
+        sat_fb = sat_feedback_map.get(student.id, {})
         manual_data = {
             "curator_hour": manual.curator_hour if manual else 0,
             "mock_exam": mock_exam_score,
@@ -785,6 +799,12 @@ async def get_weekly_lessons_with_hw_status(
             "sat_math_total_count": sat_sections.get("math_total"),
             "sat_verbal_correct_count": sat_sections.get("verbal_correct"),
             "sat_verbal_total_count": sat_sections.get("verbal_total"),
+            "sat_math_feedback": sat_fb.get("math_feedback"),
+            "sat_verbal_feedback": sat_fb.get("verbal_feedback"),
+            "sat_math_test_name": sat_fb.get("math_test_name"),
+            "sat_verbal_test_name": sat_fb.get("verbal_test_name"),
+            "sat_math_completed_at": sat_fb.get("math_completed_at"),
+            "sat_verbal_completed_at": sat_fb.get("verbal_completed_at"),
             "study_buddy": manual.study_buddy if manual else 0,
             "self_reflection_journal": manual.self_reflection_journal if manual else 0,
             "weekly_evaluation": manual.weekly_evaluation if manual else 0,
@@ -811,7 +831,10 @@ async def get_weekly_lessons_with_hw_status(
                         "score": sub.score,
                         "max_score": sub.max_score,
                         "is_graded": sub.is_graded,
-                        "submission_id": sub.id
+                        "submission_id": sub.id,
+                        "feedback": sub.feedback,
+                        "submitted_at": sub.submitted_at.isoformat() if sub.submitted_at else None,
+                        "graded_at": sub.graded_at.isoformat() if sub.graded_at else None,
                     }
                 else:
                     hw_status = {"submitted": False, "score": None}

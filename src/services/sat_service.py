@@ -93,16 +93,30 @@ class SATService:
         data = await SATService._post("/students/scores-by-date", payload, timeout=15.0)
         return data if data else {}
 
+    SAT_MATH_TOTAL_DEFAULT = 22
+    SAT_VERBAL_TOTAL_DEFAULT = 27
+
     @staticmethod
     def extract_section_scores(item: Dict[str, Any]) -> Dict[str, Optional[int]]:
         """
         Normalize SAT section scores from different API response shapes.
+        Falls back to known fixed question counts: Math=22, Verbal=27.
         """
+        math_total = (
+            item.get("mathTotalCount")
+            or item.get("mathQuestionCount")
+            or SATService.SAT_MATH_TOTAL_DEFAULT
+        )
+        verbal_total = (
+            item.get("verbalTotalCount")
+            or item.get("verbalQuestionCount")
+            or SATService.SAT_VERBAL_TOTAL_DEFAULT
+        )
         return {
             "math_correct": item.get("mathCorrectCount"),
             "verbal_correct": item.get("verbalCorrectCount"),
-            "math_total": item.get("mathTotalCount") or item.get("mathQuestionCount"),
-            "verbal_total": item.get("verbalTotalCount") or item.get("verbalQuestionCount"),
+            "math_total": math_total,
+            "verbal_total": verbal_total,
         }
 
     @staticmethod
