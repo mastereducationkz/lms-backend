@@ -530,7 +530,8 @@ async def get_course_modules(
                 Step.title, 
                 Step.content_type, 
                 Step.order_index,
-                Step.created_at
+                Step.created_at,
+                Step.is_optional,
             ).filter(
                 Step.lesson_id.in_(all_lesson_ids)
             ).all()
@@ -573,8 +574,11 @@ async def get_course_modules(
                         is_completed_db = les.id in completed_lesson_ids
                         
                         # Check steps completion using our lightweight map
+                        # Optional steps are excluded from the completion requirement
                         lesson_steps = steps_by_lesson.get(les.id, [])
-                        all_steps_done = lesson_steps and all(s.id in completed_step_ids for s in lesson_steps)
+                        required = [s for s in lesson_steps if not getattr(s, 'is_optional', False)]
+                        check = required if required else lesson_steps
+                        all_steps_done = check and all(s.id in completed_step_ids for s in check)
                         
                         if is_completed_db or all_steps_done:
                             unlocked_by_redirect_ids.add(les.next_lesson_id)
@@ -608,8 +612,10 @@ async def get_course_modules(
                 lesson_schema = LessonSchema.from_orm(lesson)
                 lesson_schema.steps = []
                 
-                # Check if all steps are completed to mark lesson as completed
-                all_steps_completed = True if steps else False
+                # Check if all REQUIRED (non-optional) steps are completed
+                required_steps = [s for s in steps if not getattr(s, 'is_optional', False)]
+                check_steps = required_steps if required_steps else steps
+                all_steps_completed = True if check_steps else False
                 
                 for step in steps:
                     # Manually construct StepSchema from lightweight data
@@ -630,7 +636,8 @@ async def get_course_modules(
                     
                     lesson_schema.steps.append(step_schema)
                     
-                    if not step_schema.is_completed:
+                    # Only non-optional steps gate lesson completion
+                    if not getattr(step, 'is_optional', False) and not step_schema.is_completed:
                         all_steps_completed = False
                 
                 lesson_schema.total_steps = len(steps)

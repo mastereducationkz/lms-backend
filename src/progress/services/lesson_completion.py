@@ -189,7 +189,14 @@ def calculate_student_module_progress(
         )
 
         for lesson in lessons:
-            lesson_total = db.query(Step).filter(Step.lesson_id == lesson.id).count()
+            # Only required (non-optional) steps count toward completion
+            lesson_total = db.query(Step).filter(
+                Step.lesson_id == lesson.id,
+                Step.is_optional == False,  # noqa: E712
+            ).count()
+            if lesson_total == 0:
+                # fallback to all steps if none are marked required
+                lesson_total = db.query(Step).filter(Step.lesson_id == lesson.id).count()
             if lesson_total == 0:
                 continue
 
@@ -197,9 +204,16 @@ def calculate_student_module_progress(
             last_lesson_title = lesson.title
             last_lesson_id = lesson.id
 
+            required_step_ids = [
+                s.id for s in db.query(Step).filter(
+                    Step.lesson_id == lesson.id,
+                    Step.is_optional == False,  # noqa: E712
+                ).all()
+            ] or [s.id for s in db.query(Step).filter(Step.lesson_id == lesson.id).all()]
+
             completed_steps = db.query(StepProgress).filter(
                 StepProgress.user_id == user_id,
-                StepProgress.lesson_id == lesson.id,
+                StepProgress.step_id.in_(required_step_ids),
                 StepProgress.status == "completed",
             ).count()
             is_complete = _is_lesson_complete_for_user(
@@ -254,15 +268,17 @@ def get_user_lesson_progress_summary(
         lessons = db.query(Lesson).filter(Lesson.module_id == module.id).order_by(Lesson.order_index).all()
 
         for lesson in lessons:
-            steps = db.query(Step).filter(Step.lesson_id == lesson.id).all()
-            lesson_total = len(steps)
+            all_steps = db.query(Step).filter(Step.lesson_id == lesson.id).all()
+            required_steps = [s for s in all_steps if not s.is_optional]
+            lesson_total = len(required_steps) if required_steps else len(all_steps)
             total_steps += lesson_total
 
+            step_ids = [s.id for s in (required_steps if required_steps else all_steps)]
             progress_records = db.query(StepProgress).filter(
                 StepProgress.user_id == user_id,
-                StepProgress.lesson_id == lesson.id,
+                StepProgress.step_id.in_(step_ids),
                 StepProgress.status == "completed",
-            ).count()
+            ).count() if step_ids else 0
 
             is_complete = _is_lesson_complete_for_user(
                 lesson.id,
@@ -390,17 +406,32 @@ def _mark_lesson_complete(
     lesson_id: int,
     now: datetime,
 ) -> bool:
-    lesson_steps = db.query(Step).filter(Step.lesson_id == lesson_id).count()
-    if lesson_steps == 0:
+    # Only non-optional steps are required for lesson completion
+    required_steps = db.query(Step).filter(
+        Step.lesson_id == lesson_id,
+        Step.is_optional == False,  # noqa: E712
+    ).count()
+
+    # If there are no required steps, check total steps (edge case)
+    if required_steps == 0:
+        required_steps = db.query(Step).filter(Step.lesson_id == lesson_id).count()
+    if required_steps == 0:
         return False
+
+    required_step_ids = [
+        s.id for s in db.query(Step).filter(
+            Step.lesson_id == lesson_id,
+            Step.is_optional == False,  # noqa: E712
+        ).all()
+    ] or [s.id for s in db.query(Step).filter(Step.lesson_id == lesson_id).all()]
 
     completed_steps = db.query(StepProgress).filter(
         StepProgress.user_id == user_id,
-        StepProgress.lesson_id == lesson_id,
+        StepProgress.step_id.in_(required_step_ids),
         StepProgress.status == "completed",
     ).count()
 
-    if completed_steps < lesson_steps:
+    if completed_steps < required_steps:
         return False
 
     progress = db.query(StudentProgress).filter(
