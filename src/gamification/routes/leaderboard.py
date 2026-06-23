@@ -711,17 +711,17 @@ async def get_weekly_lessons_with_hw_status(
             is_sat_group = group_program_type == "sat" or "sat" in (group.name or "").lower()
 
             if is_sat_group:
-                # SAT score-by-date endpoint uses DD.MM — try configured date, then class days
-                candidate_dates = []
+                # SAT score-by-date endpoint uses DD.MM
+                # Try: configured date → all 7 days of the week (Fri/Sat/Sun often have tests)
+                candidate_dates_set = set()
                 if config and config.curator_hour_date:
-                    candidate_dates.append(config.curator_hour_date)
-                for event in events:
-                    event_date = event.start_datetime.date()
-                    if event_date not in candidate_dates:
-                        candidate_dates.append(event_date)
-                if week_start_date and week_start_date not in candidate_dates:
-                    candidate_dates.append(week_start_date)
-                candidate_dates.sort(reverse=True)
+                    candidate_dates_set.add(config.curator_hour_date)
+                if week_start_date and week_end_date:
+                    current = week_start_date
+                    while current < week_end_date:
+                        candidate_dates_set.add(current)
+                        current += timedelta(days=1)
+                candidate_dates = sorted(candidate_dates_set, reverse=True)
 
                 for score_date_obj in candidate_dates:
                     score_date = score_date_obj.strftime("%d.%m")

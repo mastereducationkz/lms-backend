@@ -18,10 +18,6 @@ class SATService:
             "X-API-Key": SAT_API_KEY,
             "Content-Type": "application/json"
         }
-        safe_payload = dict(payload)
-        if isinstance(safe_payload.get("emails"), list):
-            safe_payload["emails_count"] = len(safe_payload["emails"])
-        logger.info(f"SAT API request ({path}): url={url}, payload={safe_payload}")
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, headers=headers, json=payload, timeout=timeout)
