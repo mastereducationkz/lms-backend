@@ -1836,7 +1836,7 @@ async def get_students_teacher_groups(
     is_active: Optional[bool] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin()),
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin()),
 ):
     """
     Paginated list of teacher groups (teacher -> count of students) for student management UI.
@@ -1903,7 +1903,7 @@ async def get_students_for_teacher_group(
     is_active: Optional[bool] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin()),
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin()),
 ):
     """
     Paginated students for a given teacher group.
