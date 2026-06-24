@@ -772,14 +772,16 @@ async def upload_submission_file(
     if assignment.due_date and assignment.due_date < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Assignment deadline has passed")
     
-    # Валидируем тип файла
-    allowed_types = assignment.allowed_file_types or ["pdf", "docx", "doc", "jpg", "png", "gif", "txt"]
-    
+    # Images are always allowed regardless of teacher settings
+    _always_allowed_images = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif", "avif"]
+    teacher_types = assignment.allowed_file_types or ["pdf", "docx", "doc", "txt"]
+    allowed_types = list(set(teacher_types + _always_allowed_images))
+
     file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
     if file_extension not in allowed_types:
         raise HTTPException(
-            status_code=400, 
-            detail=f"File type {file_extension} not allowed. Allowed: {allowed_types}"
+            status_code=400,
+            detail=f"File type .{file_extension} not allowed. Allowed: {', '.join(sorted(allowed_types))}"
         )
     
     # Проверяем размер файла

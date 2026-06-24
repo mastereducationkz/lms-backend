@@ -108,13 +108,14 @@ async def upload_file(
 ):
     """Upload a general file and return the file URL"""
     
-    # Validate file type
+    # Images are always allowed regardless of assignment settings
+    _image_exts = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif", "avif", "svg"]
     allowed_types = {
-        "teacher_assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
-        "assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
-        "submission": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
-        "step_attachment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt", "zip", "xlsx", "pptx"],
-        "question_media": ["pdf", "jpg", "jpeg", "png", "gif", "webp", "mp3", "wav", "ogg", "m4a"]  # For quiz question attachments and audio
+        "teacher_assignment": ["pdf", "docx", "doc", "txt"] + _image_exts,
+        "assignment": ["pdf", "docx", "doc", "txt"] + _image_exts,
+        "submission": ["pdf", "docx", "doc", "txt"] + _image_exts,
+        "step_attachment": ["pdf", "docx", "doc", "txt", "zip", "xlsx", "pptx"] + _image_exts,
+        "question_media": ["pdf", "mp3", "wav", "ogg", "m4a"] + _image_exts,
     }
     
     if file_type not in allowed_types:
@@ -769,14 +770,16 @@ async def upload_submission_file(
     if assignment.due_date and assignment.due_date < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Assignment deadline has passed")
     
-    # Валидируем тип файла
-    allowed_types = assignment.allowed_file_types or ["pdf", "docx", "doc", "jpg", "png", "gif", "txt"]
-    
+    # Images are always allowed regardless of teacher settings
+    _always_allowed_images = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif", "avif"]
+    teacher_types = assignment.allowed_file_types or ["pdf", "docx", "doc", "txt"]
+    allowed_types = list(set(teacher_types + _always_allowed_images))
+
     file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
     if file_extension not in allowed_types:
         raise HTTPException(
-            status_code=400, 
-            detail=f"File type {file_extension} not allowed. Allowed: {allowed_types}"
+            status_code=400,
+            detail=f"File type .{file_extension} not allowed. Allowed: {', '.join(sorted(allowed_types))}"
         )
     
     # Проверяем размер файла
