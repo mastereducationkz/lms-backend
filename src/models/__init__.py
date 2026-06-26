@@ -1,6 +1,6 @@
 from src.models.base import Base
 
-from src.auth.models import UserInDB, PointHistory
+from src.auth.models import UserInDB, PointHistory, UserPushToken
 from src.courses.models import (
     Group, GroupStudent, Step, Course, CourseHeadTeacher,
     CourseGroupAccess, CourseTeacherAccess, Module, Lesson,
@@ -26,10 +26,11 @@ from src.gamification.models import (
 from src.content.models import FavoriteFlashcard, QuestionErrorReport
 from src.curator.models import CuratorTaskTemplate, CuratorTaskInstance
 from src.lesson_requests.models import LessonRequest
+from src.parents.models import ParentStudent
 
 __all__ = [
     "Base",
-    "UserInDB", "PointHistory",
+    "UserInDB", "PointHistory", "UserPushToken",
     "Group", "GroupStudent", "Step", "Course", "CourseHeadTeacher",
     "CourseGroupAccess", "CourseTeacherAccess", "Module", "Lesson",
     "LessonMaterial", "Enrollment", "ManualLessonUnlock",
@@ -45,4 +46,5 @@ __all__ = [
     "FavoriteFlashcard", "QuestionErrorReport",
     "CuratorTaskTemplate", "CuratorTaskInstance",
     "LessonRequest",
+    "ParentStudent",
 ]

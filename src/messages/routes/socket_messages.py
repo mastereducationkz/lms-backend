@@ -5,6 +5,7 @@ from sqlalchemy import desc, or_, and_
 from typing import List, Optional
 from datetime import datetime
 import logging
+import os
 
 from src.config import get_db
 from src.schemas.models import (
@@ -17,10 +18,19 @@ from src.schemas.models import GroupStudent
 
 logger = logging.getLogger(__name__)
 
+# Socket.IO CORS origins. Includes Expo/React Native dev origins; extend via the
+# EXTRA_CORS_ORIGINS env var (comma-separated) for LAN testing without code changes.
+_SOCKET_CORS_ORIGINS = [
+    "http://localhost:3000", "http://localhost:5174", "http://localhost:5173",
+    "https://mastereducation.kz", "https://lms.mastereducation.kz", "https://lms-master.vercel.app",
+    "http://localhost:8081", "http://localhost:19006", "exp://localhost:8081",
+]
+_SOCKET_CORS_ORIGINS += [o.strip() for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
+
 # Create Socket.IO server
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=["http://localhost:3000", "http://localhost:5174", "http://localhost:5173", "https://mastereducation.kz", "https://lms.mastereducation.kz", "https://lms-master.vercel.app"],
+    cors_allowed_origins=_SOCKET_CORS_ORIGINS,
     logger=False,
     engineio_logger=False,
     # Optimized connection settings for better stability

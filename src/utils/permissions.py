@@ -455,9 +455,12 @@ def can_grade_assignment(assignment_id: int, user: UserInDB, db: Session) -> boo
     
     return False
 
-# Role hierarchy for permission checking
+# Role hierarchy for permission checking.
+# "parent" is a low-privilege external role (≈ student level); parent-specific
+# access is enforced explicitly via ParentStudent link checks, not the hierarchy.
 ROLE_HIERARCHY = {
     "student": 1,
+    "parent": 1,
     "curator": 2,
     "head_curator": 3,
     "teacher": 4,
