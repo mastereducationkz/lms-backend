@@ -10,6 +10,7 @@ class MessageSchema(BaseModel):
     sender_name: Optional[str] = None
     recipient_name: Optional[str] = None
     content: str
+    file_url: Optional[str] = None
     is_read: bool
     created_at: datetime
 
@@ -19,7 +20,8 @@ class MessageSchema(BaseModel):
 
 class SendMessageSchema(BaseModel):
     to_user_id: int
-    content: str
+    content: str = ""          # may be empty when an attachment is sent
+    file_url: Optional[str] = None
 
 
 class DashboardStatsSchema(BaseModel):

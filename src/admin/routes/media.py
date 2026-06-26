@@ -114,7 +114,8 @@ async def upload_file(
         "assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
         "submission": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
         "step_attachment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt", "zip", "xlsx", "pptx"],
-        "question_media": ["pdf", "jpg", "jpeg", "png", "gif", "webp", "mp3", "wav", "ogg", "m4a"]  # For quiz question attachments and audio
+        "question_media": ["pdf", "jpg", "jpeg", "png", "gif", "webp", "mp3", "wav", "ogg", "m4a"],  # For quiz question attachments and audio
+        "message": ["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "gif", "webp"],  # Chat attachments
     }
     
     if file_type not in allowed_types:

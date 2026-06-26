@@ -5,6 +5,7 @@ from sqlalchemy import desc, or_, and_
 from typing import List, Optional
 from datetime import datetime
 import logging
+import os
 
 from src.config import get_db
 from src.schemas.models import (
@@ -14,13 +15,23 @@ from src.schemas.models import (
 from src.routes.auth import verify_token
 from src.routes.messages import can_communicate_with_user, create_message_notification
 from src.schemas.models import GroupStudent
+from src.utils.push_notifications import send_message_push_to_user
 
 logger = logging.getLogger(__name__)
+
+# Socket.IO CORS origins. Includes Expo/React Native dev origins; extend via the
+# EXTRA_CORS_ORIGINS env var (comma-separated) for LAN testing without code changes.
+_SOCKET_CORS_ORIGINS = [
+    "http://localhost:3000", "http://localhost:5174", "http://localhost:5173",
+    "https://mastereducation.kz", "https://lms.mastereducation.kz", "https://lms-master.vercel.app",
+    "http://localhost:8081", "http://localhost:19006", "exp://localhost:8081",
+]
+_SOCKET_CORS_ORIGINS += [o.strip() for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
 
 # Create Socket.IO server
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=["http://localhost:3000", "http://localhost:5174", "http://localhost:5173", "https://mastereducation.kz", "https://lms.mastereducation.kz", "https://lms-master.vercel.app"],
+    cors_allowed_origins=_SOCKET_CORS_ORIGINS,
     logger=False,
     engineio_logger=False,
     # Optimized connection settings for better stability
@@ -135,7 +146,8 @@ async def handle_message_send(sid, data):
     from_user_id = _resolve_user_id(session, db)
     to_user_id = int(data.get('to_user_id')) if data and data.get('to_user_id') is not None else None
     content = (data.get('content') or '').strip()
-    if not from_user_id or not to_user_id or not content:
+    file_url = (data.get('file_url') or None)
+    if not from_user_id or not to_user_id or (not content and not file_url):
         await sio.emit('message:error', { 'detail': 'Invalid payload' }, to=sid)
         return
     try:
@@ -149,7 +161,8 @@ async def handle_message_send(sid, data):
         new_message = Message(
             from_user_id=from_user_id,
             to_user_id=to_user_id,
-            content=content
+            content=content,
+            file_url=file_url
         )
         db.add(new_message)
         db.commit()
@@ -164,6 +177,7 @@ async def handle_message_send(sid, data):
             'from_user_id': new_message.from_user_id,
             'to_user_id': new_message.to_user_id,
             'content': new_message.content,
+            'file_url': new_message.file_url,
             'is_read': new_message.is_read,
             'created_at': new_message.created_at.isoformat(),
             'sender_name': sender.name if sender else 'Unknown',
@@ -183,6 +197,15 @@ async def handle_message_send(sid, data):
         
         # Create notification
         create_message_notification(new_message, db)
+
+        # Push to all of the recipient's active devices
+        send_message_push_to_user(
+            db,
+            recipient_id=to_user_id,
+            sender_name=sender.name if sender else 'Someone',
+            message_preview=content or '📎 Attachment',
+            partner_id=from_user_id,
+        )
         
     except Exception as e:
         logger.error(f"Error sending message: {e}")

@@ -46,17 +46,27 @@ except Exception as exc:
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# Allowed CORS origins. Native mobile requests usually omit Origin and are
+# unaffected by CORS, but Expo web/dev tooling sends one. Extend at runtime with
+# EXTRA_CORS_ORIGINS="exp://192.168.1.5:8081,http://192.168.1.5:8081" for LAN dev.
+_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://lms.mastereducation.kz",
+    "https://lmsapi.mastereducation.kz",
+    "https://lms-master.vercel.app",
+    # Expo / React Native dev origins
+    "http://localhost:8081",
+    "http://localhost:19006",
+    "exp://localhost:8081",
+]
+_ALLOWED_ORIGINS += [o.strip() for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:8080",
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "https://lms.mastereducation.kz",
-        "https://lmsapi.mastereducation.kz",
-        "https://lms-master.vercel.app"
-    ],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

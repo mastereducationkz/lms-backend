@@ -13,7 +13,7 @@ from src.schemas.models import (
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_student_access
 from src.schemas.models import GroupStudent
-from src.utils.push_notifications import send_message_notification
+from src.utils.push_notifications import send_message_notification, send_message_push_to_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -107,11 +107,17 @@ async def send_message(
     if not can_communicate_with_user(current_user, message_data.to_user_id, db):
         raise HTTPException(status_code=403, detail="Cannot send message to this user")
     
+    # Require text or an attachment
+    content = message_data.content.strip()
+    if not content and not message_data.file_url:
+        raise HTTPException(status_code=400, detail="Message must have content or an attachment")
+
     # Создать сообщение
     new_message = Message(
         from_user_id=current_user.id,
         to_user_id=message_data.to_user_id,
-        content=message_data.content.strip()
+        content=content,
+        file_url=message_data.file_url,
     )
     
     db.add(new_message)
@@ -123,18 +129,14 @@ async def send_message(
     message_response.sender_name = current_user.name
     message_response.recipient_name = recipient.name
     
-    # Send push notification to recipient if they have a push token
-    if recipient.push_token:
-        try:
-            send_message_notification(
-                push_token=recipient.push_token,
-                sender_name=current_user.name,
-                message_preview=message_data.content.strip(),
-                partner_id=current_user.id
-            )
-            logger.info(f"Push notification sent to user {recipient.id}")
-        except Exception as e:
-            logger.error(f"Failed to send push notification: {str(e)}")
+    # Push to all of the recipient's active devices (multi-device aware)
+    send_message_push_to_user(
+        db,
+        recipient_id=recipient.id,
+        sender_name=current_user.name,
+        message_preview=content or "📎 Attachment",
+        partner_id=current_user.id,
+    )
     
     # Создать уведомление для получателя
     create_message_notification(new_message, db)

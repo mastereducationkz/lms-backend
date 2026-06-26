@@ -173,3 +173,89 @@ def send_message_notification(
         },
         badge=1
     )
+
+
+def send_message_push_to_user(
+    db,
+    recipient_id: int,
+    sender_name: str,
+    message_preview: str,
+    partner_id: int,
+) -> int:
+    """Send a new-message push to ALL of a recipient's active devices.
+
+    Reads tokens from ``user_push_tokens`` (plus the legacy ``users.push_token``
+    as a fallback), sends one batched Expo request, and deactivates any token
+    that Expo reports as ``DeviceNotRegistered``. Returns the count accepted.
+
+    Non-fatal: any failure is logged and swallowed so message delivery is never
+    blocked by push problems.
+    """
+    from src.auth.models import UserInDB, UserPushToken
+
+    try:
+        token_rows = db.query(UserPushToken).filter(
+            UserPushToken.user_id == recipient_id,
+            UserPushToken.is_active == True,  # noqa: E712
+        ).all()
+        # Map token -> owning row (None for the legacy column, which has no row).
+        tokens: Dict[str, Any] = {row.token: row for row in token_rows}
+
+        recipient = db.query(UserInDB).filter(UserInDB.id == recipient_id).first()
+        if recipient and recipient.push_token and recipient.push_token not in tokens:
+            tokens[recipient.push_token] = None
+
+        valid_tokens = [t for t in tokens if t and t.startswith("ExponentPushToken[")]
+        if not valid_tokens:
+            return 0
+
+        preview = message_preview if len(message_preview) <= 100 else message_preview[:97] + "..."
+        messages = [
+            {
+                "to": t,
+                "title": f"New message from {sender_name}",
+                "body": preview,
+                "sound": "default",
+                "priority": "high",
+                "badge": 1,
+                "data": {"type": "message", "partnerId": partner_id, "partnerName": sender_name},
+            }
+            for t in valid_tokens
+        ]
+
+        response = requests.post(
+            EXPO_PUSH_ENDPOINT,
+            json=messages,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            logger.error(f"Message push failed: {response.status_code} - {response.text[:200]}")
+            return 0
+
+        results = response.json().get("data", [])
+        accepted = 0
+        deactivated = False
+        for token, result in zip(valid_tokens, results):
+            if result.get("status") == "ok":
+                accepted += 1
+                continue
+            details = result.get("details") or {}
+            if details.get("error") == "DeviceNotRegistered":
+                row = tokens.get(token)
+                if row is not None:
+                    row.is_active = False
+                    deactivated = True
+                if recipient and recipient.push_token == token:
+                    recipient.push_token = None
+                    deactivated = True
+        if deactivated:
+            db.commit()
+        return accepted
+    except Exception as e:  # never let push break messaging
+        logger.error(f"send_message_push_to_user failed for {recipient_id}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0

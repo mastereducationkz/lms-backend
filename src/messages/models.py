@@ -11,6 +11,7 @@ class Message(Base):
     from_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     content = Column(Text, nullable=False)
+    file_url = Column(String, nullable=True)  # optional attachment (image/file), served from /uploads
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

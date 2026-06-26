@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, BigInteger, Float, DateTime, Date, Boolean, ForeignKey, Text, Index
+from sqlalchemy import Column, String, Integer, BigInteger, Float, DateTime, Date, Boolean, ForeignKey, Text, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone, date
 from typing import List
@@ -44,6 +44,11 @@ class UserInDB(Base):
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
     point_history = relationship("PointHistory", back_populates="user", cascade="all, delete-orphan")
     managed_courses = relationship("Course", secondary="course_head_teachers", back_populates="head_teachers")
+    push_tokens = relationship("UserPushToken", back_populates="user", cascade="all, delete-orphan")
+    # Parent ↔ student links (parent role / mobile parent portal).
+    # children_links: rows where this user is the PARENT. parent_links: rows where this user is the STUDENT.
+    children_links = relationship("ParentStudent", foreign_keys="ParentStudent.parent_id", back_populates="parent", cascade="all, delete-orphan")
+    parent_links = relationship("ParentStudent", foreign_keys="ParentStudent.student_id", back_populates="student", cascade="all, delete-orphan")
 
     @property
     def course_ids(self) -> List[int]:
@@ -64,4 +69,29 @@ class PointHistory(Base):
 
     __table_args__ = (
         Index('ix_point_history_user_created', 'user_id', 'created_at'),
+    )
+
+
+class UserPushToken(Base):
+    """Per-device Expo push token.
+
+    Replaces the single ``users.push_token`` column (kept for backward
+    compatibility) so one user can register multiple devices (e.g. web + phone).
+    Tokens are globally unique; re-registering a device's token reassigns it to
+    the current user via upsert.
+    """
+    __tablename__ = "user_push_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String, nullable=False, index=True)
+    platform = Column(String, nullable=True)  # ios | android | web | expo
+    device_name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("UserInDB", back_populates="push_tokens")
+
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_user_push_tokens_token"),
     )
