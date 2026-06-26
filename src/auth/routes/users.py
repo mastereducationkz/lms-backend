@@ -156,15 +156,41 @@ class PushTokenRequest(BaseModel):
     device_type: str = "expo"  # expo, ios, android
 
 
+def _upsert_push_token(db: Session, user_id: int, token: str, platform: str, device_name: str | None = None):
+    """Insert or reactivate a (globally unique) push token for a user.
+
+    Tokens are globally unique; re-registering a device's token reassigns it to
+    the current user (e.g. after a logout/login on the same device).
+    """
+    from src.auth.models import UserPushToken
+    existing = db.query(UserPushToken).filter(UserPushToken.token == token).first()
+    if existing:
+        existing.user_id = user_id
+        existing.platform = platform
+        if device_name:
+            existing.device_name = device_name
+        existing.is_active = True
+    else:
+        db.add(UserPushToken(
+            user_id=user_id, token=token, platform=platform,
+            device_name=device_name, is_active=True,
+        ))
+
+
 @router.post("/push-token")
 async def register_push_token(
     token_data: PushTokenRequest,
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
 ):
-    """Register or update user's push notification token."""
+    """Register/update the user's push token (legacy single-token endpoint).
+
+    Writes the legacy column AND the multi-device user_push_tokens table so both
+    the old web app and the new mobile app stay consistent.
+    """
     user.push_token = token_data.push_token
     user.device_type = token_data.device_type
+    _upsert_push_token(db, user.id, token_data.push_token, token_data.device_type)
     db.commit()
     return {"detail": "Push token registered successfully"}
 
@@ -174,8 +200,54 @@ async def remove_push_token(
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
 ):
-    """Remove user's push notification token."""
+    """Remove the user's legacy push token and deactivate it in the multi-device table."""
+    from src.auth.models import UserPushToken
+    if user.push_token:
+        db.query(UserPushToken).filter(
+            UserPushToken.token == user.push_token
+        ).update({"is_active": False})
     user.push_token = None
     user.device_type = None
     db.commit()
     return {"detail": "Push token removed successfully"}
+
+
+class PushTokenRegisterRequest(BaseModel):
+    token: str
+    platform: str = "expo"   # ios | android | web | expo
+    device_name: str | None = None
+
+
+@router.post("/push-tokens")
+async def add_push_token(
+    body: PushTokenRegisterRequest,
+    db: Session = Depends(get_db),
+    user: UserInDB = Depends(get_current_user),
+):
+    """Register a device push token (multi-device aware)."""
+    _upsert_push_token(db, user.id, body.token, body.platform, body.device_name)
+    # Mirror into the legacy column so older code paths still have a token.
+    if not user.push_token:
+        user.push_token = body.token
+        user.device_type = body.platform
+    db.commit()
+    return {"detail": "Push token registered"}
+
+
+@router.delete("/push-tokens/{token}")
+async def delete_push_token(
+    token: str,
+    db: Session = Depends(get_db),
+    user: UserInDB = Depends(get_current_user),
+):
+    """Remove a specific device token (e.g. on logout from one device)."""
+    from src.auth.models import UserPushToken
+    db.query(UserPushToken).filter(
+        UserPushToken.token == token,
+        UserPushToken.user_id == user.id,
+    ).delete()
+    if user.push_token == token:
+        user.push_token = None
+        user.device_type = None
+    db.commit()
+    return {"detail": "Push token removed"}

@@ -15,6 +15,7 @@ from src.schemas.models import (
 from src.routes.auth import verify_token
 from src.routes.messages import can_communicate_with_user, create_message_notification
 from src.schemas.models import GroupStudent
+from src.utils.push_notifications import send_message_push_to_user
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,8 @@ async def handle_message_send(sid, data):
     from_user_id = _resolve_user_id(session, db)
     to_user_id = int(data.get('to_user_id')) if data and data.get('to_user_id') is not None else None
     content = (data.get('content') or '').strip()
-    if not from_user_id or not to_user_id or not content:
+    file_url = (data.get('file_url') or None)
+    if not from_user_id or not to_user_id or (not content and not file_url):
         await sio.emit('message:error', { 'detail': 'Invalid payload' }, to=sid)
         return
     try:
@@ -159,7 +161,8 @@ async def handle_message_send(sid, data):
         new_message = Message(
             from_user_id=from_user_id,
             to_user_id=to_user_id,
-            content=content
+            content=content,
+            file_url=file_url
         )
         db.add(new_message)
         db.commit()
@@ -174,6 +177,7 @@ async def handle_message_send(sid, data):
             'from_user_id': new_message.from_user_id,
             'to_user_id': new_message.to_user_id,
             'content': new_message.content,
+            'file_url': new_message.file_url,
             'is_read': new_message.is_read,
             'created_at': new_message.created_at.isoformat(),
             'sender_name': sender.name if sender else 'Unknown',
@@ -193,6 +197,15 @@ async def handle_message_send(sid, data):
         
         # Create notification
         create_message_notification(new_message, db)
+
+        # Push to all of the recipient's active devices
+        send_message_push_to_user(
+            db,
+            recipient_id=to_user_id,
+            sender_name=sender.name if sender else 'Someone',
+            message_preview=content or '📎 Attachment',
+            partner_id=from_user_id,
+        )
         
     except Exception as e:
         logger.error(f"Error sending message: {e}")
