@@ -1703,10 +1703,14 @@ async def get_assignment_student_progress(
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
-    
+
     # Check permissions
     has_access = False
-    
+
+    # Head curators have read-only oversight over all groups' homework.
+    if current_user.role in ["admin", "head_curator"]:
+        has_access = True
+
     # Check course access if assignment is linked to lesson
     if assignment.lesson_id:
         lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
