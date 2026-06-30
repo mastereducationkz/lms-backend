@@ -67,7 +67,14 @@ async def get_curator_groups(
     
     # 3. Calculate current_week for each group
     from src.schemas.models import Event, EventGroup, LessonSchedule
-    
+
+    # Batch-fetch teacher names for label display in the leaderboard picker
+    teacher_ids = [g.teacher_id for g in groups if g.teacher_id]
+    teacher_name_map = {}
+    if teacher_ids:
+        teachers = db.query(UserInDB).filter(UserInDB.id.in_(teacher_ids)).all()
+        teacher_name_map = {t.id: (t.name or "") for t in teachers}
+
     result = []
     for group in groups:
         # Determine Week 1 Start (same logic as get_weekly_lessons_with_hw_status)
@@ -156,7 +163,7 @@ async def get_curator_groups(
             name=group.name,
             description=group.description,
             teacher_id=group.teacher_id,
-            teacher_name="", # Not critical for dropdown
+            teacher_name=teacher_name_map.get(group.teacher_id, ""),
             curator_id=group.curator_id,
             curator_name=current_user.name,
             student_count=0, # Not critical
