@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 POSTGRES_URL = os.getenv("POSTGRES_URL")
+if not POSTGRES_URL:
+    # No DB configured (e.g. CI / local import-only test runs). Use a dummy,
+    # never-connected URL so `create_engine` (which is lazy) can be built and
+    # modules import cleanly. Production always sets POSTGRES_URL.
+    logger.warning("POSTGRES_URL not set; using a placeholder URL (no real database).")
+    POSTGRES_URL = "postgresql+psycopg2://placeholder:placeholder@localhost:5432/placeholder"
 
 # Azure OpenAI Configuration
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
