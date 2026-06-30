@@ -747,37 +747,36 @@ async def delete_user(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin_or_head_curator())
 ):
-    """Delete user (admin or head_curator for curators only)"""
+    """Deactivate a user (soft delete; admin, or head_curator for curators only).
+
+    Reversible: sets is_active=False and preserves the account and all related data.
+    """
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     if current_user.role == "head_curator" and user.role != "curator":
-        raise HTTPException(status_code=403, detail="Head curators can only delete curator accounts")
+        raise HTTPException(status_code=403, detail="Head curators can only deactivate curator accounts")
 
-    # Prevent deleting the last admin
+    # Prevent deactivating yourself
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
+
+    # Prevent deactivating the last active admin
     if user.role == "admin":
-        admin_count = db.query(UserInDB).filter(UserInDB.role == "admin").count()
-        if admin_count <= 1:
-            raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
-            
-    # Prevent deleting a teacher if they own groups
-    group_count = db.query(Group).filter(Group.teacher_id == user_id).count()
-    if group_count > 0:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Cannot delete user. They are the teacher for {group_count} group(s). Please reassign or delete these groups first."
-        )
-    
-    # Delete related records before user delete (avoid FK/ORM cascade issues)
-    db.query(EventParticipant).filter(EventParticipant.user_id == user_id).delete()
-    db.query(GroupStudent).filter(GroupStudent.student_id == user_id).delete()
-    db.query(AssignmentExtension).filter(AssignmentExtension.student_id == user_id).delete()
-    
-    db.delete(user)
+        active_admins = db.query(UserInDB).filter(
+            UserInDB.role == "admin", UserInDB.is_active == True
+        ).count()
+        if active_admins <= 1:
+            raise HTTPException(status_code=400, detail="Cannot deactivate the last admin user")
+
+    # Soft deactivate (reversible) — keeps the account and all related data
+    user.is_active = False
+    user.refresh_token = None  # Invalidate sessions
+    user.updated_at = datetime.utcnow()
     db.commit()
-    
-    return {"detail": "User deleted successfully"}
+
+    return {"detail": f"User '{user.name}' deactivated successfully"}
 
 @router.get("/stats", response_model=AdminStatsResponse)
 async def get_admin_stats(
@@ -2160,28 +2159,6 @@ async def get_user_groups(
     group_ids = [gs.group_id for gs in group_students]
     
     return {"user_id": user_id, "group_ids": group_ids}
-
-@router.delete("/users/{user_id}")
-async def deactivate_user(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_admin())
-):
-    """Deactivate a user (admin only) - soft delete"""
-    if user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
-    
-    user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Soft delete
-    user.is_active = False
-    user.refresh_token = None  # Invalidate sessions
-    user.updated_at = datetime.utcnow()
-    db.commit()
-    
-    return {"detail": f"User '{user.name}' deactivated successfully"}
 
 @router.post("/users/{user_id}/assign-group")
 async def assign_user_to_group(
