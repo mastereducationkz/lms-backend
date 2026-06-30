@@ -180,59 +180,97 @@ def get_email_service() -> EmailService:
 
 
 # ── Account emails (invite / password) — bilingual RU + EN ────────────────────
+# Shared layout matches the lesson-reminder email (500px card + logo header).
 
-def _email_shell(inner_html: str) -> str:
-    return f"""
-    <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f4f5f7;padding:24px;">
-      <div style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
-        <div style="background:#1d4ed8;padding:20px 24px;">
-          <span style="color:#ffffff;font-size:18px;font-weight:700;">Master Education</span>
-        </div>
-        <div style="padding:24px;color:#111827;font-size:14px;line-height:1.6;">
-          {inner_html}
-        </div>
-        <div style="padding:16px 24px;border-top:1px solid #f0f0f0;color:#9ca3af;font-size:12px;">
-          Master Education · <a href="{_get_lms_base_url()}" style="color:#1d4ed8;">lms.mastereducation.kz</a>
+_LOGO_SVG = (
+    '<svg version="1.0" xmlns="http://www.w3.org/2000/svg" width="40px" height="40px" '
+    'viewBox="0 0 150 150" preserveAspectRatio="xMidYMid meet" style="vertical-align:middle;">'
+    '<g transform="translate(0,150) scale(0.1,-0.1)" fill="#2563eb" stroke="none">'
+    '<path d="M556 1221 c-8 -13 85 -232 101 -238 22 -9 38 12 62 82 13 36 26 67 30 69 4 3 20 -29 36 -70 29 -70 56 -99 75 -77 19 22 90 227 81 236 -19 19 -38 -3 -65 -77 -16 -42 -31 -76 -36 -76 -4 0 -21 33 -38 73 -25 59 -34 72 -52 72 -19 0 -28 -13 -53 -80 l-30 -79 -14 29 c-7 17 -24 56 -38 88 -23 52 -45 71 -59 48z"/>'
+    '<path d="M420 1134 c0 -9 23 -43 50 -76 28 -33 50 -64 50 -70 0 -5 -12 -7 -27 -4 -86 16 -136 18 -144 5 -13 -21 -12 -24 42 -89 28 -34 49 -63 47 -66 -3 -2 -44 1 -92 8 -65 8 -90 8 -99 -1 -8 -8 -8 -14 0 -22 12 -12 227 -43 248 -35 25 9 17 35 -32 97 -25 33 -44 61 -42 64 3 2 34 0 69 -5 90 -13 98 -13 105 10 5 15 -12 42 -67 110 -69 84 -108 111 -108 74z"/>'
+    '<path d="M972 1054 c-61 -81 -70 -98 -61 -115 8 -15 17 -19 42 -14 18 3 53 9 80 14 29 5 47 5 47 -1 0 -5 -20 -36 -45 -68 -49 -63 -52 -72 -32 -89 10 -8 44 -5 128 9 63 11 115 20 117 20 1 0 2 10 2 21 0 20 -4 21 -47 15 -27 -4 -70 -10 -98 -13 l-49 -6 53 66 c39 49 51 72 46 87 -7 23 -6 23 -96 9 -38 -7 -72 -9 -75 -6 -4 3 17 35 45 70 53 67 63 97 34 97 -11 0 -48 -39 -91 -96z"/>'
+    '<path d="M358 712 c-100 -17 -132 -32 -111 -53 8 -8 34 -7 97 3 47 8 86 11 86 7 0 -5 -20 -35 -45 -68 -49 -64 -52 -73 -32 -90 10 -8 34 -7 91 3 90 16 89 17 21 -73 -43 -56 -53 -91 -26 -91 10 0 91 97 139 166 18 26 19 34 9 48 -12 16 -20 16 -72 7 -113 -21 -114 -20 -54 55 42 53 50 70 42 83 -14 22 -32 22 -145 3z"/>'
+    '<path d="M997 713 c-15 -14 -5 -37 38 -90 25 -30 45 -58 45 -62 0 -4 -36 -3 -81 3 -66 7 -83 7 -90 -5 -5 -8 -7 -20 -4 -27 10 -26 140 -181 153 -182 31 -1 21 33 -31 97 -31 37 -52 69 -47 71 6 2 42 -1 81 -7 53 -9 75 -9 85 0 21 17 18 27 -24 78 -75 92 -74 84 -12 77 30 -4 75 -10 98 -13 42 -5 44 -4 40 18 -3 22 -10 25 -93 36 -107 14 -149 15 -158 6z"/>'
+    '<path d="M630 498 c-35 -82 -77 -205 -72 -216 11 -31 37 -2 66 76 17 45 33 82 36 82 3 0 19 -34 35 -75 27 -68 32 -75 55 -73 20 3 29 15 50 70 15 37 29 70 32 73 3 3 21 -31 40 -77 33 -79 59 -106 71 -75 3 7 -16 63 -42 123 -36 85 -52 110 -68 112 -17 3 -25 -6 -41 -50 -11 -29 -25 -66 -32 -83 l-11 -30 -36 83 c-38 87 -63 106 -83 60z"/>'
+    '</g></svg>'
+)
+
+
+def _email_shell(emoji_title: str, inner_html: str) -> str:
+    return f"""<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  </head>
+  <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background-color:#ffffff;color:#333333;line-height:1.5;">
+    <div style="max-width:500px;margin:40px auto;padding:20px;">
+      <div style="margin-bottom:32px;">
+        <h1 style="margin:0;font-size:20px;font-weight:600;color:#111111;">{emoji_title}</h1>
+        <div style="margin-top:16px;">
+          {_LOGO_SVG}
+          <span style="display:inline-block;vertical-align:middle;margin-left:8px;font-size:14px;color:#666666;font-weight:500;">Master Education LMS</span>
         </div>
       </div>
+      <div style="margin-bottom:32px;">
+        {inner_html}
+      </div>
+      <div style="border-top:1px solid #e5e7eb;padding-top:20px;">
+        <p style="margin:0;font-size:12px;color:#999999;">
+          Master Education<br />
+          <a href="{_get_lms_base_url()}" style="color:#2563eb;text-decoration:none;">lms.mastereducation.kz</a>
+        </p>
+      </div>
     </div>
-    """
+  </body>
+</html>"""
 
 
 def _button(href: str, label: str) -> str:
     return (
-        f'<a href="{href}" style="display:inline-block;background:#1d4ed8;color:#ffffff;'
-        f'text-decoration:none;padding:11px 20px;border-radius:8px;font-weight:600;font-size:14px;">{label}</a>'
+        f'<a href="{href}" style="display:inline-block;background-color:#2563eb;color:#ffffff;'
+        f'padding:10px 20px;text-decoration:none;border-radius:4px;font-size:14px;font-weight:500;">{label}</a>'
     )
 
 
 def _credentials_block(login_email: str, password: str) -> str:
-    return f"""
-    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px;margin:16px 0;">
-      <div style="margin-bottom:8px;"><span style="color:#6b7280;">Логин / Login:</span>
-        <strong style="font-family:monospace;">{login_email}</strong></div>
-      <div><span style="color:#6b7280;">Пароль / Password:</span>
-        <strong style="font-family:monospace;">{password}</strong></div>
-    </div>
-    """
+    row = (
+        '<div style="margin-bottom:12px;"><div style="font-size:13px;color:#666666;margin-bottom:4px;">{label}</div>'
+        '<div style="font-size:15px;font-weight:600;color:#111111;font-family:monospace;">{value}</div></div>'
+    )
+    rows = (
+        row.format(label="Логин / Login", value=login_email)
+        + row.format(label="Пароль / Password", value=password).replace("margin-bottom:12px;", "")
+    )
+    return (
+        '<div style="background-color:#f8fafc;padding:16px;border-radius:6px;border:1px solid #e5e7eb;margin:8px 0 24px;">'
+        f'{rows}</div>'
+    )
+
+
+def _para(ru: str, en: str = "") -> str:
+    en_html = f'<p style="margin:0 0 16px;font-size:14px;color:#666666;">{en}</p>' if en else ""
+    return f'<p style="margin:0 0 8px;font-size:15px;">{ru}</p>{en_html}'
 
 
 def send_invite_email(to_email: str, name: str, login_email: str, password: str) -> Optional[dict]:
     """Welcome/invite email with platform link and login credentials (students)."""
     base_url = _get_lms_base_url()
     greeting = name or "студент"
-    inner = f"""
-      <p>Здравствуйте, <strong>{greeting}</strong>!</p>
-      <p>Вам открыт доступ к учебной платформе Master Education. Войдите, используя данные ниже:</p>
-      <p style="color:#6b7280;">Hello, <strong>{greeting}</strong>! You've been given access to the Master Education platform. Use the credentials below to sign in:</p>
-      {_credentials_block(login_email, password)}
-      <p style="margin:20px 0;">{_button(base_url, "Войти / Sign in")}</p>
-      <p style="color:#6b7280;font-size:13px;">Рекомендуем сменить пароль после первого входа.<br/>We recommend changing your password after the first sign-in.</p>
-    """
+    inner = (
+        f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте, <strong>{greeting}</strong>!</p>'
+        + _para(
+            "Вам открыт доступ к учебной платформе Master Education. Данные для входа:",
+            "You've been given access to Master Education. Your sign-in details:",
+        )
+        + _credentials_block(login_email, password)
+        + f'<div style="margin-bottom:24px;">{_button(base_url, "Войти / Sign in")}</div>'
+        + '<p style="margin:0;font-size:14px;color:#666666;">Рекомендуем сменить пароль после первого входа.<br/>We recommend changing your password after first sign-in.</p>'
+    )
     return get_email_service().send_email(
         to_emails=[to_email],
         subject="Добро пожаловать в Master Education / Welcome to Master Education",
-        html_content=_email_shell(inner),
+        html_content=_email_shell("🎓 Добро пожаловать / Welcome", inner),
         text_content=(
             f"Здравствуйте, {greeting}! Доступ к платформе: {base_url}\n"
             f"Логин/Login: {login_email}\nПароль/Password: {password}\n"
@@ -243,51 +281,56 @@ def send_invite_email(to_email: str, name: str, login_email: str, password: str)
 def send_password_changed_email(to_email: str, name: str, new_password: Optional[str] = None) -> Optional[dict]:
     """Password-changed email. If new_password is given (admin-set), include it + login link."""
     base_url = _get_lms_base_url()
-    greeting = name or ""
+    greeting = (", " + name) if name else ""
     if new_password:
-        inner = f"""
-          <p>Здравствуйте{', ' + greeting if greeting else ''}!</p>
-          <p>Администратор изменил пароль для вашего аккаунта. Новые данные для входа:</p>
-          <p style="color:#6b7280;">Your password was changed by an administrator. New sign-in details:</p>
-          {_credentials_block(to_email, new_password)}
-          <p style="margin:20px 0;">{_button(base_url, "Войти / Sign in")}</p>
-          <p style="color:#6b7280;font-size:13px;">Рекомендуем сменить пароль после входа.<br/>We recommend changing it after you sign in.</p>
-        """
+        inner = (
+            f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте{greeting}!</p>'
+            + _para(
+                "Администратор изменил пароль вашего аккаунта. Новые данные для входа:",
+                "Your password was changed by an administrator. New sign-in details:",
+            )
+            + _credentials_block(to_email, new_password)
+            + f'<div style="margin-bottom:24px;">{_button(base_url, "Войти / Sign in")}</div>'
+            + '<p style="margin:0;font-size:14px;color:#666666;">Рекомендуем сменить пароль после входа.<br/>We recommend changing it after you sign in.</p>'
+        )
         text = f"Ваш пароль изменён администратором. Логин/Login: {to_email} Пароль/Password: {new_password} {base_url}"
     else:
         reset_url = _build_lms_url("/forgot-password")
-        inner = f"""
-          <p>Здравствуйте{', ' + greeting if greeting else ''}!</p>
-          <p>Пароль вашего аккаунта был успешно изменён.</p>
-          <p style="color:#6b7280;">Your account password was successfully changed.</p>
-          <p style="color:#6b7280;font-size:13px;">Если это были не вы — немедленно восстановите доступ:
-            <a href="{reset_url}" style="color:#1d4ed8;">сбросить пароль</a>.<br/>
-            If this wasn't you, reset your password immediately.</p>
-        """
+        inner = (
+            f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте{greeting}!</p>'
+            + _para(
+                "Пароль вашего аккаунта был успешно изменён.",
+                "Your account password was successfully changed.",
+            )
+            + f'<p style="margin:0;font-size:13px;color:#999999;">Если это были не вы — '
+            f'<a href="{reset_url}" style="color:#2563eb;">сбросьте пароль</a>.<br/>'
+            f'If this wasn\'t you, reset your password immediately.</p>'
+        )
         text = "Пароль вашего аккаунта был изменён. / Your account password was changed."
     return get_email_service().send_email(
         to_emails=[to_email],
         subject="Ваш пароль изменён / Your password was changed",
-        html_content=_email_shell(inner),
+        html_content=_email_shell("🔑 Пароль изменён / Password changed", inner),
         text_content=text,
     )
 
 
 def send_password_reset_email(to_email: str, name: str, reset_url: str) -> Optional[dict]:
     """Self-service password reset link (valid 1 hour)."""
-    greeting = name or ""
-    inner = f"""
-      <p>Здравствуйте{', ' + greeting if greeting else ''}!</p>
-      <p>Мы получили запрос на сброс пароля. Нажмите кнопку ниже, чтобы задать новый пароль:</p>
-      <p style="color:#6b7280;">We received a request to reset your password. Click below to set a new one:</p>
-      <p style="margin:20px 0;">{_button(reset_url, "Сбросить пароль / Reset password")}</p>
-      <p style="color:#6b7280;font-size:13px;">Ссылка действительна 1 час. Если вы не запрашивали сброс — проигнорируйте это письмо.<br/>
-        This link is valid for 1 hour. If you didn't request this, ignore this email.</p>
-    """
+    greeting = (", " + name) if name else ""
+    inner = (
+        f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте{greeting}!</p>'
+        + _para(
+            "Мы получили запрос на сброс пароля. Нажмите кнопку, чтобы задать новый:",
+            "We received a request to reset your password. Click below to set a new one:",
+        )
+        + f'<div style="margin:8px 0 24px;">{_button(reset_url, "Сбросить пароль / Reset password")}</div>'
+        + '<p style="margin:0;font-size:13px;color:#999999;">Ссылка действительна 1 час. Если вы не запрашивали сброс — проигнорируйте это письмо.<br/>This link is valid for 1 hour. If you didn\'t request this, ignore this email.</p>'
+    )
     return get_email_service().send_email(
         to_emails=[to_email],
         subject="Восстановление пароля / Reset your password",
-        html_content=_email_shell(inner),
+        html_content=_email_shell("🔒 Сброс пароля / Reset password", inner),
         text_content=f"Сброс пароля / Reset your password: {reset_url} (1 час / 1 hour)",
     )
 
