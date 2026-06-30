@@ -1501,13 +1501,18 @@ async def get_all_users(
     group_id: Optional[int] = None,
     is_active: Optional[bool] = None,
     search: Optional[str] = None,
+    all_students: bool = False,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
-    """Get all users with filtering (teachers/curators see only their students, admin sees all)"""
-    
+    """Get all users with filtering (teachers/curators see only their students, admin sees all).
+
+    Curators may pass all_students=True to search across every student (still role=student
+    only) — used when adding students to their own groups.
+    """
+
     query = db.query(UserInDB)
-    
+
     # Enforce role-based filtering for non-admins
     if current_user.role == "teacher":
         role = "student"  # Teachers can only see students
@@ -1515,10 +1520,12 @@ async def get_all_users(
         teacher_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.teacher_id == current_user.id).subquery()
         query = query.filter(UserInDB.id.in_(teacher_group_student_ids))
     elif current_user.role == "curator":
-        role = "student"  # Curators can only see students
-        # Filter by students in groups managed by this curator
-        curator_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.curator_id == current_user.id).subquery()
-        query = query.filter(UserInDB.id.in_(curator_group_student_ids))
+        role = "student"  # Curators can only ever see students (never staff)
+        if not all_students:
+            # Default: only students in groups managed by this curator
+            curator_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.curator_id == current_user.id).subquery()
+            query = query.filter(UserInDB.id.in_(curator_group_student_ids))
+        # all_students=True: curator may search every student (to add to their groups)
 
     # Apply filters
     if role:
@@ -1887,16 +1894,18 @@ async def get_admin_dashboard(
 async def get_group_students(
     group_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Get all students in a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get students in this group
@@ -1924,16 +1933,18 @@ async def add_student_to_group(
     group_id: int,
     student_data: AddStudentToGroupRequest,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Add a student to a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check if student exists and is active
@@ -1968,16 +1979,18 @@ async def remove_student_from_group(
     group_id: int,
     student_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Remove a student from a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check if student exists
@@ -2007,16 +2020,18 @@ async def bulk_add_students_to_group(
     group_id: int,
     student_ids: List[int],
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Add multiple students to a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check if all students exist and are active

@@ -1,13 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Response, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from src.utils.auth_utils import (
-    hash_password, 
-    verify_password, 
-    create_access_token, 
-    verify_token, 
-    create_refresh_token
+    hash_password,
+    verify_password,
+    create_access_token,
+    verify_token,
+    create_refresh_token,
+    create_password_reset_token,
+    verify_password_reset_token,
+    password_stamp_matches,
+)
+from src.services.email_service import (
+    send_password_reset_email,
+    send_password_changed_email,
+    _get_lms_base_url,
 )
 from src.config import get_db
 from src.schemas.models import UserInDB, Token, UserSchema
@@ -237,3 +245,75 @@ async def require_teacher_or_admin(current_user: UserInDB = Depends(get_current_
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Teacher or admin access required")
     return current_user
+
+
+# ── Self-service password flows ───────────────────────────────────────────────
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Send a password-reset link. Always returns a generic response (no user enumeration)."""
+    user = db.query(UserInDB).filter(func.lower(UserInDB.email) == payload.email.lower()).first()
+    if user and user.is_active:
+        token = create_password_reset_token(user.email, user.id, user.hashed_password)
+        reset_url = f"{_get_lms_base_url()}/reset-password?token={token}"
+        background_tasks.add_task(send_password_reset_email, user.email, user.name or "", reset_url)
+    return {"detail": "Если такой аккаунт существует, на почту отправлена ссылка для сброса пароля."}
+
+
+@router.post("/reset-password")
+async def reset_password(
+    payload: ResetPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Set a new password using a reset token from the email link."""
+    if not payload.new_password or len(payload.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 6 символов")
+    data = verify_password_reset_token(payload.token)
+    if not data or not data.get("uid"):
+        raise HTTPException(status_code=400, detail="Недействительная или истёкшая ссылка")
+    user = db.query(UserInDB).filter(UserInDB.id == data["uid"]).first()
+    if not user or not user.is_active or not password_stamp_matches(data.get("pv"), user.hashed_password):
+        raise HTTPException(status_code=400, detail="Ссылка недействительна или уже использована")
+    user.hashed_password = hash_password(payload.new_password)
+    user.refresh_token = None
+    user.updated_at = datetime.utcnow()
+    db.commit()
+    background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None)
+    return {"detail": "Пароль успешно изменён"}
+
+
+@router.post("/change-password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    background_tasks: BackgroundTasks,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Change the password of the authenticated user (requires the current password)."""
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Текущий пароль неверен")
+    if not payload.new_password or len(payload.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 6 символов")
+    current_user.hashed_password = hash_password(payload.new_password)
+    current_user.refresh_token = None
+    current_user.updated_at = datetime.utcnow()
+    db.commit()
+    background_tasks.add_task(send_password_changed_email, current_user.email, current_user.name or "", None)
+    return {"detail": "Пароль успешно изменён"}

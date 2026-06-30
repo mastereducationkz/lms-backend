@@ -179,10 +179,123 @@ def get_email_service() -> EmailService:
     return _email_service
 
 
+# ── Account emails (invite / password) — bilingual RU + EN ────────────────────
+
+def _email_shell(inner_html: str) -> str:
+    return f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f4f5f7;padding:24px;">
+      <div style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
+        <div style="background:#1d4ed8;padding:20px 24px;">
+          <span style="color:#ffffff;font-size:18px;font-weight:700;">Master Education</span>
+        </div>
+        <div style="padding:24px;color:#111827;font-size:14px;line-height:1.6;">
+          {inner_html}
+        </div>
+        <div style="padding:16px 24px;border-top:1px solid #f0f0f0;color:#9ca3af;font-size:12px;">
+          Master Education · <a href="{_get_lms_base_url()}" style="color:#1d4ed8;">lms.mastereducation.kz</a>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def _button(href: str, label: str) -> str:
+    return (
+        f'<a href="{href}" style="display:inline-block;background:#1d4ed8;color:#ffffff;'
+        f'text-decoration:none;padding:11px 20px;border-radius:8px;font-weight:600;font-size:14px;">{label}</a>'
+    )
+
+
+def _credentials_block(login_email: str, password: str) -> str:
+    return f"""
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px;margin:16px 0;">
+      <div style="margin-bottom:8px;"><span style="color:#6b7280;">Логин / Login:</span>
+        <strong style="font-family:monospace;">{login_email}</strong></div>
+      <div><span style="color:#6b7280;">Пароль / Password:</span>
+        <strong style="font-family:monospace;">{password}</strong></div>
+    </div>
+    """
+
+
+def send_invite_email(to_email: str, name: str, login_email: str, password: str) -> Optional[dict]:
+    """Welcome/invite email with platform link and login credentials (students)."""
+    base_url = _get_lms_base_url()
+    greeting = name or "студент"
+    inner = f"""
+      <p>Здравствуйте, <strong>{greeting}</strong>!</p>
+      <p>Вам открыт доступ к учебной платформе Master Education. Войдите, используя данные ниже:</p>
+      <p style="color:#6b7280;">Hello, <strong>{greeting}</strong>! You've been given access to the Master Education platform. Use the credentials below to sign in:</p>
+      {_credentials_block(login_email, password)}
+      <p style="margin:20px 0;">{_button(base_url, "Войти / Sign in")}</p>
+      <p style="color:#6b7280;font-size:13px;">Рекомендуем сменить пароль после первого входа.<br/>We recommend changing your password after the first sign-in.</p>
+    """
+    return get_email_service().send_email(
+        to_emails=[to_email],
+        subject="Добро пожаловать в Master Education / Welcome to Master Education",
+        html_content=_email_shell(inner),
+        text_content=(
+            f"Здравствуйте, {greeting}! Доступ к платформе: {base_url}\n"
+            f"Логин/Login: {login_email}\nПароль/Password: {password}\n"
+        ),
+    )
+
+
+def send_password_changed_email(to_email: str, name: str, new_password: Optional[str] = None) -> Optional[dict]:
+    """Password-changed email. If new_password is given (admin-set), include it + login link."""
+    base_url = _get_lms_base_url()
+    greeting = name or ""
+    if new_password:
+        inner = f"""
+          <p>Здравствуйте{', ' + greeting if greeting else ''}!</p>
+          <p>Администратор изменил пароль для вашего аккаунта. Новые данные для входа:</p>
+          <p style="color:#6b7280;">Your password was changed by an administrator. New sign-in details:</p>
+          {_credentials_block(to_email, new_password)}
+          <p style="margin:20px 0;">{_button(base_url, "Войти / Sign in")}</p>
+          <p style="color:#6b7280;font-size:13px;">Рекомендуем сменить пароль после входа.<br/>We recommend changing it after you sign in.</p>
+        """
+        text = f"Ваш пароль изменён администратором. Логин/Login: {to_email} Пароль/Password: {new_password} {base_url}"
+    else:
+        reset_url = _build_lms_url("/forgot-password")
+        inner = f"""
+          <p>Здравствуйте{', ' + greeting if greeting else ''}!</p>
+          <p>Пароль вашего аккаунта был успешно изменён.</p>
+          <p style="color:#6b7280;">Your account password was successfully changed.</p>
+          <p style="color:#6b7280;font-size:13px;">Если это были не вы — немедленно восстановите доступ:
+            <a href="{reset_url}" style="color:#1d4ed8;">сбросить пароль</a>.<br/>
+            If this wasn't you, reset your password immediately.</p>
+        """
+        text = "Пароль вашего аккаунта был изменён. / Your account password was changed."
+    return get_email_service().send_email(
+        to_emails=[to_email],
+        subject="Ваш пароль изменён / Your password was changed",
+        html_content=_email_shell(inner),
+        text_content=text,
+    )
+
+
+def send_password_reset_email(to_email: str, name: str, reset_url: str) -> Optional[dict]:
+    """Self-service password reset link (valid 1 hour)."""
+    greeting = name or ""
+    inner = f"""
+      <p>Здравствуйте{', ' + greeting if greeting else ''}!</p>
+      <p>Мы получили запрос на сброс пароля. Нажмите кнопку ниже, чтобы задать новый пароль:</p>
+      <p style="color:#6b7280;">We received a request to reset your password. Click below to set a new one:</p>
+      <p style="margin:20px 0;">{_button(reset_url, "Сбросить пароль / Reset password")}</p>
+      <p style="color:#6b7280;font-size:13px;">Ссылка действительна 1 час. Если вы не запрашивали сброс — проигнорируйте это письмо.<br/>
+        This link is valid for 1 hour. If you didn't request this, ignore this email.</p>
+    """
+    return get_email_service().send_email(
+        to_emails=[to_email],
+        subject="Восстановление пароля / Reset your password",
+        html_content=_email_shell(inner),
+        text_content=f"Сброс пароля / Reset your password: {reset_url} (1 час / 1 hour)",
+    )
+
+
 def send_homework_notification(
-    student_emails: List[str], 
-    assignment_title: str, 
-    course_name: str, 
+    student_emails: List[str],
+    assignment_title: str,
+    course_name: str,
     due_date: str,
     action: str = "created",
     assignment_id: Optional[int] = None,

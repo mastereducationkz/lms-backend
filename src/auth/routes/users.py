@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
@@ -117,20 +117,29 @@ async def get_my_groups(
 async def update_profile(
     user_id: int,
     update: UserUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
 ):
     if user.id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to update this profile")
 
+    password_changed = False
     if update.name is not None:
         user.name = update.name
     if update.password is not None:
         from src.utils.auth_utils import hash_password
 
         user.hashed_password = hash_password(update.password)
+        user.refresh_token = None  # Invalidate other sessions
+        password_changed = True
     db.commit()
     db.refresh(user)
+
+    if password_changed:
+        from src.services.email_service import send_password_changed_email
+        background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None)
+
     return build_user_schema_response(user, db)
 
 

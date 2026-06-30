@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc
@@ -15,6 +15,7 @@ from src.schemas.models import (
     QuestionErrorReport, LessonRequest,
 )
 from src.utils.auth_utils import hash_password
+from src.services.email_service import send_invite_email, send_password_changed_email
 from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin, require_admin_or_head_curator
 from src.services.group_completion_service import sync_groups_over_status
 from src.services.cache_service import cached
@@ -100,10 +101,12 @@ class CreateUserRequest(BaseModel):
     is_active: bool = True
     group_ids: Optional[List[int]] = None  # Multiple groups for students
     course_ids: Optional[List[int]] = None  # Courses for head teachers
+    send_invites: bool = True  # Email an invite (with credentials) to created students
 
 class BulkCreateUsersRequest(BaseModel):
     users: List[CreateUserRequest]
     notify_users: bool = False  # For future email notifications
+    send_invites: bool = True  # Email invites to created students
     # Note: group_ids are in each CreateUserRequest
 
 class BulkCreateUsersFromTextRequest(BaseModel):
@@ -116,6 +119,7 @@ class BulkCreateUsersFromTextRequest(BaseModel):
     group_ids: Optional[List[int]] = None  # Groups to assign all created students to
     role: str = "student"  # Default role
     generate_passwords: bool = True  # Generate passwords for users
+    send_invites: bool = True  # Email invites to created students
 
 class UpdateUserRequest(BaseModel):
     name: Optional[str] = None
@@ -340,6 +344,7 @@ def get_non_special_group_ids(db: Session, group_ids: List[int]) -> List[int]:
 @router.post("/users/single", response_model=CreateUserResponse)
 async def create_single_user(
     user_data: CreateUserRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin_or_head_curator())
 ):
@@ -423,11 +428,17 @@ async def create_single_user(
                         db.add(course_head_teacher)
             db.commit()
         
+        # Email an invite (link + credentials) to created students
+        if user_data.send_invites and new_user.role == "student":
+            background_tasks.add_task(
+                send_invite_email, new_user.email, new_user.name or "", new_user.email, password
+            )
+
         return CreateUserResponse(
             user=UserSchema.from_orm(new_user),
             generated_password=generated_password
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -437,13 +448,15 @@ async def create_single_user(
 @router.post("/users/bulk", response_model=BulkCreateResponse)
 async def create_bulk_users(
     request: BulkCreateUsersRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
 ):
     """Create multiple users at once (admin only)"""
     created_users = []
     failed_users = []
-    
+    invite_targets = []  # (email, name, password) for created students
+
     for user_data in request.users:
         try:
             # Normalize email
@@ -504,23 +517,29 @@ async def create_bulk_users(
                             )
                             db.add(group_student)
             
+            if new_user.role == "student":
+                invite_targets.append((new_user.email, new_user.name or "", password))
+
             created_users.append(CreateUserResponse(
                 user=UserSchema.from_orm(new_user),
                 generated_password=generated_password
             ))
-            
+
         except Exception as e:
             failed_users.append({
                 "email": user_data.email,
                 "error": str(e)
             })
-    
+
     # Commit all successful creations
     if created_users:
         db.commit()
+        if request.send_invites:
+            for email, name, password in invite_targets:
+                background_tasks.add_task(send_invite_email, email, name, email, password)
     else:
         db.rollback()
-    
+
     return BulkCreateResponse(
         created_users=created_users,
         failed_users=failed_users
@@ -529,6 +548,7 @@ async def create_bulk_users(
 @router.post("/users/bulk-text", response_model=BulkCreateResponse)
 async def create_bulk_users_from_text(
     request: BulkCreateUsersFromTextRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
 ):
@@ -540,6 +560,7 @@ async def create_bulk_users_from_text(
     """
     created_users = []
     failed_users = []
+    invite_targets = []  # (email, name, password) for created students
     
     lines = request.text.strip().split('\n')
     
@@ -643,23 +664,29 @@ async def create_bulk_users_from_text(
                             )
                             db.add(group_student)
             
+            if request.role == "student" and password:
+                invite_targets.append((email, name, password))
+
             created_users.append(CreateUserResponse(
                 user=UserSchema.from_orm(new_user),
                 generated_password=generated_password
             ))
-            
+
         except Exception as e:
             failed_users.append({
                 "email": f"Line {line_num}",
                 "error": str(e)
             })
-    
+
     # Commit all successful creations
     if created_users:
         db.commit()
+        if request.send_invites:
+            for email, name, password in invite_targets:
+                background_tasks.add_task(send_invite_email, email, name, email, password)
     else:
         db.rollback()
-    
+
     return BulkCreateResponse(
         created_users=created_users,
         failed_users=failed_users
@@ -860,6 +887,7 @@ async def get_students_progress_summary(
 @router.post("/reset-password/{user_id}")
 async def reset_user_password(
     user_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
 ):
@@ -867,14 +895,19 @@ async def reset_user_password(
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     new_password = generate_password()
     user.hashed_password = hash_password(new_password)
     user.refresh_token = None  # Invalidate all sessions
     user.updated_at = datetime.utcnow()
-    
+
     db.commit()
-    
+
+    # Email the user their new password (admin-initiated change)
+    background_tasks.add_task(
+        send_password_changed_email, user.email, user.name or "", new_password
+    )
+
     return {
         "detail": "Password reset successfully",
         "new_password": new_password,
@@ -1707,13 +1740,18 @@ async def get_all_users(
     group_id: Optional[int] = None,
     is_active: Optional[bool] = None,
     search: Optional[str] = None,
+    all_students: bool = False,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
-    """Get all users with filtering (teachers/curators see only their students, admin sees all)"""
-    
+    """Get all users with filtering (teachers/curators see only their students, admin sees all).
+
+    Curators may pass all_students=True to search across every student (still role=student
+    only) — used when adding students to their own groups.
+    """
+
     query = db.query(UserInDB)
-    
+
     # Enforce role-based filtering for non-admins
     if current_user.role == "teacher":
         role = "student"  # Teachers can only see students
@@ -1721,10 +1759,12 @@ async def get_all_users(
         teacher_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.teacher_id == current_user.id).subquery()
         query = query.filter(UserInDB.id.in_(teacher_group_student_ids))
     elif current_user.role == "curator":
-        role = "student"  # Curators can only see students
-        # Filter by students in groups managed by this curator
-        curator_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.curator_id == current_user.id).subquery()
-        query = query.filter(UserInDB.id.in_(curator_group_student_ids))
+        role = "student"  # Curators can only ever see students (never staff)
+        if not all_students:
+            # Default: only students in groups managed by this curator
+            curator_group_student_ids = db.query(GroupStudent.student_id).join(Group).filter(Group.curator_id == current_user.id).subquery()
+            query = query.filter(UserInDB.id.in_(curator_group_student_ids))
+        # all_students=True: curator may search every student (to add to their groups)
     elif current_user.role == "head_teacher":
         role = "student"
         from src.utils.permissions import get_head_teacher_group_ids
@@ -2005,6 +2045,7 @@ async def get_students_for_teacher_group(
 async def update_user(
     user_id: int,
     user_data: UpdateUserRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin_or_head_curator())
 ):
@@ -2049,7 +2090,13 @@ async def update_user(
     user.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
-    
+
+    # If an admin set a new password, email it to the user
+    if user_data.password is not None:
+        background_tasks.add_task(
+            send_password_changed_email, user.email, user.name or "", user_data.password
+        )
+
     user_patch = user_data.model_dump(exclude_unset=True)
     final_role = user_data.role if user_data.role is not None else user.role
 
@@ -2388,16 +2435,18 @@ async def get_admin_dashboard_charts(
 async def get_group_students(
     group_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Get all students in a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get students in this group
@@ -2425,16 +2474,18 @@ async def add_student_to_group(
     group_id: int,
     student_data: AddStudentToGroupRequest,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Add a student to a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check if student exists and is active
@@ -2469,16 +2520,18 @@ async def remove_student_from_group(
     group_id: int,
     student_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Remove a student from a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check if student exists
@@ -2508,16 +2561,18 @@ async def bulk_add_students_to_group(
     group_id: int,
     student_ids: List[int],
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Add multiple students to a group"""
     # Check if group exists
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Check permissions
     if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "curator" and group.curator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Check if all students exist and are active
