@@ -10,6 +10,23 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Deno: JS runtime yt-dlp needs to solve YouTube's nsig challenge. Without it YouTube
+# throttles video downloads to a crawl (read timeouts). yt-dlp auto-detects deno on PATH.
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates \
+    && ARCH="$(uname -m)" \
+    && case "$ARCH" in \
+         x86_64)        DENO_ARCH=x86_64-unknown-linux-gnu ;; \
+         aarch64|arm64) DENO_ARCH=aarch64-unknown-linux-gnu ;; \
+         *) echo "unsupported arch: $ARCH" && exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/denoland/deno/releases/latest/download/deno-${DENO_ARCH}.zip" -o /tmp/deno.zip \
+    && unzip -o /tmp/deno.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/deno \
+    && rm /tmp/deno.zip \
+    && apt-get purge -y unzip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # Копирование requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
