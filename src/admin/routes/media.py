@@ -12,6 +12,7 @@ from src.config import get_db
 from src.schemas.models import UserInDB, LessonMaterial, Lesson, Module, Course, Assignment, Group
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_teacher_or_admin
+from src.services import storage_service
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -76,20 +77,13 @@ async def upload_course_thumbnail(
         raise HTTPException(status_code=400, detail=f"Unsupported image type: {file.content_type}")
 
     ext = allowed_types[file.content_type]
-    upload_dir = Path("uploads/courses/thumbnails")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
     safe_filename = f"course_{course_id}_thumb.{ext}"
-    file_path = upload_dir / safe_filename
 
     try:
-        async with aiofiles.open(file_path, "wb") as buffer:
-            content = await file.read()
-            await buffer.write(content)
+        content = await file.read()
+        public_url = storage_service.save(f"courses/thumbnails/{safe_filename}", content, file.content_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save thumbnail: {str(e)}")
-
-    public_url = f"/uploads/courses/thumbnails/{safe_filename}"
 
     # Update course
     course.cover_image_url = public_url
@@ -126,24 +120,16 @@ async def upload_file(
     if file_extension not in allowed_types[file_type]:
         raise HTTPException(status_code=400, detail=f"Unsupported file extension: {file_extension}")
     
-    # Create upload directory
-    upload_dir = Path(f"uploads/{file_type}")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
     # Generate unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_filename = f"{file_type}_{timestamp}_{current_user.id}_{file.filename}"
-    file_path = upload_dir / safe_filename
-    
+
     try:
         content = await file.read()
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
+        public_url = storage_service.save(f"{file_type}/{safe_filename}", content, file.content_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
-    public_url = f"/uploads/{file_type}/{safe_filename}"
-    
+
     return {
         "file_url": public_url,
         "filename": safe_filename,
@@ -196,34 +182,26 @@ async def upload_step_attachment(
     
     file_type = allowed_types[file.content_type]
     
-    # Create upload directory
-    upload_dir = Path("uploads/step_attachments")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
     # Generate safe filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_filename = f"step_{step_id}_{timestamp}_{file.filename}"
-    file_path = upload_dir / safe_filename
-    
+
     # Save file
     try:
         content = await file.read()
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
-        
+        stored_url = storage_service.save(f"step_attachments/{safe_filename}", content, file.content_type)
         file_size = len(content)
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
+
     # Update step attachments
     import json
     current_attachments = json.loads(step.attachments) if step.attachments else []
-    
+
     new_attachment = {
         "id": len(current_attachments) + 1,
         "filename": file.filename,
-        "file_url": f"/uploads/step_attachments/{safe_filename}",
+        "file_url": stored_url,
         "file_type": file_type,
         "file_size": file_size,
         "uploaded_at": datetime.now().isoformat()
@@ -279,11 +257,9 @@ async def delete_step_attachment(
     if not attachment_to_remove:
         raise HTTPException(status_code=404, detail="Attachment not found")
     
-    # Delete file from disk
+    # Delete file from storage
     try:
-        file_path = Path(f".{attachment_to_remove['file_url']}")
-        if file_path.exists():
-            file_path.unlink()
+        storage_service.delete(attachment_to_remove['file_url'])
     except Exception as e:
         print(f"Warning: Could not delete file {attachment_to_remove['file_url']}: {e}")
     
@@ -461,31 +437,23 @@ async def upload_lesson_material(
     
     file_type = allowed_types[file.content_type]
     
-    # Создаем директорию для загрузок
-    upload_dir = Path("uploads/materials")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
     # Генерируем безопасное имя файла
     safe_filename = f"lesson_{lesson_id}_{len(lesson.materials) + 1}_{file.filename}"
-    file_path = upload_dir / safe_filename
-    
+
     # Сохраняем файл
     try:
         content = await file.read()
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
-        
+        stored_url = storage_service.save(f"materials/{safe_filename}", content, file.content_type)
         file_size = len(content)
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
+
     # Создаем запись в базе данных
     material = LessonMaterial(
         lesson_id=lesson_id,
         title=title,
         file_type=file_type,
-        file_url=f"/uploads/materials/{safe_filename}",
+        file_url=stored_url,
         file_size_bytes=file_size
     )
     
@@ -553,11 +521,9 @@ async def delete_material(
     if current_user.role != "admin" and course.teacher_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Удаляем файл с диска
+    # Удаляем файл из хранилища
     try:
-        file_path = Path(f".{material.file_url}")
-        if file_path.exists():
-            file_path.unlink()
+        storage_service.delete(material.file_url)
     except Exception as e:
         print(f"Warning: Could not delete file {material.file_url}: {e}")
     
@@ -703,25 +669,18 @@ async def upload_assignment_file(
             detail=f"File type {file.content_type} not allowed. Allowed: {list(allowed_types.values())}"
         )
     
-    # Создаем директорию для загрузок
-    upload_dir = Path("uploads/assignments")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
     # Генерируем безопасное имя файла
     safe_filename = f"assignment_{assignment_id}_{file.filename}"
-    file_path = upload_dir / safe_filename
-    
+
     # Сохраняем файл
     try:
         content = await file.read()
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
-        
+        stored_url = storage_service.save(f"assignments/{safe_filename}", content, file.content_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
+
     # Обновляем задание
-    assignment.file_url = f"/uploads/assignments/{safe_filename}"
+    assignment.file_url = stored_url
     db.commit()
     db.refresh(assignment)
     
@@ -794,27 +753,20 @@ async def upload_submission_file(
             detail=f"File size {file_size_mb:.1f}MB exceeds maximum allowed size of {assignment.max_file_size_mb}MB"
         )
     
-    # Создаем директорию для загрузок
-    upload_dir = Path("uploads/submissions")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
     # Генерируем безопасное имя файла
     safe_filename = f"submission_{assignment_id}_{current_user.id}_{file.filename}"
-    file_path = upload_dir / safe_filename
-    
+
     # Сохраняем файл
     try:
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
-        
+        stored_url = storage_service.save(f"submissions/{safe_filename}", content, file.content_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
+
     # Just return the file URL without creating a submission record
     # The submission will be created when the assignment is actually submitted
-    
+
     return {
-        "file_url": f"/uploads/submissions/{safe_filename}",
+        "file_url": stored_url,
         "filename": file.filename
     }
 
@@ -830,14 +782,15 @@ async def download_file(
     file_type: assignments, submissions, materials
     """
     
-    from fastapi.responses import FileResponse
-    from pathlib import Path
-    
-    file_path = Path(f"uploads/{file_type}/{filename}")
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    
+    from fastapi.responses import FileResponse, RedirectResponse
+
+    key = f"{file_type}/{filename}"
+    # On local backend the file must exist on disk; on S3 it lives in the bucket.
+    if not storage_service.use_s3():
+        file_path = Path(f"uploads/{key}")
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+
     # Проверяем права доступа в зависимости от типа файла
     if file_type == "assignments":
         # Извлекаем assignment_id из имени файла
@@ -921,7 +874,9 @@ async def download_file(
         if not check_course_access(module.course_id, current_user, db):
             raise HTTPException(status_code=403, detail="Access denied")
     
-    return FileResponse(file_path, filename=filename)
+    if storage_service.use_s3():
+        return RedirectResponse(storage_service.url_for(key), status_code=307)
+    return FileResponse(f"uploads/{key}", filename=filename)
 
 # =============================================================================
 # HELPER FUNCTIONS

@@ -28,6 +28,7 @@ from src.utils.course_access import (
     lesson_blocked_by_special_cap,
 )
 from src.services.azure_openai_service import AzureOpenAIService
+from src.services import storage_service
 from src.services.cache_service import cached
 from src.utils.duration_calculator import update_course_duration
 
@@ -2375,25 +2376,31 @@ async def analyze_sat_image(
         if not (image.content_type.startswith('image/') or image.content_type == 'application/pdf'):
             raise HTTPException(status_code=400, detail="File must be an image or PDF")
         
-        # Create uploads directory if it doesn't exist
-        uploads_dir = "uploads/sat_images"
-        os.makedirs(uploads_dir, exist_ok=True)
-        
         # Generate unique filename
         file_extension = os.path.splitext(image.filename)[1] if image.filename else '.png'
         unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join(uploads_dir, unique_filename)
-        
-        # Save uploaded file
+
+        # Persist to storage (S3 or local) and keep the stable /uploads/sat_images/... url
         content = await image.read()
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
-        
+        stored_url = storage_service.save(f"sat_images/{unique_filename}", content, image.content_type)
+
+        # The parser needs a local file path, so write a temp copy that works on any backend
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
         # Use Gemini Parser
         from src.services.parser import parser_service
-        
+
         # Analyze the file
-        questions = await parser_service.parse_file(file_path, mime_type=image.content_type, correct_answers=correct_answers)
+        try:
+            questions = await parser_service.parse_file(tmp_path, mime_type=image.content_type, correct_answers=correct_answers)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         
         # If we got multiple questions, return the first one for now as the frontend expects a single result structure
         # OR update frontend to handle multiple. 
@@ -2426,7 +2433,7 @@ async def analyze_sat_image(
         result = {
             "success": True,
             "questions": questions,
-            "file_url": f"/uploads/sat_images/{unique_filename}",
+            "file_url": stored_url,
             "original_filename": image.filename
         }
         

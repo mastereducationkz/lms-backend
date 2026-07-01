@@ -12,6 +12,7 @@ from src.schemas.models import (
     AssignmentZeroPlannedDateUpdateSchema, AssignmentZeroExamResultUpdateSchema
 )
 from src.routes.auth import get_current_user_dependency
+from src.services import storage_service
 from src.utils.course_access import student_has_only_special_groups
 from src.assignments.exam_dates import (
     SAT_OFFICIAL_TEST_DATES,
@@ -664,15 +665,10 @@ async def upload_screenshot(
     # Generate unique filename
     file_ext = os.path.splitext(file.filename)[1] if file.filename else ".png"
     unique_filename = f"{current_user.id}_{uuid.uuid4()}{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, unique_filename)
-    
+
     # Save file
-    with open(file_path, "wb") as f:
-        f.write(contents)
-    
-    # Return the URL
-    file_url = f"/uploads/assignment_zero/{unique_filename}"
-    
+    file_url = storage_service.save(f"assignment_zero/{unique_filename}", contents, file.content_type)
+
     return {"url": file_url, "filename": unique_filename}
 
 # =============================================================================

@@ -1,8 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, FileResponse
 from starlette.requests import Request
 from datetime import datetime
 from dotenv import load_dotenv
@@ -12,6 +12,7 @@ import os
 from src.config import init_db
 from src.routes import register_routes
 from src.services import cache_service
+from src.services import storage_service
 
 load_dotenv()
 
@@ -141,7 +142,17 @@ async def invalidate_cache_on_mutation(request: Request, call_next):
         logging.debug("Cache invalidation middleware failed: %s", exc)
     return response
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+@app.get("/uploads/{path:path}")
+def serve_upload(path: str):
+    """Serve uploaded files. On S3 backend, redirect to the resolved (public or
+    presigned) S3 URL; on local backend, stream from the uploads/ dir (dev parity)."""
+    if storage_service.use_s3():
+        return RedirectResponse(storage_service.url_for(path), status_code=307)
+    local = storage_service.local_path(path)
+    if not local:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(local)
+
 
 register_routes(app)
 
