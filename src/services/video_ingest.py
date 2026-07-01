@@ -137,8 +137,11 @@ def _run(cmd: list, timeout: int, capture: bool = False) -> str:
 def _download(url: str, workdir: Path) -> Path:
     out_tmpl = str(workdir / "source.%(ext)s")
     _run(
-        ["yt-dlp", "--no-playlist", "--socket-timeout", "30", "-f",
-         "bv*[height<=1080]+ba/b[height<=1080]/b",
+        ["yt-dlp", "--no-playlist", "--socket-timeout", "30",
+         # Fetch + run YouTube's nsig challenge solver (EJS) via Deno. Required since
+         # yt-dlp moved nsig solving to remote components; without it downloads throttle.
+         "--remote-components", "ejs:github",
+         "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
          "--merge-output-format", "mp4", "-o", out_tmpl, url],
         timeout=1800,
     )
