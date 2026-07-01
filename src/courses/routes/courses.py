@@ -29,6 +29,7 @@ from src.utils.course_access import (
 )
 from src.services.azure_openai_service import AzureOpenAIService
 from src.services import storage_service
+from src.services import video_ingest
 from src.services.cache_service import cached
 from src.utils.duration_calculator import update_course_duration
 
@@ -1590,10 +1591,13 @@ async def create_step(
     db.add(new_step)
     db.commit()
     db.refresh(new_step)
-    
+
     # Update course duration
     update_course_duration(course.id, db)
-    
+
+    # Queue self-hosted HLS ingest if the step has a YouTube video (best-effort).
+    video_ingest.safe_enqueue(db, new_step)
+
     return StepSchema.from_orm(new_step)
 
 @router.get("/steps/{step_id}", response_model=StepSchema)
@@ -1675,10 +1679,13 @@ async def update_step(
     
     db.commit()
     db.refresh(step)
-    
+
     # Update course duration
     update_course_duration(course.id, db)
-    
+
+    # Re-queue HLS ingest if the YouTube URL changed (idempotent; no-op otherwise).
+    video_ingest.safe_enqueue(db, step)
+
     return StepSchema.from_orm(step)
 
 @router.post("/lessons/{lesson_id}/reorder-steps")

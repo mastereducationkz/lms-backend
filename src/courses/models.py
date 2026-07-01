@@ -59,9 +59,39 @@ class Step(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     content_hash = Column(String(64), nullable=True)
     is_optional = Column(Boolean, default=False)
+    # Self-hosted HLS variants of the YouTube video (see VideoIngestJob). When set,
+    # players stream these instead of embedding YouTube; video_url stays as fallback.
+    hls_url = Column(String, nullable=True)       # primary/RU video → /uploads/videos/<id>/ru/master.m3u8
+    hls_url_en = Column(String, nullable=True)    # EN variant (parsed from content_text metadata)
+    video_status = Column(String(16), nullable=True)  # pending|processing|ready|failed (tracks primary video)
 
     lesson = relationship("Lesson", back_populates="steps")
     favorite_flashcards = relationship("FavoriteFlashcard", back_populates="step", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class VideoIngestJob(Base):
+    """Queue row for downloading a step's YouTube video and transcoding it to HLS.
+
+    Processed by the video ingest worker in the scheduler container. One row per
+    (step, language). The (step_id, lang) unique constraint makes enqueue idempotent.
+    """
+    __tablename__ = "video_ingest_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    step_id = Column(Integer, ForeignKey("steps.id", ondelete="CASCADE"), nullable=False, index=True)
+    lang = Column(String(8), nullable=False, default="ru")   # ru | en
+    youtube_url = Column(String, nullable=False)
+    status = Column(String(16), nullable=False, default="pending")  # pending|processing|done|failed
+    attempts = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    step = relationship("Step")
+
+    __table_args__ = (
+        UniqueConstraint('step_id', 'lang', name='uq_video_ingest_step_lang'),
+        Index('idx_video_ingest_status', 'status'),
+    )
 
 
 class Course(Base):

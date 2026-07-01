@@ -28,7 +28,19 @@ def main():
     logger.info("=" * 80)
     logger.info("🚀 STARTING LESSON REMINDER SCHEDULER")
     logger.info("=" * 80)
-    
+
+    # Start the self-hosted video ingest worker (YouTube -> HLS -> S3). It runs
+    # only here (scheduler container) so the API process never double-processes
+    # jobs. Independent of the email config below.
+    video_worker = None
+    if os.getenv('ENABLE_VIDEO_INGEST', 'true').lower() == 'true':
+        try:
+            from src.services.video_ingest import VideoIngestWorker
+            video_worker = VideoIngestWorker(poll_interval=int(os.getenv('VIDEO_INGEST_POLL', '15')))
+            video_worker.start()
+        except Exception as e:
+            logger.error(f"Failed to start video ingest worker: {e}", exc_info=True)
+
     # Check configuration
     resend_api_key = os.getenv('RESEND_API_KEY')
     postgres_url = os.getenv('POSTGRES_URL')
@@ -75,6 +87,8 @@ def main():
         logger.info("")
         logger.info("⏹️  Received stop signal")
         scheduler.stop()
+        if video_worker:
+            video_worker.stop()
         logger.info("✅ Scheduler stopped gracefully")
         sys.exit(0)
     except Exception as e:

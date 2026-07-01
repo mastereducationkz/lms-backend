@@ -95,6 +95,17 @@ services:
       - LMS_URL=${LMS_URL}
       - RABBITMQ_URL=${RABBITMQ_URL}
       - RABBITMQ_EXCHANGE=${RABBITMQ_EXCHANGE}
+      # File storage (S3) — the video ingest worker uploads HLS output here.
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT:-}
+      - S3_USE_ACL=${S3_USE_ACL:-false}
+      # Video ingest worker (YouTube -> HLS). Runs only here, not in the API container.
+      - ENABLE_VIDEO_INGEST=${ENABLE_VIDEO_INGEST:-true}
+      - VIDEO_INGEST_POLL=${VIDEO_INGEST_POLL:-15}
     command: python -m src.services.run_scheduler
     depends_on:
       - postgres

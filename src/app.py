@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, FileResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, FileResponse, StreamingResponse
 from starlette.requests import Request
 from datetime import datetime
 from dotenv import load_dotenv
@@ -143,10 +143,20 @@ async def invalidate_cache_on_mutation(request: Request, call_next):
     return response
 
 @app.get("/uploads/{path:path}")
-def serve_upload(path: str):
-    """Serve uploaded files. On S3 backend, redirect to the resolved (public or
-    presigned) S3 URL; on local backend, stream from the uploads/ dir (dev parity)."""
+def serve_upload(path: str, request: Request):
+    """Serve uploaded files. On S3 backend: HLS videos (``videos/`` prefix) are
+    streamed through the backend so relative segment refs stay access-controlled and
+    Range requests work; everything else redirects to the resolved (public or
+    presigned) S3 URL. On local backend, stream from the uploads/ dir (dev parity;
+    FileResponse handles Range for local videos)."""
     if storage_service.use_s3():
+        if storage_service.is_video(path):
+            result = storage_service.open_stream(path, request.headers.get("range"))
+            if result is None:
+                raise HTTPException(status_code=404, detail="File not found")
+            status, headers, body = result
+            media_type = headers.pop("Content-Type", None)
+            return StreamingResponse(body, status_code=status, headers=headers, media_type=media_type)
         return RedirectResponse(storage_service.url_for(path), status_code=307)
     local = storage_service.local_path(path)
     if not local:

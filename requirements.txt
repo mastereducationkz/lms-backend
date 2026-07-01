@@ -80,3 +80,6 @@ uritemplate==4.2.0
 urllib3==2.5.0
 uvicorn==0.34.2
 wsproto==1.2.0
+# Self-hosted video ingest (YouTube -> HLS). Unpinned floor on purpose: yt-dlp needs
+# frequent updates as YouTube changes; bump via image rebuild when downloads break.
+yt-dlp>=2024.10.7

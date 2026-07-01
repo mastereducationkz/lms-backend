@@ -44,8 +44,19 @@ UPLOADS_PREFIX = "uploads"
 _LOCAL_ROOT = Path("uploads")
 
 # Course-authoring content -> private. Everything else (teacher/student uploads,
-# avatars, chat) -> public.
-PRIVATE_PREFIXES = ("courses", "materials", "step_attachments", "sat_images", "question_media", "steps")
+# avatars, chat) -> public. ``videos`` (self-hosted HLS) is private and, unlike the
+# other private prefixes, is *streamed* through the backend rather than redirected —
+# HLS playlists reference their segments by relative path, which presigned URLs break.
+PRIVATE_PREFIXES = ("courses", "materials", "step_attachments", "sat_images", "question_media", "steps", "videos")
+
+# Content types for streamed HLS assets (mimetypes doesn't know .m3u8/.ts/.m4s).
+_HLS_CONTENT_TYPES = {
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".ts": "video/mp2t",
+    ".m4s": "video/iso.segment",
+    ".mp4": "video/mp4",
+    ".vtt": "text/vtt",
+}
 
 
 def use_s3() -> bool:
@@ -160,3 +171,55 @@ def local_path(key: str) -> Optional[Path]:
     """Local file path if it exists (used for local serving and migration)."""
     p = _LOCAL_ROOT / _norm_key(key)
     return p if p.exists() else None
+
+
+def content_type_for(key: str) -> str:
+    ext = os.path.splitext(_norm_key(key))[1].lower()
+    return _HLS_CONTENT_TYPES.get(ext) or mimetypes.guess_type(_norm_key(key))[0] or "application/octet-stream"
+
+
+def is_video(key: str) -> bool:
+    """True for keys under the ``videos/`` prefix (self-hosted HLS, streamed not redirected)."""
+    return _norm_key(key).split("/", 1)[0] == "videos"
+
+
+def open_stream(key: str, range_header: Optional[str] = None, chunk_size: int = 262144):
+    """Stream an object's bytes from S3 (used for HLS, where relative segment refs
+    rule out presigned redirects). Returns ``(status, headers, iterator)`` or ``None``
+    if the object is missing. Honors a single HTTP Range header for seeking."""
+    from botocore.exceptions import ClientError
+
+    nkey = _norm_key(key)
+    ct = content_type_for(nkey)
+    params = {"Bucket": AWS_S3_BUCKET, "Key": _s3_key(nkey)}
+    if range_header:
+        params["Range"] = range_header
+    try:
+        resp = _client().get_object(**params)
+    except ClientError as e:
+        err = e.response.get("Error", {}) or {}
+        code = err.get("Code", "")
+        http_status = (e.response.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode")
+        if code in ("NoSuchKey", "NoSuchBucket") or http_status == 404:
+            return None
+        if code == "InvalidRange" or http_status == 416:
+            return 416, {"Content-Type": ct, "Accept-Ranges": "bytes"}, iter(())
+        raise
+
+    body = resp["Body"]
+    headers = {"Content-Type": ct, "Accept-Ranges": "bytes"}
+    if resp.get("ContentLength") is not None:
+        headers["Content-Length"] = str(resp["ContentLength"])
+    status = 200
+    if resp.get("ContentRange"):
+        headers["Content-Range"] = resp["ContentRange"]
+        status = 206
+
+    def _iterator():
+        try:
+            for chunk in body.iter_chunks(chunk_size):
+                yield chunk
+        finally:
+            body.close()
+
+    return status, headers, _iterator()

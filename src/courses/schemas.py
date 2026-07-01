@@ -62,6 +62,10 @@ class StepSchema(BaseModel):
     content_hash: Optional[str] = None
     is_completed: Optional[bool] = False
     is_optional: Optional[bool] = False
+    # Self-hosted HLS playback (populated once the ingest worker finishes).
+    hls_url: Optional[str] = None
+    hls_url_en: Optional[str] = None
+    video_status: Optional[str] = None
 
     class Config:
         from_attributes = True
