@@ -2074,7 +2074,19 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
         tasks = content.get("tasks", [])
         if not isinstance(tasks, list) or len(tasks) == 0:
             raise HTTPException(status_code=400, detail="multi_task assignment must have at least one task")
-        
+
+        # At most one course_unit task is allowed. Multiple course-unit tasks cause a
+        # course-resolution collision (the "Null course" bug) that makes one of them
+        # impossible to complete.
+        course_unit_count = sum(
+            1 for t in tasks if isinstance(t, dict) and t.get("task_type") == "course_unit"
+        )
+        if course_unit_count > 1:
+            raise HTTPException(
+                status_code=400,
+                detail="multi_task assignment can have at most one 'Course Units' task",
+            )
+
         # Validate each task
         valid_task_types = ["course_unit", "file_task", "text_task", "link_task", "pdf_text_task"]
         for i, task in enumerate(tasks):
