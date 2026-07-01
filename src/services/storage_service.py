@@ -81,7 +81,16 @@ def _client():
     global _s3
     if _s3 is None:
         import boto3  # imported lazily so local dev needs no AWS deps at import time
-        _s3 = boto3.client("s3", region_name=AWS_REGION, endpoint_url=AWS_S3_ENDPOINT)
+        from botocore.config import Config
+        # Use the REGIONAL endpoint + SigV4 so presigned URLs validate. The global
+        # s3.amazonaws.com host rejects presigned GETs for non-us-east-1 buckets (403).
+        endpoint = AWS_S3_ENDPOINT or (f"https://s3.{AWS_REGION}.amazonaws.com" if AWS_REGION else None)
+        _s3 = boto3.client(
+            "s3",
+            region_name=AWS_REGION,
+            endpoint_url=endpoint,
+            config=Config(signature_version="s3v4"),
+        )
     return _s3
 
 
