@@ -28,6 +28,7 @@ services:
 
   backend:
     build: .
+    image: lms-backend:latest
     container_name: lms-backend
     env_file:
       - .env
@@ -83,7 +84,9 @@ services:
       - "8000"
 
   scheduler:
-    build: .
+    # Reuse the exact image built for the backend so code never drifts between the
+    # two containers (they share the same Dockerfile/source).
+    image: lms-backend:latest
     container_name: lms-scheduler
     env_file:
       - .env
