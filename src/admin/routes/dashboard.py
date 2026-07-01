@@ -1571,6 +1571,132 @@ async def get_curator_homework_by_group(
     return {"groups": result}
 
 
+@router.get("/curator/student/{student_id}/homework")
+async def get_curator_student_homework(
+    student_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """
+    Get ALL homework for a single student across every group they belong to.
+    Inverse of /curator/homework-by-group (one student, many assignments).
+    Curators are scoped to their own groups; admins/head curators see all groups.
+    """
+    from src.utils.permissions import check_student_access
+    from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group
+
+    if current_user.role not in ["curator", "head_curator", "admin"]:
+        raise HTTPException(status_code=403, detail="Not allowed to view this student's homework")
+
+    if not check_student_access(student_id, current_user, db):
+        raise HTTPException(status_code=403, detail="You do not have access to this student")
+
+    student = db.query(UserInDB).filter(UserInDB.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    sync_groups_over_status(db)
+
+    # Groups this student belongs to
+    student_group_ids = [gs.group_id for gs in db.query(GroupStudent).filter(
+        GroupStudent.student_id == student_id
+    ).all()]
+
+    # Curators are limited to the groups they own; admins/head curators see all.
+    if current_user.role == "curator":
+        curator_group_ids = [g.id for g in db.query(Group.id).filter(
+            Group.curator_id == current_user.id
+        ).all()]
+        student_group_ids = [gid for gid in student_group_ids if gid in curator_group_ids]
+
+    if not student_group_ids:
+        return {"student_id": student.id, "student_name": student.name, "items": []}
+
+    groups = db.query(Group).filter(Group.id.in_(student_group_ids)).all()
+
+    items = []
+    for group in groups:
+        # Courses this group has access to -> lesson-based assignments
+        course_ids = [ca.course_id for ca in db.query(CourseGroupAccess).filter(
+            CourseGroupAccess.group_id == group.id,
+            CourseGroupAccess.is_active == True
+        ).all()]
+
+        lesson_based_assignments = []
+        if course_ids:
+            lesson_ids = [l[0] for l in db.query(Lesson.id).filter(
+                Lesson.module_id.in_(
+                    db.query(Module.id).filter(Module.course_id.in_(course_ids))
+                )
+            ).all()]
+            if lesson_ids:
+                lesson_based_assignments = db.query(Assignment).filter(
+                    Assignment.lesson_id.in_(lesson_ids),
+                    Assignment.is_active == True,
+                    (Assignment.is_hidden == False) | (Assignment.is_hidden.is_(None))
+                ).all()
+
+        group_based_assignments = db.query(Assignment).filter(
+            Assignment.group_id == group.id,
+            Assignment.lesson_id.is_(None),
+            Assignment.is_active == True,
+            (Assignment.is_hidden == False) | (Assignment.is_hidden.is_(None))
+        ).all()
+
+        all_assignments = lesson_based_assignments + group_based_assignments
+        if not all_assignments:
+            continue
+
+        # This student's submissions for these assignments, in one query
+        assignment_ids = [a.id for a in all_assignments]
+        submissions = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id.in_(assignment_ids),
+            AssignmentSubmission.user_id == student_id,
+            AssignmentSubmission.is_hidden == False
+        ).all()
+        submissions_map = {s.assignment_id: s for s in submissions}
+
+        for assignment in all_assignments:
+            submission = submissions_map.get(assignment.id)
+
+            status = 'not_submitted'
+            if submission:
+                status = 'graded' if submission.is_graded else 'submitted'
+            elif assignment.due_date and assignment.due_date < datetime.utcnow():
+                status = 'overdue'
+
+            # Parse assignment content so the frontend ViewDialog can render
+            # multi-task submissions (questions + per-task answers) identically.
+            assignment_content = None
+            if assignment.content:
+                try:
+                    assignment_content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
+                except Exception:
+                    assignment_content = None
+
+            items.append({
+                "assignment_id": assignment.id,
+                "title": assignment.title,
+                "group_id": group.id,
+                "group_name": group.name,
+                "due_date": assignment.due_date.isoformat() if assignment.due_date else None,
+                "max_score": assignment.max_score,
+                "assignment_type": assignment.assignment_type,
+                "content": assignment_content,
+                "status": status,
+                "submission_id": submission.id if submission else None,
+                "score": submission.score if submission else None,
+                "submitted_at": submission.submitted_at.isoformat() if submission and submission.submitted_at else None,
+                "graded_at": submission.graded_at.isoformat() if submission and submission.graded_at else None,
+                "feedback": submission.feedback if submission else None,
+            })
+
+    # Newest first (assignments without a due date sink to the bottom)
+    items.sort(key=lambda x: x["due_date"] or "0000-00-00", reverse=True)
+
+    return {"student_id": student.id, "student_name": student.name, "items": items}
+
+
 @router.get("/curator/{curator_id}")
 @cached(namespace="dashboard:curator-details", ttl=45, key_args=("curator_id",))
 async def get_curator_details(
