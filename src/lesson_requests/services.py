@@ -15,7 +15,6 @@ from src.schemas.models import (
     LessonRequest,
     CreateLessonRequestSchema,
     Course,
-    CourseGroupAccess,
     CourseHeadTeacher,
 )
 
@@ -34,6 +33,22 @@ def get_target_program_type(group_program_type: str | None) -> str:
     return HEAD_ROUTING.get(normalized, normalized)
 
 
+def _managed_course_types(db: Session, head_teacher_id: int) -> set[str]:
+    managed_course_ids = [
+        row[0]
+        for row in db.query(CourseHeadTeacher.course_id).filter(
+            CourseHeadTeacher.head_teacher_id == head_teacher_id,
+        ).all()
+    ]
+    if not managed_course_ids:
+        return set()
+
+    return {
+        row[0]
+        for row in db.query(Course.course_type).filter(Course.id.in_(managed_course_ids)).all()
+    }
+
+
 def resolve_head_teachers_for_group(db: Session, group_id: int) -> list[UserInDB]:
     """Find head teachers who should receive notifications for this group's requests."""
     group = db.query(Group).filter(Group.id == group_id).first()
@@ -42,22 +57,9 @@ def resolve_head_teachers_for_group(db: Session, group_id: int) -> list[UserInDB
 
     target_type = get_target_program_type(getattr(group, "program_type", None))
 
-    linked_course_ids = [
-        row[0]
-        for row in db.query(CourseGroupAccess.course_id).filter(
-            CourseGroupAccess.group_id == group_id,
-            CourseGroupAccess.is_active == True,
-        ).all()
-    ]
-    if not linked_course_ids:
-        return []
-
     matching_course_ids = [
         row[0]
-        for row in db.query(Course.id).filter(
-            Course.id.in_(linked_course_ids),
-            Course.course_type == target_type,
-        ).all()
+        for row in db.query(Course.id).filter(Course.course_type == target_type).all()
     ]
     if not matching_course_ids:
         return []
@@ -84,43 +86,16 @@ def resolve_head_teachers_for_group(db: Session, group_id: int) -> list[UserInDB
 
 def get_group_ids_in_head_teacher_scope(db: Session, head_teacher_id: int) -> list[int]:
     """Group IDs whose lesson requests this head teacher may approve."""
-    managed_course_ids = [
-        row[0]
-        for row in db.query(CourseHeadTeacher.course_id).filter(
-            CourseHeadTeacher.head_teacher_id == head_teacher_id,
-        ).all()
-    ]
-    if not managed_course_ids:
+    managed_types = _managed_course_types(db, head_teacher_id)
+    if not managed_types:
         return []
 
-    managed_courses = db.query(Course.id, Course.course_type).filter(
-        Course.id.in_(managed_course_ids),
-    ).all()
-    managed_types = {course_type for _, course_type in managed_courses}
-    managed_by_type: dict[str, set[int]] = {}
-    for course_id, course_type in managed_courses:
-        managed_by_type.setdefault(course_type, set()).add(course_id)
-
-    group_ids: set[int] = set()
-    all_groups = db.query(Group.id, Group.program_type).filter(Group.is_active == True).all()
-    for group_id, program_type in all_groups:
-        target_type = get_target_program_type(program_type)
-        if target_type not in managed_types:
-            continue
-        relevant_course_ids = managed_by_type.get(target_type, set())
-        if not relevant_course_ids:
-            continue
-        has_link = (
-            db.query(CourseGroupAccess.id)
-            .filter(
-                CourseGroupAccess.group_id == group_id,
-                CourseGroupAccess.course_id.in_(relevant_course_ids),
-                CourseGroupAccess.is_active == True,
-            )
-            .first()
-        )
-        if has_link:
-            group_ids.add(group_id)
+    group_ids: list[int] = []
+    for group_id, program_type in db.query(Group.id, Group.program_type).filter(
+        Group.is_active == True
+    ).all():
+        if get_target_program_type(program_type) in managed_types:
+            group_ids.append(group_id)
 
     return sorted(group_ids)
 
