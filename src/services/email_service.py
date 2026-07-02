@@ -818,3 +818,97 @@ def send_lesson_reminder_notification(
         logger.error(f"❌ [REMINDER] Failed to send reminder to {to_email}")
     
     return result
+
+
+def send_lesson_change_curator_notification(
+    curator_email: str,
+    curator_name: str,
+    group_name: str,
+    request_type: str,
+    original_datetime: str,
+    *,
+    new_datetime: Optional[str] = None,
+    substitute_name: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Optional[dict]:
+    """Notify group curator by email when a lesson change request is approved."""
+    service = get_email_service()
+    if not service.is_configured:
+        logger.error("Email service not configured — curator notification skipped")
+        return None
+
+    type_labels = {
+        "cancel": "отмена урока",
+        "reschedule": "перенос урока",
+        "substitution": "замена учителя",
+    }
+    type_label = type_labels.get(request_type, request_type)
+
+    subject = f"Изменение расписания: {group_name} — {type_label}"
+
+    details_rows = [
+        f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Группа</td>"
+        f"<td style='padding:8px 0;font-weight:500;'>{group_name}</td></tr>",
+        f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Тип</td>"
+        f"<td style='padding:8px 0;font-weight:500;'>{type_label}</td></tr>",
+        f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Дата урока</td>"
+        f"<td style='padding:8px 0;font-weight:500;'>{original_datetime}</td></tr>",
+    ]
+    if requester_name:
+        details_rows.append(
+            f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Учитель</td>"
+            f"<td style='padding:8px 0;font-weight:500;'>{requester_name}</td></tr>"
+        )
+    if request_type == "reschedule" and new_datetime:
+        details_rows.append(
+            f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Новая дата</td>"
+            f"<td style='padding:8px 0;font-weight:500;'>{new_datetime}</td></tr>"
+        )
+    if request_type == "substitution" and substitute_name:
+        details_rows.append(
+            f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Замена</td>"
+            f"<td style='padding:8px 0;font-weight:500;'>{substitute_name}</td></tr>"
+        )
+    if reason:
+        details_rows.append(
+            f"<tr><td style='padding:8px 0;color:#666;font-size:13px;vertical-align:top;'>Причина</td>"
+            f"<td style='padding:8px 0;'>{reason}</td></tr>"
+        )
+
+    details_html = "".join(details_rows)
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+      <head><meta charset="utf-8" /></head>
+      <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#333;line-height:1.5;margin:0;padding:0;">
+        <div style="max-width:520px;margin:40px auto;padding:20px;">
+          <h1 style="font-size:20px;font-weight:600;color:#111;margin:0 0 24px;">Изменение расписания</h1>
+          <p style="margin:0 0 16px;font-size:15px;">Здравствуйте, {curator_name}!</p>
+          <p style="margin:0 0 24px;font-size:15px;">
+            Запрос учителя на изменение урока был одобрен head teacher.
+          </p>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">{details_html}</table>
+          <p style="margin:0;font-size:13px;color:#999;">Master Education LMS</p>
+        </div>
+      </body>
+    </html>
+    """
+
+    text_lines = [
+        f"Здравствуйте, {curator_name}!",
+        "",
+        f"Запрос на {type_label} для группы {group_name} был одобрен.",
+        f"Дата урока: {original_datetime}",
+    ]
+    if requester_name:
+        text_lines.append(f"Учитель: {requester_name}")
+    if request_type == "reschedule" and new_datetime:
+        text_lines.append(f"Новая дата: {new_datetime}")
+    if request_type == "substitution" and substitute_name:
+        text_lines.append(f"Замена: {substitute_name}")
+    if reason:
+        text_lines.append(f"Причина: {reason}")
+
+    return service.send_email([curator_email], subject, html_content, "\n".join(text_lines))
