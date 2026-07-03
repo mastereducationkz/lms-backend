@@ -29,6 +29,11 @@ class LessonRequestSchema(BaseModel):
 
     class Config:
         from_attributes = True
+        # Datetimes are stored as naive UTC; emit them with a trailing 'Z' so
+        # clients parse them as UTC (matches EventSchema) and render in Asia/Almaty.
+        json_encoders = {
+            datetime: lambda v: v.isoformat() + 'Z' if v else None
+        }
 
 
 class CreateLessonRequestSchema(BaseModel):

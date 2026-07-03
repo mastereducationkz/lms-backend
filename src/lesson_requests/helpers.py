@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -159,7 +160,10 @@ def apply_approved_request(db: Session, lr: LessonRequest, resolver_id: int) -> 
 def _format_dt(dt: datetime | None) -> str:
     if not dt:
         return "TBD"
-    return dt.strftime("%d %b %Y %H:%M")
+    # Stored datetimes are naive UTC; display in Asia/Almaty (UTC+5).
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ZoneInfo("Asia/Almaty")).strftime("%d %b %Y %H:%M")
 
 
 def notify_approvers_of_request(db: Session, lr: LessonRequest, requester: UserInDB) -> None:
