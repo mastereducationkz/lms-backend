@@ -721,20 +721,84 @@ async def get_weekly_lessons_with_hw_status(
     ).all()
     manual_map = {e.user_id: e for e in manual_entries}
 
-    # 9.5 FETCH SAT DATA
+    # 9.5 FETCH SAT / IELTS DATA
     from src.services.sat_service import SATService
     sat_results_map = {}  # user_id -> combined percentage score
     sat_section_scores_map = {}  # user_id -> math/verbal counts
     sat_feedback_map = {}  # user_id -> {math_feedback, verbal_feedback}
-    
+    ielts_details_map = {}  # user_id -> band scores + examiner feedback
+
     if student_ids and week_start_date and week_end_date:
         emails = [s.email.lower() for s in students_list if s.email]
         if emails:
             email_to_id = {s.email.lower(): s.id for s in students_list if s.email}
             group_program_type = (getattr(group, "program_type", None) or "").lower()
             is_sat_group = group_program_type == "sat" or "sat" in (group.name or "").lower()
+            is_ielts_group = group_program_type == "ielts" or "ielts" in (group.name or "").lower()
 
-            if is_sat_group:
+            if is_ielts_group:
+                # IELTS weekly bands + examiner feedback from the IELTS platform.
+                # Any date inside the weekly set's window resolves the set, so
+                # try the configured date first, then every day of the week.
+                from src.services.ielts_service import IELTSService
+
+                candidate_dates_set = set()
+                if config and config.curator_hour_date:
+                    candidate_dates_set.add(config.curator_hour_date)
+                current = week_start_date
+                while current < week_end_date:
+                    candidate_dates_set.add(current)
+                    current += timedelta(days=1)
+                candidate_dates = sorted(candidate_dates_set, reverse=True)
+
+                seen_weekly_set_ids = set()
+                for score_date_obj in candidate_dates:
+                    payload = await IELTSService.fetch_batch_scores_by_date(
+                        emails, score_date_obj.strftime("%Y-%m-%d")
+                    )
+                    weekly_set_id = payload.get("weeklySetId")
+                    if weekly_set_id is not None:
+                        if weekly_set_id in seen_weekly_set_ids:
+                            continue
+                        seen_weekly_set_ids.add(weekly_set_id)
+
+                    for item in payload.get("results") or []:
+                        email = (item.get("email") or "").lower()
+                        student_id = email_to_id.get(email)
+                        if not student_id or student_id in ielts_details_map:
+                            continue
+
+                        band_values = [
+                            item.get("listeningBand"), item.get("readingBand"),
+                            item.get("writingBand"), item.get("speakingBand"),
+                            item.get("overallBand"),
+                        ]
+                        if all(v is None for v in band_values):
+                            continue
+
+                        ielts_details_map[student_id] = {
+                            "listening_band": item.get("listeningBand"),
+                            "reading_band": item.get("readingBand"),
+                            "writing_band": item.get("writingBand"),
+                            "speaking_band": item.get("speakingBand"),
+                            "overall_band": item.get("overallBand"),
+                            "listening_test_name": item.get("listeningTestName"),
+                            "reading_test_name": item.get("readingTestName"),
+                            "writing_test_name": item.get("writingTestName"),
+                            "writing_feedback": item.get("writingFeedback"),
+                            "speaking_feedback": item.get("speakingFeedback"),
+                            "weekly_set_title": payload.get("weeklySetTitle"),
+                        }
+
+                        overall = item.get("overallBand")
+                        if overall is not None:
+                            # Band 0–9 → 0–100 so IELTS groups rank the same
+                            # way SAT groups do in the weekly total.
+                            sat_results_map[student_id] = round((overall / 9) * 100, 1)
+
+                    if len(ielts_details_map) >= len(emails):
+                        break
+            elif is_sat_group:
                 # SAT score-by-date endpoint uses DD.MM
                 # Try: configured date → all 7 days of the week (Fri/Sat/Sun often have tests)
                 candidate_dates_set = set()
@@ -815,9 +879,21 @@ async def get_weekly_lessons_with_hw_status(
 
         sat_sections = sat_section_scores_map.get(student.id, {})
         sat_fb = sat_feedback_map.get(student.id, {})
+        ielts = ielts_details_map.get(student.id, {})
         manual_data = {
             "curator_hour": manual.curator_hour if manual else 0,
             "mock_exam": mock_exam_score,
+            "ielts_listening_band": ielts.get("listening_band"),
+            "ielts_reading_band": ielts.get("reading_band"),
+            "ielts_writing_band": ielts.get("writing_band"),
+            "ielts_speaking_band": ielts.get("speaking_band"),
+            "ielts_overall_band": ielts.get("overall_band"),
+            "ielts_listening_test_name": ielts.get("listening_test_name"),
+            "ielts_reading_test_name": ielts.get("reading_test_name"),
+            "ielts_writing_test_name": ielts.get("writing_test_name"),
+            "ielts_writing_feedback": ielts.get("writing_feedback"),
+            "ielts_speaking_feedback": ielts.get("speaking_feedback"),
+            "ielts_weekly_set_title": ielts.get("weekly_set_title"),
             "sat_math_correct_count": sat_sections.get("math_correct"),
             "sat_math_total_count": sat_sections.get("math_total"),
             "sat_verbal_correct_count": sat_sections.get("verbal_correct"),
