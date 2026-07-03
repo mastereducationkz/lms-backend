@@ -209,13 +209,24 @@ async def get_group_leaderboard(
     students = db.query(UserInDB).filter(UserInDB.id.in_(student_ids)).all()
     students_map = {s.id: s for s in students}
 
-    # 2. Get Events for this group (class type, active)
+    # 2. Get Events for this group (class type). Include active events, plus
+    # cancelled lessons (is_active=False but carrying "cancelled" attendance) so
+    # the grid can render a "Отменён" column instead of silently dropping it.
     from src.schemas.models import Event, EventGroup
-    
+
+    cancelled_event_ids = {
+        row[0]
+        for row in db.query(Attendance.event_id)
+        .join(EventGroup, EventGroup.event_id == Attendance.event_id)
+        .filter(EventGroup.group_id == group_id, Attendance.status == "cancelled")
+        .distinct()
+        .all()
+    }
+
     all_events = db.query(Event).join(EventGroup).filter(
         EventGroup.group_id == group_id,
         Event.event_type == 'class',
-        Event.is_active == True
+        or_(Event.is_active == True, Event.id.in_(cancelled_event_ids)),
     ).order_by(Event.start_datetime.asc()).all()
     
     if not all_events:
@@ -333,6 +344,7 @@ async def get_group_leaderboard(
     
     # 6. Get Attendance data - from Attendance (single source of truth)
     attendance_data = {}  # {student_id: {lesson_index: score}}
+    attendance_status_data = {}  # {student_id: {lesson_index: ui_status}}
 
     if event_ids:
         att_map = AttendanceService.get_attendance_map_for_events(db, event_ids, student_ids)
@@ -341,8 +353,10 @@ async def get_group_leaderboard(
             if lesson_idx > 0:
                 if uid not in attendance_data:
                     attendance_data[uid] = {}
+                    attendance_status_data[uid] = {}
                 score = 1 if att["status"] in ("present", "late") else 0
                 attendance_data[uid][lesson_idx] = score
+                attendance_status_data[uid][lesson_idx] = attendance_status_to_ui(att["status"])
 
     # 7. Get Manual Leaderboard Entries
     entries = db.query(LeaderboardEntry).filter(
@@ -379,6 +393,7 @@ async def get_group_leaderboard(
         entry = entries_map.get(student_id)
         hw_scores = homework_data.get(student_id, {})
         att_scores = attendance_data.get(student_id, {})
+        att_statuses = attendance_status_data.get(student_id, {})
         
         # Priority for mock_exam: SAT Platform data > Manual Entry
         sat_score = sat_results_map.get(student_id)
@@ -394,10 +409,11 @@ async def get_group_leaderboard(
             "extra_points": entry.extra_points if entry else 0,
         }
         
-        # Lesson scores from attendance
+        # Lesson scores from attendance (numeric) + raw UI status (for cancelled/late)
         lesson_scores = {}
         for i in range(1, 6):
             lesson_scores[f"lesson_{i}"] = att_scores.get(i, 0)
+            lesson_scores[f"lesson_{i}_status"] = att_statuses.get(i)
         
         row = {
             "student_id": student.id,
@@ -907,10 +923,21 @@ async def get_group_full_attendance_matrix(
     course_accesses = db.query(CourseGroupAccess).filter(CourseGroupAccess.group_id == group_id, CourseGroupAccess.is_active == True).all()
     course_ids = [ca.course_id for ca in course_accesses]
     
+    # Cancelled lessons (is_active=False but carrying "cancelled" attendance)
+    # must still appear so the matrix shows an "Отменён" column.
+    cancelled_event_ids = {
+        row[0]
+        for row in db.query(Attendance.event_id)
+        .join(EventGroup, EventGroup.event_id == Attendance.event_id)
+        .filter(EventGroup.group_id == group_id, Attendance.status == "cancelled")
+        .distinct()
+        .all()
+    }
+
     # 3. Fetch Standard Events (Group-linked OR Course-linked)
     standard_events_query = db.query(Event).outerjoin(EventGroup).outerjoin(EventCourse).filter(
         Event.event_type == 'class',
-        Event.is_active == True,
+        or_(Event.is_active == True, Event.id.in_(cancelled_event_ids)),
         Event.is_recurring == False,
         or_(
             EventGroup.group_id == group_id,
@@ -1080,11 +1107,21 @@ async def get_weekly_lessons_with_hw_status(
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    # 2. Get all Events for this group
+    # 2. Get all Events for this group (active + cancelled-but-recorded lessons,
+    # so a cancelled lesson still shows as an "Отменён" column).
+    cancelled_event_ids = {
+        row[0]
+        for row in db.query(Attendance.event_id)
+        .join(EventGroup, EventGroup.event_id == Attendance.event_id)
+        .filter(EventGroup.group_id == group_id, Attendance.status == "cancelled")
+        .distinct()
+        .all()
+    }
+
     all_events = db.query(Event).join(EventGroup).filter(
         EventGroup.group_id == group_id,
         Event.event_type == 'class',
-        Event.is_active == True
+        or_(Event.is_active == True, Event.id.in_(cancelled_event_ids)),
     ).order_by(Event.start_datetime.asc()).all()
     
     lessons_meta = []
@@ -1167,12 +1204,14 @@ async def get_weekly_lessons_with_hw_status(
         for i in range(1, 6):
             hw_score = row.get(f"hw_lesson_{i}")
             att_score = row.get(f"lesson_{i}", 0)
-            
-            # Determine attendance status
-            if att_score >= 1:
+            att_status_raw = row.get(f"lesson_{i}_status")
+
+            # Prefer the real recorded status (distinguishes late / cancelled);
+            # fall back to the numeric score when no attendance record exists.
+            if att_status_raw:
+                attendance_status = att_status_raw  # attended | late | missed | registered | cancelled
+            elif att_score >= 1:
                 attendance_status = "attended"
-            elif att_score > 0:
-                attendance_status = "late"
             else:
                 attendance_status = "missed"
             
@@ -1394,13 +1433,21 @@ async def update_attendance(
         if not real_event_id:
             raise HTTPException(status_code=404, detail="Event could not be resolved/materialized")
 
-        att_status = "present" if data.score > 0 else "absent"
+        # Honor an explicit UI status (late / cancelled / missed / attended) when
+        # provided; fall back to score-based present/absent for legacy callers
+        # that only send a score with the default "present" status.
+        if data.status and data.status != "present":
+            att_status = ep_status_to_attendance_status(data.status)
+            att_score = 1 if att_status in ("present", "late") else 0
+        else:
+            att_status = "present" if data.score > 0 else "absent"
+            att_score = data.score
         AttendanceService.upsert_for_event(
             db=db,
             event_id=real_event_id,
             user_id=data.student_id,
             status=att_status,
-            score=data.score,
+            score=att_score,
             activity_score=data.activity_score,
         )
         db.commit()

@@ -18,6 +18,7 @@ from src.schemas.models import (
     GroupStudent,
 )
 from src.services.event_service import EventService
+from src.services.attendance_service import AttendanceService
 from src.services.email_service import send_lesson_change_curator_notification
 from src.lesson_requests.services import resolve_head_teachers_for_group
 
@@ -122,6 +123,27 @@ def apply_cancel(db: Session, lr: LessonRequest, resolver_id: int) -> None:
         event = db.query(Event).filter(Event.id == event_id).first()
         if event:
             event.is_active = False
+            db.flush()
+
+        # Mark every group student's attendance for this lesson as "cancelled"
+        # so it surfaces in Attendance / leaderboard grids and is excluded from
+        # attendance-rate scoring (a cancelled lesson must not count as absent).
+        student_ids = [
+            row[0]
+            for row in db.query(GroupStudent.student_id).filter(
+                GroupStudent.group_id == lr.group_id
+            ).all()
+        ]
+        for sid in student_ids:
+            AttendanceService.upsert_for_event(
+                db,
+                event_id=event_id,
+                user_id=sid,
+                status="cancelled",
+                score=0,
+                flush=False,
+            )
+        if student_ids:
             db.flush()
 
 

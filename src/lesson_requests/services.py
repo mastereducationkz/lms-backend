@@ -206,10 +206,13 @@ def create_lesson_request_record(
             detail="A pending request already exists for this lesson.",
         )
 
-    if data.request_type == "substitution":
-        initial_status = "pending_teacher"
-    else:
-        initial_status = "pending"
+    # Substitution no longer waits on the substitute teacher's confirmation:
+    # the requester names the substitute and the request goes straight to the
+    # head teacher for approval (status "pending").
+    initial_status = "pending"
+    confirmed_teacher_id = (
+        teacher_ids[0] if data.request_type == "substitution" and teacher_ids else None
+    )
 
     new_request = LessonRequest(
         request_type=data.request_type,
@@ -220,6 +223,7 @@ def create_lesson_request_record(
         original_datetime=data.original_datetime,
         substitute_teacher_id=teacher_ids[0] if teacher_ids else None,
         substitute_teacher_ids=json.dumps(teacher_ids) if teacher_ids else None,
+        confirmed_teacher_id=confirmed_teacher_id,
         new_datetime=data.new_datetime,
         reason=data.reason,
         status=initial_status,

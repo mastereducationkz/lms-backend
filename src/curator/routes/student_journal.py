@@ -89,6 +89,8 @@ async def list_students(
         .filter(
             Attendance.user_id.in_(student_ids),
             Attendance.event_id.isnot(None),
+            # Cancelled lessons must not count toward a student's attendance rate.
+            Attendance.status != "cancelled",
         )
         .group_by(Attendance.user_id)
         .all()

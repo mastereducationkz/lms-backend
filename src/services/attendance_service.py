@@ -34,6 +34,7 @@ _EP_STATUS_TO_ATTENDANCE: Dict[str, str] = {
     "missed": "absent",
     "absent": "absent",
     "registered": "registered",
+    "cancelled": "cancelled",
 }
 
 
@@ -47,6 +48,7 @@ _ATTENDANCE_TO_UI_STATUS: Dict[str, str] = {
     "late": "late",
     "absent": "missed",
     "registered": "registered",
+    "cancelled": "cancelled",
 }
 
 
