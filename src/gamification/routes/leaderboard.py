@@ -22,6 +22,13 @@ from src.services.attendance_service import (
 
 
 def head_teacher_can_access_group(db: Session, head_teacher_user_id: int, group_id: int) -> bool:
+    # Subject scope: groups whose program_type maps to the head teacher's managed
+    # course types (SAT / IELTS+General English / NUET) — "groups of his type".
+    from src.lesson_requests.services import get_group_ids_in_head_teacher_scope
+    if group_id in set(get_group_ids_in_head_teacher_scope(db, head_teacher_user_id)):
+        return True
+
+    # Legacy: explicit course-group links.
     course_accesses = db.query(CourseGroupAccess).filter(
         CourseGroupAccess.group_id == group_id,
         CourseGroupAccess.is_active == True,
@@ -58,8 +65,19 @@ async def get_curator_groups(
             Group.curator_id == current_user.id,
             Group.is_active == True,
         ).order_by(Group.created_at.desc()).all()
+    elif current_user.role == "head_teacher":
+        # Head teachers see the leaderboard only for groups of their subject.
+        from src.lesson_requests.services import get_group_ids_in_head_teacher_scope
+        scoped_ids = get_group_ids_in_head_teacher_scope(db, current_user.id)
+        if not scoped_ids:
+            return []
+        groups = db.query(Group).filter(
+            Group.id.in_(scoped_ids),
+            Group.is_special == False,
+            Group.is_active == True,
+        ).order_by(Group.created_at.desc()).all()
     else:
-        raise HTTPException(status_code=403, detail="Only curators and admins can access this endpoint")
+        raise HTTPException(status_code=403, detail="Only curators, head teachers and admins can access this endpoint")
     # We need to return GroupSchema. Since GroupSchema has many fields, we might need to populate them or use a simplified schema.
     # The frontend only uses id and name for the dropdown.
     # But for compatibility, let's use GroupSchema and fill basics.
@@ -194,10 +212,13 @@ async def get_group_leaderboard(
         group = db.query(Group).filter(Group.id == group_id, Group.curator_id == current_user.id).first()
         if not group:
             raise HTTPException(status_code=403, detail="Access denied to this group")
+    elif current_user.role == "head_teacher":
+        if not head_teacher_can_access_group(db, current_user.id, group_id):
+            raise HTTPException(status_code=403, detail="Access denied to this group")
     elif current_user.role in ["admin", "head_curator"]:
         pass
     else:
-        raise HTTPException(status_code=403, detail="Only curators and admins can access leaderboard")
+        raise HTTPException(status_code=403, detail="Only curators, head teachers and admins can access leaderboard")
 
     # 1. Get all students in the group
     group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group_id).all()
@@ -449,11 +470,14 @@ async def update_leaderboard_config(
         group = db.query(Group).filter(Group.id == payload.group_id, Group.curator_id == current_user.id).first()
         if not group:
             raise HTTPException(status_code=403, detail="Access denied to this group")
+    elif current_user.role == "head_teacher":
+        if not head_teacher_can_access_group(db, current_user.id, payload.group_id):
+            raise HTTPException(status_code=403, detail="Access denied to this group")
     elif current_user.role in ["admin", "head_curator"]:
         pass
     else:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     logger.warning(f"Received config update: {payload.model_dump()}")
     
     # 2. Get or create config
@@ -505,6 +529,12 @@ async def get_weekly_lessons_with_hw_status(
         group = db.query(Group).filter(Group.id == group_id, Group.curator_id == current_user.id).first()
         if not group:
             raise HTTPException(status_code=403, detail="Access denied to this group")
+    elif current_user.role == "head_teacher":
+        if not head_teacher_can_access_group(db, current_user.id, group_id):
+            raise HTTPException(status_code=403, detail="Access denied to this group")
+        group = db.query(Group).filter(Group.id == group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
     elif current_user.role in ["admin", "head_curator"]:
         group = db.query(Group).filter(Group.id == group_id).first()
         if not group:
@@ -1131,12 +1161,15 @@ async def update_leaderboard_entry(
     
     if current_user.role == "curator":
          group = db.query(Group).filter(
-             Group.id == data.group_id, 
+             Group.id == data.group_id,
              Group.curator_id == current_user.id
          ).first()
          if not group:
              logger.warning(f"Access denied: curator {current_user.id} not owner of group {data.group_id}")
              raise HTTPException(status_code=403, detail="Access denied to this group")
+    elif current_user.role == "head_teacher":
+        if not head_teacher_can_access_group(db, current_user.id, data.group_id):
+            raise HTTPException(status_code=403, detail="Access denied to this group")
     elif current_user.role in ["admin", "head_curator"]:
         pass
     else:
@@ -1175,8 +1208,10 @@ async def get_weekly_lessons_with_hw_status(
     Enhanced leaderboard endpoint returning structured lessons, homework status, 
     student rows and configuration. Uses Events (not LessonSchedule).
     """
-    if current_user.role not in ["curator", "admin", "head_curator"]:
+    if current_user.role not in ["curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.role == "head_teacher" and not head_teacher_can_access_group(db, current_user.id, group_id):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
 
     # 1. Get Group
     group = db.query(Group).filter(Group.id == group_id).first()
@@ -1356,8 +1391,10 @@ async def update_leaderboard_config(
     db: Session = Depends(get_db)
 ):
     """Update or create leaderboard configuration."""
-    if current_user.role not in ["curator", "admin", "head_curator"]:
+    if current_user.role not in ["curator", "admin", "head_curator", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.role == "head_teacher" and not head_teacher_can_access_group(db, current_user.id, data.group_id):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
 
     config = db.query(LeaderboardConfig).filter(
         LeaderboardConfig.group_id == data.group_id,
