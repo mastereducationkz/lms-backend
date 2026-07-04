@@ -922,6 +922,9 @@ async def get_all_groups(
     program_type: Optional[Literal["sat", "ielts", "general_english", "nuet"]] = Query(
         None, description="Фильтр по программе (SAT / IELTS / General English)"
     ),
+    include_students: bool = Query(
+        True, description="Embed full student lists per group. Set false for a lightweight group list."
+    ),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
 ):
@@ -971,10 +974,20 @@ async def get_all_groups(
         ]
         max_open_lessons = cga.max_open_lessons if cga else None
         linked_course_id = linked_course_ids[0] if linked_course_ids else None
-        # Get students for this group
-        group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group.id).all()
-        student_count = len(group_students)
-        
+        # Get students for this group. In lightweight mode, only the count is
+        # computed (avoids an N+1 per-student query when the caller needs metadata only).
+        if not include_students:
+            student_count = (
+                db.query(func.count(GroupStudent.id))
+                .filter(GroupStudent.group_id == group.id)
+                .scalar()
+                or 0
+            )
+            group_students = []
+        else:
+            group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group.id).all()
+            student_count = len(group_students)
+
         # Get student details
         students = []
         for group_student in group_students:
