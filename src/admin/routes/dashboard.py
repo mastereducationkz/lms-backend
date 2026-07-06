@@ -1386,8 +1386,6 @@ async def get_curator_homework_by_group(
     if current_user.role not in ["curator", "head_curator", "head_teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only curators, head curators, head teachers and admins can access this endpoint")
 
-    sync_groups_over_status(db)
-
     from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group, CourseHeadTeacher
 
     # Get the supervisor's groups, scoped by role
@@ -1419,114 +1417,158 @@ async def get_curator_homework_by_group(
 
     if group_id:
         curator_groups_query = curator_groups_query.filter(Group.id == group_id)
-    
+
     curator_groups = curator_groups_query.all()
-    
+
     if not curator_groups:
         return {"groups": []}
-    
+
+    group_ids = [g.id for g in curator_groups]
+
+    # Scoped to just the groups we're about to return — avoids scanning every
+    # group (and every group's events) in the school on each request.
+    sync_groups_over_status(db, group_ids=group_ids)
+
+    # --- Bulk-load everything up front (no per-group / per-assignment queries) ---
+
+    teacher_ids = {g.teacher_id for g in curator_groups if g.teacher_id}
+    teachers_map = {}
+    if teacher_ids:
+        teachers_map = {
+            u.id: u for u in db.query(UserInDB).filter(UserInDB.id.in_(teacher_ids)).all()
+        }
+
+    group_student_ids_map: dict[int, list[int]] = {}
+    for gs in db.query(GroupStudent).filter(GroupStudent.group_id.in_(group_ids)).all():
+        group_student_ids_map.setdefault(gs.group_id, []).append(gs.student_id)
+
+    all_student_ids = {sid for ids in group_student_ids_map.values() for sid in ids}
+    students_map = {}
+    if all_student_ids:
+        students_map = {
+            s.id: s for s in db.query(UserInDB).filter(UserInDB.id.in_(all_student_ids)).all()
+        }
+
+    group_course_ids_map: dict[int, list[int]] = {}
+    for ca in db.query(CourseGroupAccess).filter(
+        CourseGroupAccess.group_id.in_(group_ids),
+        CourseGroupAccess.is_active == True
+    ).all():
+        group_course_ids_map.setdefault(ca.group_id, []).append(ca.course_id)
+
+    all_course_ids = {cid for ids in group_course_ids_map.values() for cid in ids}
+
+    # lesson_id -> (course_id, course_title), for lesson-based assignments
+    lesson_course_map: dict[int, tuple] = {}
+    if all_course_ids:
+        lesson_rows = (
+            db.query(Lesson.id, Module.course_id, Course.title)
+            .join(Module, Lesson.module_id == Module.id)
+            .join(Course, Module.course_id == Course.id)
+            .filter(Module.course_id.in_(all_course_ids))
+            .all()
+        )
+        lesson_course_map = {row[0]: (row[1], row[2]) for row in lesson_rows}
+
+    all_lesson_ids = list(lesson_course_map.keys())
+
+    # course_id -> group_ids that have access to it (only within our scope)
+    course_group_ids_map: dict[int, list[int]] = {}
+    for gid, cids in group_course_ids_map.items():
+        for cid in cids:
+            course_group_ids_map.setdefault(cid, []).append(gid)
+
+    # One query for every assignment relevant to any of these groups (either
+    # lesson-based via a course the group can access, or group-based directly).
+    assignment_filters = []
+    if all_lesson_ids:
+        assignment_filters.append(Assignment.lesson_id.in_(all_lesson_ids))
+    assignment_filters.append(
+        and_(Assignment.group_id.in_(group_ids), Assignment.lesson_id.is_(None))
+    )
+    all_assignments = db.query(Assignment).filter(
+        Assignment.is_active == True,
+        (Assignment.is_hidden == False) | (Assignment.is_hidden.is_(None)),
+        or_(*assignment_filters)
+    ).all()
+
+    # Distribute each assignment to the group(s) it applies to.
+    assignments_by_group: dict[int, list] = {}
+    for assignment in all_assignments:
+        if assignment.lesson_id is not None:
+            course_id = lesson_course_map.get(assignment.lesson_id, (None, None))[0]
+            for gid in course_group_ids_map.get(course_id, []):
+                assignments_by_group.setdefault(gid, []).append(assignment)
+        elif assignment.group_id is not None:
+            assignments_by_group.setdefault(assignment.group_id, []).append(assignment)
+
+    # One query for every submission from any relevant student on any relevant assignment.
+    all_assignment_ids = [a.id for a in all_assignments]
+    submissions_map: dict[int, dict[int, AssignmentSubmission]] = {}
+    if all_assignment_ids and all_student_ids:
+        for sub in db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id.in_(all_assignment_ids),
+            AssignmentSubmission.user_id.in_(all_student_ids),
+            AssignmentSubmission.is_hidden == False
+        ).all():
+            submissions_map.setdefault(sub.assignment_id, {})[sub.user_id] = sub
+
+    assignment_content_cache: dict[int, Optional[dict]] = {}
+
+    def _parse_content(assignment):
+        if assignment.id in assignment_content_cache:
+            return assignment_content_cache[assignment.id]
+        content = None
+        if assignment.content:
+            try:
+                content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
+            except Exception:
+                content = None
+        assignment_content_cache[assignment.id] = content
+        return content
+
     result = []
-    
+    now = datetime.utcnow()
+
     for group in curator_groups:
-        # Get students in this group
-        group_student_ids = [gs.student_id for gs in db.query(GroupStudent).filter(
-            GroupStudent.group_id == group.id
-        ).all()]
-        
+        group_student_ids = group_student_ids_map.get(group.id, [])
+        teacher = teachers_map.get(group.teacher_id) if group.teacher_id else None
+
         if not group_student_ids:
             result.append({
                 "group_id": group.id,
                 "group_name": group.name,
                 "is_over": group.is_over,
                 "teacher_id": group.teacher_id,
-                "teacher_name": group.teacher.name if group.teacher else None,
+                "teacher_name": teacher.name if teacher else None,
                 "students_count": 0,
                 "assignments": []
             })
             continue
-        
-        # Get students info
-        students = db.query(UserInDB).filter(UserInDB.id.in_(group_student_ids)).all()
-        students_map = {s.id: s for s in students}
-        
-        # Get courses that this group has access to
-        course_access = db.query(CourseGroupAccess).filter(
-            CourseGroupAccess.group_id == group.id,
-            CourseGroupAccess.is_active == True
-        ).all()
-        course_ids = [ca.course_id for ca in course_access]
-        
-        # Get lesson-based assignments from those courses
-        lesson_based_assignments = []
-        if course_ids:
-            lesson_ids = db.query(Lesson.id).filter(
-                Lesson.module_id.in_(
-                    db.query(Module.id).filter(Module.course_id.in_(course_ids))
-                )
-            ).all()
-            lesson_ids = [l[0] for l in lesson_ids]
-            
-            if lesson_ids:
-                lesson_based_assignments = db.query(Assignment).filter(
-                    Assignment.lesson_id.in_(lesson_ids),
-                    Assignment.is_active == True,
-                    (Assignment.is_hidden == False) | (Assignment.is_hidden.is_(None))
-                ).all()
-        
-        # Get group-based assignments
-        group_based_assignments = db.query(Assignment).filter(
-            Assignment.group_id == group.id,
-            Assignment.lesson_id.is_(None),
-            Assignment.is_active == True,
-            (Assignment.is_hidden == False) | (Assignment.is_hidden.is_(None))
-        ).all()
-        
-        # Combine assignments
-        all_assignments = lesson_based_assignments + group_based_assignments
-        
+
         assignments_data = []
-        for assignment in all_assignments:
-            # Get course info
-            course_title = "Unknown"
+        for assignment in assignments_by_group.get(group.id, []):
             if assignment.lesson_id:
-                lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
-                if lesson:
-                    module = db.query(Module).filter(Module.id == lesson.module_id).first()
-                    if module:
-                        course = db.query(Course).filter(Course.id == module.course_id).first()
-                        if course:
-                            course_title = course.title
-            elif assignment.group_id:
-                course_title = f"Group Assignment"
-            
-            # Get submissions for this assignment from group students
-            submissions = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id == assignment.id,
-                AssignmentSubmission.user_id.in_(group_student_ids),
-                AssignmentSubmission.is_hidden == False
-            ).all()
-            
-            submissions_map = {s.user_id: s for s in submissions}
-            
-            # Build student progress list
+                course_title = lesson_course_map.get(assignment.lesson_id, (None, "Unknown"))[1]
+            else:
+                course_title = "Group Assignment"
+
+            sub_map_for_assignment = submissions_map.get(assignment.id, {})
+
             students_progress = []
             for student_id in group_student_ids:
                 student = students_map.get(student_id)
                 if not student:
                     continue
-                
-                submission = submissions_map.get(student_id)
-                
-                # Determine status
+
+                submission = sub_map_for_assignment.get(student_id)
+
                 status = 'not_submitted'
                 if submission:
-                    if submission.is_graded:
-                        status = 'graded'
-                    else:
-                        status = 'submitted'
-                elif assignment.due_date and assignment.due_date < datetime.utcnow():
+                    status = 'graded' if submission.is_graded else 'submitted'
+                elif assignment.due_date and assignment.due_date < now:
                     status = 'overdue'
-                
+
                 students_progress.append({
                     "student_id": student.id,
                     "student_name": student.name,
@@ -1539,24 +1581,15 @@ async def get_curator_homework_by_group(
                     "graded_at": submission.graded_at.isoformat() if submission and submission.graded_at else None,
                     "feedback": submission.feedback if submission else None
                 })
-            
-            # Calculate summary
-            submitted_count = len([s for s in students_progress if s["status"] in ['submitted', 'graded']])
+
+            submitted_count = len([s for s in students_progress if s["status"] in ('submitted', 'graded')])
             graded_count = len([s for s in students_progress if s["status"] == 'graded'])
             not_submitted_count = len([s for s in students_progress if s["status"] == 'not_submitted'])
             overdue_count = len([s for s in students_progress if s["status"] == 'overdue'])
-            
+
             scores = [s["score"] for s in students_progress if s["score"] is not None]
             avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-            
-            # Parse assignment content
-            assignment_content = None
-            if assignment.content:
-                try:
-                    assignment_content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
-                except:
-                    assignment_content = None
-            
+
             assignments_data.append({
                 "id": assignment.id,
                 "title": assignment.title,
@@ -1565,7 +1598,7 @@ async def get_curator_homework_by_group(
                 "due_date": assignment.due_date.isoformat() if assignment.due_date else None,
                 "max_score": assignment.max_score,
                 "assignment_type": assignment.assignment_type,
-                "content": assignment_content,
+                "content": _parse_content(assignment),
                 "summary": {
                     "total_students": len(group_student_ids),
                     "submitted": submitted_count,
@@ -1576,16 +1609,15 @@ async def get_curator_homework_by_group(
                 },
                 "students": students_progress
             })
-        
-        # Sort assignments by due date (most recent first)
+
         assignments_data.sort(key=lambda x: x["due_date"] or "9999-99-99", reverse=True)
-        
+
         result.append({
             "group_id": group.id,
             "group_name": group.name,
             "is_over": group.is_over,
             "teacher_id": group.teacher_id,
-            "teacher_name": group.teacher.name if group.teacher else None,
+            "teacher_name": teacher.name if teacher else None,
             "students_count": len(group_student_ids),
             "assignments": assignments_data
         })

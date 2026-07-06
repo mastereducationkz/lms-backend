@@ -22,25 +22,36 @@ def get_groups_over_status_changes(db: Session, group_ids: Optional[Iterable[int
         query = query.filter(Group.id.in_(list(group_ids)))
 
     groups = query.all()
+    if not groups:
+        return []
+
     now = datetime.utcnow()
+
+    # Batch-fetch class events for every group in one query instead of one
+    # query per group — this function used to be an N+1 hotspot on any page
+    # that scopes to "all groups" (e.g. head curator dashboards).
+    event_rows = (
+        db.query(EventGroup.group_id, Event.start_datetime)
+        .join(Event, EventGroup.event_id == Event.id)
+        .filter(
+            EventGroup.group_id.in_([g.id for g in groups]),
+            Event.event_type == "class",
+            Event.is_active == True,
+        )
+        .all()
+    )
+    events_by_group: dict[int, list] = {}
+    for group_id, start_datetime in event_rows:
+        events_by_group.setdefault(group_id, []).append(start_datetime)
+
     changes: list[tuple[Group, bool]] = []
 
     for group in groups:
-        class_events = (
-            db.query(Event.start_datetime)
-            .join(EventGroup, EventGroup.event_id == Event.id)
-            .filter(
-                EventGroup.group_id == group.id,
-                Event.event_type == "class",
-                Event.is_active == True,
-            )
-            .all()
-        )
+        event_datetimes = [dt for dt in events_by_group.get(group.id, []) if dt is not None]
 
-        if not class_events:
+        if not event_datetimes:
             should_be_over = False
         else:
-            event_datetimes = [row[0] for row in class_events if row[0] is not None]
             total_events = len(event_datetimes)
             planned_lessons = _resolve_planned_lessons(group, total_events)
             past_lessons = sum(1 for dt in event_datetimes if dt < now)
