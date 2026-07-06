@@ -3,6 +3,7 @@ import os
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.config import get_db
@@ -14,6 +15,7 @@ from src.schemas.models import (
 )
 from src.lesson_requests.services import create_lesson_request_record
 from src.lesson_requests.helpers import enrich_request, notify_approvers_of_request
+from src.services.email_service import send_invite_email
 
 router = APIRouter()
 
@@ -45,6 +47,41 @@ def _require_lms_teacher_id(
 @router.get("/health", dependencies=[Depends(_require_crm_internal_key)])
 async def crm_internal_health() -> dict[str, str]:
     return {"status": "ok", "service": "lms_crm_internal"}
+
+
+class SendInviteBody(BaseModel):
+    lms_user_id: int
+    password: str
+
+
+def _deliver_invite(user, password: str) -> dict:
+    """Send a student their LMS credentials. Pure decision + send; safe to unit-test.
+
+    Skips non-students and synthetic phone-only logins (…@import.local), which never
+    reach a real inbox. Returns {sent, reason}."""
+    if getattr(user, "role", None) != "student":
+        return {"sent": False, "reason": "not_student"}
+    email = (getattr(user, "email", "") or "").strip().lower()
+    if not email or "@" not in email or email.endswith("@import.local"):
+        return {"sent": False, "reason": "no_email"}
+    send_invite_email(email, user.name or "", email, password)
+    return {"sent": True, "reason": None}
+
+
+@router.post(
+    "/students/send-invite",
+    dependencies=[Depends(_require_crm_internal_key)],
+)
+async def crm_send_student_invite(
+    body: SendInviteBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Email a student their LMS login + password (invite). Called by CRM after it
+    provisions a new LMS account for a converted lead."""
+    user = db.query(UserInDB).filter(UserInDB.id == body.lms_user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="LMS user not found")
+    return _deliver_invite(user, body.password)
 
 
 @router.post(
