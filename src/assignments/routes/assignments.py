@@ -739,9 +739,9 @@ async def get_assignment(
     if not has_access and assignment.group_id and current_user.role != "student":
         from src.schemas.models import Group
 
-        if current_user.role == "admin":
+        if current_user.role in ("admin", "head_curator"):
             has_access = True
-            print("Access granted via admin role")
+            print(f"Access granted via {current_user.role} role")
         elif current_user.role == "teacher":
             group = db.query(Group).filter(Group.id == assignment.group_id).first()
             if group and group.teacher_id == current_user.id:
@@ -751,6 +751,23 @@ async def get_assignment(
             group = db.query(Group).filter(Group.id == assignment.group_id).first()
             if group and group.curator_id == current_user.id:
                 has_access = True
+        elif current_user.role == "head_teacher":
+            # Head teachers can view homework of groups linked to courses they manage.
+            from src.schemas.models import CourseGroupAccess, CourseHeadTeacher
+
+            managed_course_ids = [
+                c[0] for c in db.query(CourseHeadTeacher.course_id).filter(
+                    CourseHeadTeacher.head_teacher_id == current_user.id
+                ).all()
+            ]
+            if managed_course_ids:
+                link = db.query(CourseGroupAccess).filter(
+                    CourseGroupAccess.group_id == assignment.group_id,
+                    CourseGroupAccess.course_id.in_(managed_course_ids),
+                    CourseGroupAccess.is_active == True
+                ).first()
+                if link:
+                    has_access = True
     
     if not has_access:
         print(f"Access denied for user {current_user.id} to assignment {assignment_id}")

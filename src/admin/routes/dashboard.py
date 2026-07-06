@@ -1383,22 +1383,40 @@ async def get_curator_homework_by_group(
     Get homework data grouped by curator's groups with detailed student submissions.
     Returns groups with their assignments and student progress.
     """
-    if current_user.role not in ["curator", "head_curator"]:
-        raise HTTPException(status_code=403, detail="Only curators and head curators can access this endpoint")
+    if current_user.role not in ["curator", "head_curator", "head_teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Only curators, head curators, head teachers and admins can access this endpoint")
 
     sync_groups_over_status(db)
-    
-    from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group
-    
-    # Get curator's groups
-    if current_user.role == "head_curator":
-        # Include completed groups too so curator can review historical homework.
+
+    from src.schemas.models import Assignment, AssignmentSubmission, CourseGroupAccess, Group, CourseHeadTeacher
+
+    # Get the supervisor's groups, scoped by role
+    if current_user.role in ["head_curator", "admin"]:
+        # Include completed groups too so they can review historical homework.
         curator_groups_query = db.query(Group)
+    elif current_user.role == "head_teacher":
+        # Head teachers see groups linked to the courses they manage.
+        managed_course_ids = [
+            c[0] for c in db.query(CourseHeadTeacher.course_id).filter(
+                CourseHeadTeacher.head_teacher_id == current_user.id
+            ).all()
+        ]
+        managed_group_ids = []
+        if managed_course_ids:
+            managed_group_ids = [
+                ga.group_id for ga in db.query(CourseGroupAccess).filter(
+                    CourseGroupAccess.course_id.in_(managed_course_ids),
+                    CourseGroupAccess.is_active == True
+                ).all()
+            ]
+        if not managed_group_ids:
+            return {"groups": []}
+        curator_groups_query = db.query(Group).filter(Group.id.in_(managed_group_ids))
     else:
         curator_groups_query = db.query(Group).filter(
             Group.curator_id == current_user.id
         )
-        
+
     if group_id:
         curator_groups_query = curator_groups_query.filter(Group.id == group_id)
     
@@ -1420,6 +1438,8 @@ async def get_curator_homework_by_group(
                 "group_id": group.id,
                 "group_name": group.name,
                 "is_over": group.is_over,
+                "teacher_id": group.teacher_id,
+                "teacher_name": group.teacher.name if group.teacher else None,
                 "students_count": 0,
                 "assignments": []
             })
@@ -1564,10 +1584,12 @@ async def get_curator_homework_by_group(
             "group_id": group.id,
             "group_name": group.name,
             "is_over": group.is_over,
+            "teacher_id": group.teacher_id,
+            "teacher_name": group.teacher.name if group.teacher else None,
             "students_count": len(group_student_ids),
             "assignments": assignments_data
         })
-    
+
     return {"groups": result}
 
 
