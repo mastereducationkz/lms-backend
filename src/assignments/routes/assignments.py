@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, and_, select
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import json
+import os
+import uuid
 
 from src.config import get_db
 from src.schemas.models import (
@@ -21,6 +23,7 @@ from src.schemas.models import GroupStudent
 from src.services.event_service import EventService
 from src.routes.gamification import award_points
 from src.utils.course_access import student_can_see_homework_for_course
+from src.services import storage_service
 
 
 def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
@@ -949,6 +952,57 @@ async def delete_assignment(
 # ASSIGNMENT SUBMISSIONS
 # =============================================================================
 
+_ALLOWED_AUDIO_MIMES = frozenset(
+    {
+        "audio/webm",
+        "audio/ogg",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/wav",
+        "audio/x-m4a",
+        "audio/aac",
+    }
+)
+
+
+def _is_allowed_audio(content_type: str) -> bool:
+    """True if content_type (possibly with a ';codecs=...' suffix, any case) is an
+    allowed audio MIME type for homework recordings."""
+    ct = (content_type or "").strip().lower()
+    ct = ct.split(";", 1)[0].strip()
+    return ct in _ALLOWED_AUDIO_MIMES
+
+
+@router.post("/upload-audio")
+async def upload_audio(
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """Upload a recorded audio homework submission (students only)."""
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can upload audio")
+
+    contents = await file.read()
+    if len(contents) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size must be less than 15MB")
+
+    if not _is_allowed_audio(file.content_type or ""):
+        raise HTTPException(
+            status_code=400,
+            detail="Only audio files are allowed (webm, ogg, mp4, mpeg, mp3, wav, m4a, aac)",
+        )
+
+    # Generate unique filename
+    file_ext = os.path.splitext(file.filename)[1] if file.filename else ".webm"
+    unique_filename = f"{current_user.id}_{uuid.uuid4()}{file_ext}"
+
+    # Save file
+    file_url = storage_service.save(f"assignment_audio/{unique_filename}", contents, file.content_type)
+
+    return {"url": file_url, "filename": unique_filename}
+
 @router.post("/{assignment_id}/submit", response_model=AssignmentSubmissionSchema)
 async def submit_assignment(
     assignment_id: int,
@@ -1036,8 +1090,10 @@ async def submit_assignment(
     
     # Auto-grade the assignment
     score = None
-    # Skip auto-grading for multi_task assignments to allow manual grading
-    if assignment.correct_answers and assignment.assignment_type != 'multi_task':
+    # Skip auto-grading for multi_task and audio assignments to allow manual grading.
+    # Audio submissions have no structured answers to check -- the recording itself
+    # is the submission, and only a teacher can judge it.
+    if assignment.correct_answers and assignment.assignment_type not in ('multi_task', 'audio'):
         try:
             correct_answers = json.loads(assignment.correct_answers)
             
@@ -2075,6 +2131,7 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
         "matching_text": ["items_to_match"],
         "free_text": ["question"],
         "file_upload": ["question", "allowed_file_types"],
+        "audio": ["question"],
         "multi_task": ["tasks"]  # Multi-task assignment
     }
     

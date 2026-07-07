@@ -282,7 +282,8 @@ def validate_answer_format(assignment_type: str, answers: Dict[str, Any]) -> boo
         "matching": ["matches"],
         "matching_text": ["matches"],
         "free_text": ["text"],
-        "file_upload": ["file_uploaded"]
+        "file_upload": ["file_uploaded"],
+        "audio": []
     }
     
     if assignment_type not in required_fields:
