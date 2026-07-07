@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, and_, or_
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, date
 import math
 import json
@@ -2879,49 +2879,135 @@ async def get_teacher_students_progress(
         raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
     
     from src.schemas.models import CourseGroupAccess, Group, StudentCourseSummary
-    from src.progress.services.lesson_completion import calculate_student_module_progress
-    
+    from src.progress.services.lesson_completion import calculate_module_progress_for_students
+
     # Get teacher's groups (groups where this teacher is the owner)
     teacher_groups = db.query(Group).filter(
         Group.teacher_id == current_user.id,
         Group.is_active == True
     ).all()
-    
+
     if not teacher_groups:
         return {"students_progress": []}
-    
+
     teacher_group_ids = [g.id for g in teacher_groups]
     teacher_groups_map = {g.id: g for g in teacher_groups}
-    
+
     # Get all students from teacher's groups with their group info
     group_student_records = db.query(GroupStudent).filter(
         GroupStudent.group_id.in_(teacher_group_ids)
     ).all()
-    
+
     if not group_student_records:
         return {"students_progress": []}
-    
+
+    # --- Pass 1: figure out, for each student, which group "wins" (first
+    # occurrence in group_student_records, exactly as the original loop did),
+    # without touching the DB yet. This preserves the original dedupe order. ---
+    winning_group_by_student: Dict[int, int] = {}
+    ordered_student_ids: List[int] = []
+    for gs in group_student_records:
+        if gs.student_id in winning_group_by_student:
+            continue
+        winning_group_by_student[gs.student_id] = gs.group_id
+        ordered_student_ids.append(gs.student_id)
+
+    # --- Bulk-load everything needed, in a handful of queries total. ---
+    students_map = {
+        u.id: u
+        for u in db.query(UserInDB).filter(UserInDB.id.in_(ordered_student_ids)).all()
+    }
+
+    used_group_ids = list({gid for gid in winning_group_by_student.values()})
+    access_rows = (
+        db.query(CourseGroupAccess)
+        .filter(
+            CourseGroupAccess.group_id.in_(used_group_ids),
+            CourseGroupAccess.is_active == True,
+        )
+        .all()
+        if used_group_ids else []
+    )
+    access_by_group: Dict[int, list] = {}
+    for access in access_rows:
+        access_by_group.setdefault(access.group_id, []).append(access)
+
+    all_course_ids = list({access.course_id for access in access_rows})
+    courses_map = {
+        c.id: c
+        for c in db.query(Course).filter(
+            Course.id.in_(all_course_ids),
+            Course.is_active == True,
+        ).all()
+    } if all_course_ids else {}
+
+    # Which students need progress for which course.
+    student_ids_by_course: Dict[int, set] = {}
+    for student_id in ordered_student_ids:
+        group_id = winning_group_by_student[student_id]
+        for access in access_by_group.get(group_id, []):
+            if access.course_id in courses_map:
+                student_ids_by_course.setdefault(access.course_id, set()).add(student_id)
+
+    # Batch-compute module progress once per course (not once per student).
+    progress_by_course: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    for course_id, student_id_set in student_ids_by_course.items():
+        progress_by_course[course_id] = calculate_module_progress_for_students(
+            db, list(student_id_set), course_id
+        )
+
+    # Bulk last-activity: max StepProgress.visited_at per (user, course).
+    last_activity_map: Dict[tuple, Any] = {}
+    if ordered_student_ids and all_course_ids:
+        for user_id, course_id, last_visit in (
+            db.query(
+                StepProgress.user_id,
+                StepProgress.course_id,
+                func.max(StepProgress.visited_at),
+            )
+            .filter(
+                StepProgress.user_id.in_(ordered_student_ids),
+                StepProgress.course_id.in_(all_course_ids),
+            )
+            .group_by(StepProgress.user_id, StepProgress.course_id)
+            .all()
+        ):
+            last_activity_map[(user_id, course_id)] = last_visit
+
+    # Bulk fallback: StudentCourseSummary.last_activity_at per (user, course).
+    summary_activity_map: Dict[tuple, Any] = {}
+    if ordered_student_ids and all_course_ids:
+        for user_id, course_id, last_activity_at in (
+            db.query(
+                StudentCourseSummary.user_id,
+                StudentCourseSummary.course_id,
+                StudentCourseSummary.last_activity_at,
+            )
+            .filter(
+                StudentCourseSummary.user_id.in_(ordered_student_ids),
+                StudentCourseSummary.course_id.in_(all_course_ids),
+            )
+            .all()
+        ):
+            summary_activity_map[(user_id, course_id)] = last_activity_at
+
     students_data = []
     student_ids_seen = set()
-    
-    # Process each student from teacher's groups
+
+    # --- Pass 2: build the output rows, same shape/order/dedupe as before. ---
     for gs in group_student_records:
         if gs.student_id in student_ids_seen:
             continue
-            
-        student = db.query(UserInDB).filter(UserInDB.id == gs.student_id).first()
+
+        student = students_map.get(gs.student_id)
         if not student:
             continue
-        
+
         group = teacher_groups_map.get(gs.group_id)
         group_name = group.name if group else None
-        
-        # Get courses that this student's group has access to
-        group_course_access = db.query(CourseGroupAccess).filter(
-            CourseGroupAccess.group_id == gs.group_id,
-            CourseGroupAccess.is_active == True
-        ).all()
-        
+
+        group_course_access = access_by_group.get(gs.group_id, [])
+
         if not group_course_access:
             # Student has no courses assigned - still show them
             students_data.append({
@@ -2940,31 +3026,29 @@ async def get_teacher_students_progress(
             })
             student_ids_seen.add(gs.student_id)
             continue
-        
+
         # For each course the student has access to
         for access in group_course_access:
-            course = db.query(Course).filter(
-                Course.id == access.course_id,
-                Course.is_active == True
-            ).first()
-            
+            course = courses_map.get(access.course_id)
+
             if not course:
                 continue
 
-            module_progress = calculate_student_module_progress(db, student.id, course.id)
+            module_progress = progress_by_course.get(course.id, {}).get(student.id)
+            if module_progress is None:
+                # Defensive fallback; should not happen given the bulk load above.
+                module_progress = {
+                    "current_module_id": None,
+                    "current_module_title": None,
+                    "current_module_progress": 0,
+                    "overall_progress": 0,
+                    "completed_modules": 0,
+                    "total_modules": 0,
+                }
 
-            last_activity = db.query(func.max(StepProgress.visited_at)).filter(
-                StepProgress.user_id == student.id,
-                StepProgress.course_id == course.id,
-            ).scalar()
-
+            last_activity = last_activity_map.get((student.id, course.id))
             if not last_activity:
-                summary = db.query(StudentCourseSummary).filter(
-                    StudentCourseSummary.user_id == student.id,
-                    StudentCourseSummary.course_id == course.id,
-                ).first()
-                if summary:
-                    last_activity = summary.last_activity_at
+                last_activity = summary_activity_map.get((student.id, course.id))
 
             students_data.append({
                 "student_id": student.id,
@@ -2982,12 +3066,12 @@ async def get_teacher_students_progress(
                 "total_modules": module_progress["total_modules"],
                 "last_activity": last_activity,
             })
-        
+
         student_ids_seen.add(gs.student_id)
-    
+
     # Sort by last activity (most recent first), then by student name
     students_data.sort(key=lambda x: (x["last_activity"] or datetime.min, x["student_name"]), reverse=True)
-    
+
     return {"students_progress": students_data}
 
 

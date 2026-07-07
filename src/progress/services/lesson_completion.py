@@ -250,6 +250,175 @@ def calculate_student_module_progress(
     }
 
 
+def calculate_module_progress_for_students(
+    db: Session,
+    student_ids: List[int],
+    course_id: int,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Batched equivalent of calculate_student_module_progress() for many students
+    against the SAME course. The course structure (modules/lessons/steps) is
+    identical for every student, so it is loaded ONCE here instead of once per
+    student, eliminating the N+1 query pattern. The per-student results are
+    computed with the exact same semantics as calculate_student_module_progress.
+    """
+    if not student_ids:
+        return {}
+
+    student_ids = list(dict.fromkeys(student_ids))  # de-dup, preserve order
+
+    # 1) Course structure, loaded once.
+    modules = (
+        db.query(Module)
+        .filter(Module.course_id == course_id)
+        .order_by(Module.order_index)
+        .all()
+    )
+    module_ids = [m.id for m in modules]
+
+    lessons_by_module: Dict[int, List[Lesson]] = {mid: [] for mid in module_ids}
+    if module_ids:
+        all_lessons = (
+            db.query(Lesson)
+            .filter(Lesson.module_id.in_(module_ids))
+            .order_by(Lesson.order_index)
+            .all()
+        )
+        for lesson in all_lessons:
+            lessons_by_module.setdefault(lesson.module_id, []).append(lesson)
+
+    all_lesson_ids = [
+        lesson.id for lessons in lessons_by_module.values() for lesson in lessons
+    ]
+
+    steps_by_lesson: Dict[int, List[Step]] = {lid: [] for lid in all_lesson_ids}
+    if all_lesson_ids:
+        all_steps = (
+            db.query(Step)
+            .filter(Step.lesson_id.in_(all_lesson_ids))
+            .all()
+        )
+        for step in all_steps:
+            steps_by_lesson.setdefault(step.lesson_id, []).append(step)
+
+    # Ordered list of (lesson, lesson_total, counting_step_ids) mirroring the
+    # exact required-vs-all-steps fallback used by calculate_student_module_progress,
+    # in the same module/lesson traversal order.
+    lesson_specs: List[Dict[str, Any]] = []
+    step_id_to_lesson_id: Dict[int, int] = {}
+    for module in modules:
+        for lesson in lessons_by_module.get(module.id, []):
+            steps = steps_by_lesson.get(lesson.id, [])
+            required_step_ids = [s.id for s in steps if not s.is_optional]
+            if not required_step_ids:
+                required_step_ids = [s.id for s in steps]
+            lesson_total = len(required_step_ids)
+            if lesson_total == 0:
+                continue
+
+            lesson_specs.append({
+                "lesson_id": lesson.id,
+                "lesson_title": lesson.title,
+                "lesson_total": lesson_total,
+            })
+            for step_id in required_step_ids:
+                step_id_to_lesson_id[step_id] = lesson.id
+
+    all_counting_step_ids = list(step_id_to_lesson_id.keys())
+
+    # 2) Per-student completed-step counts, in one query.
+    completed_counts: Dict[int, Dict[int, int]] = {sid: {} for sid in student_ids}
+    if all_counting_step_ids:
+        rows = (
+            db.query(StepProgress.user_id, StepProgress.step_id)
+            .filter(
+                StepProgress.user_id.in_(student_ids),
+                StepProgress.step_id.in_(all_counting_step_ids),
+                StepProgress.status == "completed",
+            )
+            .all()
+        )
+        for user_id, step_id in rows:
+            lesson_id = step_id_to_lesson_id.get(step_id)
+            if lesson_id is None:
+                continue
+            lesson_counts = completed_counts.setdefault(user_id, {})
+            lesson_counts[lesson_id] = lesson_counts.get(lesson_id, 0) + 1
+
+    # 3) Per-student completed lesson ids (StudentProgress), in one query.
+    completed_lesson_ids_by_user: Dict[int, set] = {sid: set() for sid in student_ids}
+    lesson_progress_rows = (
+        db.query(StudentProgress.user_id, StudentProgress.lesson_id)
+        .filter(
+            StudentProgress.user_id.in_(student_ids),
+            StudentProgress.course_id == course_id,
+            StudentProgress.lesson_id.isnot(None),
+            StudentProgress.status == "completed",
+        )
+        .all()
+    )
+    for user_id, lesson_id in lesson_progress_rows:
+        completed_lesson_ids_by_user.setdefault(user_id, set()).add(lesson_id)
+
+    # 4) Compute the per-student result using the shared structure.
+    results: Dict[int, Dict[str, Any]] = {}
+    for student_id in student_ids:
+        completed_lesson_ids = completed_lesson_ids_by_user.get(student_id, set())
+        student_completed = completed_counts.get(student_id, {})
+
+        total_lessons = 0
+        completed_lessons = 0
+        current_lesson_title: Optional[str] = None
+        current_lesson_id: Optional[int] = None
+        current_lesson_progress = 0
+        last_lesson_title: Optional[str] = None
+        last_lesson_id: Optional[int] = None
+
+        for spec in lesson_specs:
+            lesson_id = spec["lesson_id"]
+            lesson_total = spec["lesson_total"]
+
+            total_lessons += 1
+            last_lesson_title = spec["lesson_title"]
+            last_lesson_id = lesson_id
+
+            completed_steps = student_completed.get(lesson_id, 0)
+            is_complete = _is_lesson_complete_for_user(
+                lesson_id,
+                lesson_total,
+                completed_steps,
+                completed_lesson_ids,
+            )
+
+            if is_complete:
+                completed_lessons += 1
+            elif current_lesson_title is None:
+                current_lesson_title = spec["lesson_title"]
+                current_lesson_id = lesson_id
+                current_lesson_progress = round((completed_steps / lesson_total) * 100)
+
+        if current_lesson_title is None and total_lessons > 0:
+            current_lesson_title = last_lesson_title
+            current_lesson_id = last_lesson_id
+            current_lesson_progress = 100
+
+        overall_progress = (
+            round((completed_lessons / total_lessons) * 100)
+            if total_lessons > 0 else 0
+        )
+
+        results[student_id] = {
+            "overall_progress": overall_progress,
+            "completed_modules": completed_lessons,
+            "total_modules": total_lessons,
+            "current_module_title": current_lesson_title,
+            "current_module_id": current_lesson_id,
+            "current_module_progress": current_lesson_progress,
+        }
+
+    return results
+
+
 def get_user_lesson_progress_summary(
     db: Session,
     user_id: int,
