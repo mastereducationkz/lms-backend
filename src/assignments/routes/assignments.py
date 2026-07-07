@@ -2378,6 +2378,14 @@ async def get_assignment_types():
                 }
             },
             {
+                "type": "audio",
+                "name": "Audio Recording",
+                "description": "Студент записывает голосовое сообщение прямо на платформе; учитель прослушивает и оценивает",
+                "schema": {
+                    "question": "str (prompt shown to the student)"
+                }
+            },
+            {
                 "type": "multi_task",
                 "name": "Multi-Task Homework",
                 "description": "Домашнее задание с несколькими задачами разных типов",
