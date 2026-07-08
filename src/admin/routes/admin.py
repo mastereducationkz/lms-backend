@@ -186,7 +186,7 @@ class CreateGroupRequest(BaseModel):
     description: Optional[str] = None
     teacher_id: Optional[int] = None
     curator_id: Optional[int] = None
-    course_id: Optional[int] = None  # Курс, к которому привязана группа
+    course_id: int  # Курс, к которому привязана группа (обязателен при создании)
     is_active: bool = True
     is_special: bool = False
     is_over: bool = False
@@ -1088,13 +1088,12 @@ async def create_group(
             if not curator:
                 raise HTTPException(status_code=400, detail="Curator not found")
 
-    if group_data.course_id:
-        course = db.query(Course).filter(Course.id == group_data.course_id).first()
-        if not course:
-            raise HTTPException(status_code=400, detail="Course not found")
+    course = db.query(Course).filter(Course.id == group_data.course_id).first()
+    if not course:
+        raise HTTPException(status_code=400, detail="Course not found")
 
     max_for_access: Optional[int] = None
-    if group_data.is_special and group_data.course_id:
+    if group_data.is_special:
         max_for_access = group_data.max_open_lessons if group_data.max_open_lessons is not None else 1
         if max_for_access < 1:
             raise HTTPException(status_code=400, detail="max_open_lessons must be at least 1")
@@ -1120,16 +1119,15 @@ async def create_group(
     db.commit()
     db.refresh(new_group)
 
-    if group_data.course_id:
-        course_access = CourseGroupAccess(
-            course_id=group_data.course_id,
-            group_id=new_group.id,
-            granted_by=current_user.id,
-            is_active=True,
-            max_open_lessons=max_for_access,
-        )
-        db.add(course_access)
-        db.commit()
+    course_access = CourseGroupAccess(
+        course_id=group_data.course_id,
+        group_id=new_group.id,
+        granted_by=current_user.id,
+        is_active=True,
+        max_open_lessons=max_for_access,
+    )
+    db.add(course_access)
+    db.commit()
 
     group_response = GroupSchema(
         id=new_group.id,
