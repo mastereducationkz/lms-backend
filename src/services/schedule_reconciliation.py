@@ -111,6 +111,13 @@ def reconcile_group_schedule(
     created = 0
     created_event_ids_by_dt: dict = {}
     for target_dt, lesson_number in unmatched_desired:
+        # Never (re)create PAST lessons. Matching above only considers
+        # future_events, so every past desired slot lands here "unmatched" even
+        # though its past event already exists in past_events. Creating it would
+        # spawn a duplicate on every schedule (re)generation — the root cause of
+        # the doubled/tripled past lessons. Past is history: leave it untouched.
+        if _as_utc(target_dt) < now_utc:
+            continue
         end_dt = target_dt + timedelta(minutes=60)
         new_event = Event(
             title=f"{group_name}: Lesson {lesson_number}",
