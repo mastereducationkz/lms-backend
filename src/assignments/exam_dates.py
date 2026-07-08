@@ -11,14 +11,13 @@ SAT_OFFICIAL_TEST_DATES = [
     date(2026, 3, 14),
     date(2026, 5, 2),
     date(2026, 6, 6),
-    # 2026–27 school year — VERIFY against the official College Board calendar
-    # before relying on these; edit here if any date is off.
+    # 2026–27 school year (College Board official calendar)
     date(2026, 8, 22),
     date(2026, 9, 12),
     date(2026, 10, 3),
     date(2026, 11, 7),
     date(2026, 12, 5),
-    date(2027, 3, 13),
+    date(2027, 3, 6),
     date(2027, 5, 1),
     date(2027, 6, 5),
 ]
