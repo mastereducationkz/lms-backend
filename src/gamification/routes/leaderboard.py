@@ -1096,6 +1096,7 @@ async def get_group_full_attendance_matrix(
             "lesson_number": idx + 1,
             "event_id": event.id,
             "title": event.title,
+            "topic": getattr(event, "topic", None),
             "start_datetime": event.start_datetime
         })
 
@@ -1506,6 +1507,78 @@ async def update_attendance_bulk(
 
     db.commit()
     return {"status": "success", "updated_count": updated_count}
+
+
+class LessonTopicInputSchema(BaseModel):
+    group_id: int
+    event_id: int
+    topic: Optional[str] = None
+
+
+@router.post("/curator/lesson-topic")
+async def set_lesson_topic(
+    data: LessonTopicInputSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """
+    Set (or clear) the editable topic of a class-session lesson.
+
+    Mirrors the auth/materialization of /curator/attendance/bulk: the event_id
+    may be a virtual LessonSchedule/recurring id, which is materialized into a
+    real Event before the topic is stored. A blank topic clears it to NULL.
+    """
+    if current_user.role not in ["curator", "admin", "teacher", "head_teacher", "head_curator"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    from src.services.event_service import EventService
+    from src.schemas.models import EventCourse
+
+    group = db.query(Group).filter(Group.id == data.group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    # Role-based restriction (same posture as bulk attendance)
+    if current_user.role == "curator" and group.curator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+    if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+    if current_user.role == "head_teacher" and not head_teacher_can_access_group(db, current_user.id, data.group_id):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+
+    real_event_id = EventService.resolve_event_id(db, data.event_id, user_id=current_user.id)
+    if not real_event_id:
+        raise HTTPException(status_code=404, detail="Event could not be resolved/materialized")
+    db.flush()  # ensure freshly-materialized EventGroup links are queryable below
+
+    event = db.query(Event).filter(Event.id == real_event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # The event must belong to this group — directly, or via a course the group accesses.
+    belongs = db.query(EventGroup.id).filter(
+        EventGroup.event_id == real_event_id,
+        EventGroup.group_id == data.group_id,
+    ).first()
+    if not belongs:
+        belongs = (
+            db.query(EventCourse.id)
+            .join(CourseGroupAccess, CourseGroupAccess.course_id == EventCourse.course_id)
+            .filter(
+                EventCourse.event_id == real_event_id,
+                CourseGroupAccess.group_id == data.group_id,
+                CourseGroupAccess.is_active == True,
+            )
+            .first()
+        )
+    if not belongs:
+        raise HTTPException(status_code=403, detail="Event does not belong to this group")
+
+    topic = (data.topic or "").strip()
+    event.topic = topic[:200] if topic else None
+    db.commit()
+
+    return {"status": "success", "event_id": real_event_id, "topic": event.topic}
 
 @router.post("/curator/attendance")
 async def update_attendance(
