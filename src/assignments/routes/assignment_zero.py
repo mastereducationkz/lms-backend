@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import os
 import uuid
 
@@ -18,6 +18,7 @@ from src.assignments.exam_dates import (
     SAT_OFFICIAL_TEST_DATES,
     parse_sat_target_date,
     format_sat_label,
+    get_nearest_sat_date,
 )
 
 router = APIRouter()
@@ -617,6 +618,101 @@ async def get_ielts_date_prompt_status(
         "days_until_next_prompt": 0 if should_prompt else remaining_days,
         "last_prompted_at": last_prompted,
         "next_prompt_at": next_prompt_at,
+    }
+
+
+@router.get("/exam-countdown")
+async def get_exam_countdown(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Resolve the exam date to count down to for the dashboard widget.
+
+    Priority: the student's planned date from Assignment Zero (nearest upcoming
+    of SAT/IELTS) -> else the nearest official SAT date for SAT students ->
+    else none (IELTS students with no set date get a placeholder to set one).
+    ``can_edit`` is true only when an Assignment Zero submission exists (that's
+    what PATCH /planned-date updates); otherwise the UI links to Assignment Zero.
+    """
+    not_applicable = {
+        "applicable": False, "available_exams": [], "default_exam": None,
+        "exams": {}, "sat_official_dates": [],
+    }
+    if current_user.role != "student":
+        return not_applicable
+    # Special-group-only students don't complete Assignment Zero.
+    if student_has_only_special_groups(current_user.id, db):
+        return not_applicable
+
+    submission = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == current_user.id
+    ).first()
+
+    group_students = db.query(GroupStudent).filter(
+        GroupStudent.student_id == current_user.id
+    ).all()
+    group_ids = [gs.group_id for gs in group_students]
+    program_types: set[str] = set()
+    names: list[str] = []
+    if group_ids:
+        groups = db.query(Group).filter(Group.id.in_(group_ids)).all()
+        program_types = {(g.program_type or "").lower() for g in groups}
+        names = [g.name.lower() for g in groups if g.name]
+
+    # Applicability is driven ONLY by SAT/IELTS group membership. A student in
+    # just a NUET or General English group (or any non-SAT/IELTS group) gets no
+    # countdown, even if they filled SAT/IELTS fields in Assignment Zero.
+    is_sat = "sat" in program_types or any("sat" in n for n in names)
+    is_ielts = "ielts" in program_types or any("ielts" in n for n in names)
+
+    today = date.today()
+    can_edit = submission is not None
+    sat_official_dates = [d.isoformat() for d in SAT_OFFICIAL_TEST_DATES if d >= today]
+
+    available: list[str] = []
+    if is_sat:
+        available.append("sat")
+    if is_ielts:
+        available.append("ielts")
+
+    def _build_exam(kind: str) -> dict:
+        if kind == "sat":
+            if submission and submission.sat_planned_test_date:
+                td, source = submission.sat_planned_test_date, "planned"
+            else:
+                td, source = get_nearest_sat_date(today), "nearest_official"
+        else:  # ielts — no official calendar to fall back to
+            if submission and submission.ielts_planned_test_date:
+                td, source = submission.ielts_planned_test_date, "planned"
+            else:
+                td, source = None, None
+        return {
+            "target_date": td.isoformat() if td else None,
+            "days_left": (td - today).days if td else None,
+            "source": source,
+            "can_edit": can_edit,
+        }
+
+    exams = {kind: _build_exam(kind) for kind in available}
+
+    # Default to the exam with the nearest upcoming date; else the first available
+    # (SAT is appended first when present).
+    default_exam = None
+    if available:
+        upcoming = [
+            k for k in available
+            if exams[k]["days_left"] is not None and exams[k]["days_left"] >= 0
+        ]
+        default_exam = (
+            min(upcoming, key=lambda k: exams[k]["target_date"]) if upcoming else available[0]
+        )
+
+    return {
+        "applicable": bool(available),
+        "available_exams": available,
+        "default_exam": default_exam,
+        "exams": exams,
+        "sat_official_dates": sat_official_dates,
     }
 
 
