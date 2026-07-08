@@ -12,12 +12,16 @@ SAT_API_KEY = os.getenv("MASTEREDU_API_KEY", "")
 
 class SATService:
     @staticmethod
-    async def _post(path: str, payload: Dict[str, Any], timeout: float = 20.0) -> Dict[str, Any]:
+    async def _post(path: str, payload: Dict[str, Any], timeout: float = 20.0,
+                    exam_type: Optional[str] = None) -> Dict[str, Any]:
         url = f"{SAT_API_BASE_URL}{path}"
         headers = {
             "X-API-Key": SAT_API_KEY,
             "Content-Type": "application/json"
         }
+        # Selects which product's weekly set the endpoint reports (absent ⇒ SAT).
+        if exam_type:
+            headers["X-Exam-Type"] = exam_type
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, headers=headers, json=payload, timeout=timeout)
@@ -63,11 +67,13 @@ class SATService:
         return {"results": all_results}
 
     @staticmethod
-    async def fetch_batch_scores_by_date(emails: List[str], date_str: str) -> Dict[str, Any]:
+    async def fetch_batch_scores_by_date(emails: List[str], date_str: str,
+                                         exam_type: Optional[str] = None) -> Dict[str, Any]:
         """
-        Fetch SAT section scores by date for a batch of students.
+        Fetch section scores by date for a batch of students.
         Expected endpoint:
           POST /api/lms/students/batch-scores-by-date
+        exam_type selects the weekly-set product ("NUET" for NUET; None/"SAT" ⇒ SAT).
         """
         if not emails:
             return {"results": []}
@@ -76,21 +82,25 @@ class SATService:
             "emails": emails,
             "date": date_str,
         }
-        data = await SATService._post("/students/batch-scores-by-date", payload, timeout=20.0)
+        data = await SATService._post("/students/batch-scores-by-date", payload, timeout=20.0,
+                                      exam_type=exam_type)
         return data if data else {"results": []}
 
     @staticmethod
-    async def fetch_scores_by_date(email: str, date_str: str) -> Dict[str, Any]:
+    async def fetch_scores_by_date(email: str, date_str: str,
+                                   exam_type: Optional[str] = None) -> Dict[str, Any]:
         """
-        Fetch SAT section scores by date for one student.
+        Fetch section scores by date for one student.
         Expected endpoint:
           POST /api/lms/students/scores-by-date
+        exam_type selects the weekly-set product ("NUET" for NUET; None/"SAT" ⇒ SAT).
         """
         payload = {
             "email": email,
             "date": date_str,
         }
-        data = await SATService._post("/students/scores-by-date", payload, timeout=15.0)
+        data = await SATService._post("/students/scores-by-date", payload, timeout=15.0,
+                                      exam_type=exam_type)
         return data if data else {}
 
     SAT_MATH_TOTAL_DEFAULT = 22
@@ -117,6 +127,28 @@ class SATService:
             "verbal_correct": item.get("verbalCorrectCount"),
             "math_total": math_total,
             "verbal_total": verbal_total,
+        }
+
+    @staticmethod
+    def extract_weekly_set(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Normalize the `weeklySet` object returned by the scores-by-date endpoints
+        into snake_case. Returns None when no weekly set matches the date.
+        Scaled scores are null when the student hasn't taken that section.
+        """
+        ws = item.get("weeklySet")
+        if not ws:
+            return None
+        return {
+            "id": ws.get("id"),
+            "name": ws.get("name"),
+            "week_number": ws.get("weekNumber"),
+            "exam_type": ws.get("examType"),
+            "verbal_scaled": ws.get("verbalScaled"),
+            "math_scaled": ws.get("mathScaled"),
+            "total": ws.get("total"),
+            "completed": ws.get("completed"),
+            "completed_at": ws.get("completedAt"),
         }
 
     @staticmethod
