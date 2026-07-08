@@ -1733,6 +1733,7 @@ async def get_curator_student_homework(
                 "title": assignment.title,
                 "group_id": group.id,
                 "group_name": group.name,
+                "program_type": getattr(group, "program_type", None),
                 "due_date": assignment.due_date.isoformat() if assignment.due_date else None,
                 "max_score": assignment.max_score,
                 "assignment_type": assignment.assignment_type,
