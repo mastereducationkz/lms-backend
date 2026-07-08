@@ -306,6 +306,7 @@ async def get_student_profile(
         {
             "event_id": att.event_id,
             "event_title": ev.title,
+            "event_topic": ev.topic,
             "event_date": ev.start_datetime.isoformat(),
             "status": attendance_status_to_ui(att.status),
             "activity_score": att.activity_score,

@@ -11,6 +11,9 @@ class Event(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
+    # Optional lesson topic/subject shown alongside the auto-generated "Group: Lesson N"
+    # title (e.g. in the curator attendance view). Editable per class session.
+    topic = Column(String, nullable=True)
     event_type = Column(String, nullable=False)
     start_datetime = Column(DateTime, nullable=False)
     end_datetime = Column(DateTime, nullable=False)

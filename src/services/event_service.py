@@ -91,6 +91,7 @@ class EventService:
                         id=pseudo_id,
                         title=parent.title,
                         description=parent.description,
+                        topic=parent.topic,
                         event_type=parent.event_type,
                         start_datetime=current_start,
                         end_datetime=current_start + duration,
