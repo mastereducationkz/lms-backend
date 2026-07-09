@@ -25,6 +25,7 @@ class GroupSchema(BaseModel):
     is_over: bool = False
     group_type: GroupTypeLiteral = "group"
     program_type: ProgramTypeLiteral = "general_english"
+    weekly_set_week_offset: int = 0
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None

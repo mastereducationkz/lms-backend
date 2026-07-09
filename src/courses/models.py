@@ -23,6 +23,11 @@ class Group(Base):
     # SAT / IELTS / General English / NUET — для фильтрации и поиска
     program_type = Column(String(32), nullable=False, default="general_english")
 
+    # Corrects week-number → content-week drift for groups that start mid-week
+    # (partial first week ⇒ content Week 1 lands in the group's week 2, so offset=1).
+    # Applied when resolving NUET weekly sets: content_week = leaderboard_week − offset.
+    weekly_set_week_offset = Column(Integer, nullable=False, default=0, server_default="0")
+
     teacher = relationship("UserInDB", foreign_keys=[teacher_id], post_update=True)
     curator = relationship("UserInDB", foreign_keys=[curator_id], post_update=True)
     students = relationship("GroupStudent", back_populates="group", cascade="all, delete-orphan")

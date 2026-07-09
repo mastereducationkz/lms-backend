@@ -192,10 +192,48 @@ async def get_curator_groups(
             is_over=group.is_over,
             group_type=getattr(group, "group_type", None) or "group",
             program_type=getattr(group, "program_type", None) or "general_english",
+            weekly_set_week_offset=getattr(group, "weekly_set_week_offset", 0) or 0,
             current_week=current_week,
             max_week=max_week
         ))
     return result
+
+
+class GroupWeekOffsetInputSchema(BaseModel):
+    group_id: int
+    offset: int
+
+
+@router.post("/curator/group-week-offset")
+async def set_group_week_offset(
+    data: GroupWeekOffsetInputSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """
+    Set the per-group week offset that aligns leaderboard weeks with the content-week
+    numbers of NUET weekly sets (content_week = leaderboard_week − offset). Used when a
+    group starts mid-week so its schedule is shifted from the content weeks.
+    """
+    if current_user.role not in ["curator", "admin", "teacher", "head_teacher", "head_curator"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    group = db.query(Group).filter(Group.id == data.group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if current_user.role == "curator" and group.curator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+    if current_user.role == "teacher" and group.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+    if current_user.role == "head_teacher" and not head_teacher_can_access_group(db, current_user.id, data.group_id):
+        raise HTTPException(status_code=403, detail="Access denied to this group")
+
+    group.weekly_set_week_offset = max(0, min(52, int(data.offset)))
+    db.commit()
+
+    return {"status": "success", "group_id": group.id, "weekly_set_week_offset": group.weekly_set_week_offset}
+
 
 @router.get("/curator/leaderboard/{group_id}", response_model=List[dict])
 async def get_group_leaderboard(
@@ -832,19 +870,24 @@ async def get_weekly_lessons_with_hw_status(
                         break
             elif is_nuet_group:
                 # NUET weekly sets are named by course week ("(Week X)"), not by date, so the
-                # date-based endpoint never matches them. The "smart schedule" opens course weeks
-                # per group from its start date, so resolve by the group's week number instead.
-                score_payload = await SATService.fetch_batch_scores_by_week(
-                    emails, week_number, exam_type="NUET"
-                )
-                for item in (score_payload.get("results") or []):
-                    email = (item.get("email") or "").lower()
-                    student_id = email_to_id.get(email)
-                    if not student_id or student_id in sat_weekly_set_map:
-                        continue
-                    weekly_set = SATService.extract_weekly_set(item)
-                    if weekly_set:
-                        sat_weekly_set_map[student_id] = weekly_set
+                # date-based endpoint never matches them — resolve by content week number.
+                # Groups that start mid-week are shifted from the content weeks (a partial first
+                # week pushes content Week 1 into the group's week 2), so subtract the per-group
+                # offset: content_week = leaderboard_week − offset.
+                offset = getattr(group, "weekly_set_week_offset", 0) or 0
+                content_week = week_number - offset
+                if content_week >= 1:
+                    score_payload = await SATService.fetch_batch_scores_by_week(
+                        emails, content_week, exam_type="NUET"
+                    )
+                    for item in (score_payload.get("results") or []):
+                        email = (item.get("email") or "").lower()
+                        student_id = email_to_id.get(email)
+                        if not student_id or student_id in sat_weekly_set_map:
+                            continue
+                        weekly_set = SATService.extract_weekly_set(item)
+                        if weekly_set:
+                            sat_weekly_set_map[student_id] = weekly_set
             elif is_sat_group:
                 # SAT tests are date-named → resolve by iterating the week's candidate dates.
                 # Try: configured date → all 7 days of the week (Fri/Sat/Sun often have tests)
