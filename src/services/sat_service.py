@@ -87,6 +87,27 @@ class SATService:
         return data if data else {"results": []}
 
     @staticmethod
+    async def fetch_batch_scores_by_week(emails: List[str], week: int,
+                                         exam_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Fetch weekly-set results for a batch of students by course week number.
+        Expected endpoint:
+          POST /api/lms/students/batch-scores-by-week
+        For products whose tests are named by week, not date (NUET). exam_type
+        selects the product ("NUET"; None/"SAT" ⇒ SAT).
+        """
+        if not emails or not week:
+            return {"results": []}
+
+        payload = {
+            "emails": emails,
+            "week": week,
+        }
+        data = await SATService._post("/students/batch-scores-by-week", payload, timeout=20.0,
+                                      exam_type=exam_type)
+        return data if data else {"results": []}
+
+    @staticmethod
     async def fetch_scores_by_date(email: str, date_str: str,
                                    exam_type: Optional[str] = None) -> Dict[str, Any]:
         """

@@ -59,6 +59,29 @@ def test_fetch_forwards_exam_type(monkeypatch):
     assert captured["exam_type"] == "NUET"
 
 
+def test_fetch_by_week_forwards_week_and_exam_type(monkeypatch):
+    captured = {}
+
+    async def fake_post(path, payload, timeout=20.0, exam_type=None):
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["exam_type"] = exam_type
+        return {"results": []}
+
+    monkeypatch.setattr(SATService, "_post", staticmethod(fake_post))
+
+    asyncio.run(SATService.fetch_batch_scores_by_week(["a@b.c"], 5, exam_type="NUET"))
+    assert captured["path"] == "/students/batch-scores-by-week"
+    assert captured["payload"] == {"emails": ["a@b.c"], "week": 5}
+    assert captured["exam_type"] == "NUET"
+
+    # No emails / no week → short-circuits without calling the API
+    captured.clear()
+    assert asyncio.run(SATService.fetch_batch_scores_by_week([], 5)) == {"results": []}
+    assert asyncio.run(SATService.fetch_batch_scores_by_week(["a@b.c"], 0)) == {"results": []}
+    assert "path" not in captured
+
+
 def test_post_sets_exam_type_header(monkeypatch):
     captured = {}
 

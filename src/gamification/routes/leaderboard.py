@@ -830,11 +830,24 @@ async def get_weekly_lessons_with_hw_status(
 
                     if len(ielts_details_map) >= len(emails):
                         break
-            elif is_sat_group or is_nuet_group:
-                # SAT/NUET score-by-date endpoint uses DD.MM. Same endpoint for both;
-                # NUET is selected via the X-Exam-Type header (absent ⇒ SAT).
+            elif is_nuet_group:
+                # NUET weekly sets are named by course week ("(Week X)"), not by date, so the
+                # date-based endpoint never matches them. The "smart schedule" opens course weeks
+                # per group from its start date, so resolve by the group's week number instead.
+                score_payload = await SATService.fetch_batch_scores_by_week(
+                    emails, week_number, exam_type="NUET"
+                )
+                for item in (score_payload.get("results") or []):
+                    email = (item.get("email") or "").lower()
+                    student_id = email_to_id.get(email)
+                    if not student_id or student_id in sat_weekly_set_map:
+                        continue
+                    weekly_set = SATService.extract_weekly_set(item)
+                    if weekly_set:
+                        sat_weekly_set_map[student_id] = weekly_set
+            elif is_sat_group:
+                # SAT tests are date-named → resolve by iterating the week's candidate dates.
                 # Try: configured date → all 7 days of the week (Fri/Sat/Sun often have tests)
-                exam_type = "NUET" if is_nuet_group else None
                 candidate_dates_set = set()
                 if config and config.curator_hour_date:
                     candidate_dates_set.add(config.curator_hour_date)
@@ -848,7 +861,7 @@ async def get_weekly_lessons_with_hw_status(
                 for score_date_obj in candidate_dates:
                     score_date = score_date_obj.strftime("%d.%m")
                     score_payload = await SATService.fetch_batch_scores_by_date(
-                        emails, score_date, exam_type=exam_type
+                        emails, score_date
                     )
                     score_results = score_payload.get("results") or score_payload.get("data") or []
                     if not score_results:
