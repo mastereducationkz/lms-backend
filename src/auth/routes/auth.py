@@ -7,6 +7,7 @@ from src.utils.auth_utils import (
     verify_password,
     create_access_token,
     verify_token,
+    verify_bearer_token,
     create_refresh_token,
     create_password_reset_token,
     verify_password_reset_token,
@@ -182,7 +183,7 @@ async def refresh_token(request: RefreshTokenRequest, response: Response, db: Se
 @router.get("/me", response_model=UserSchema)
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Get current user information"""
-    payload = verify_token(token)
+    payload = verify_bearer_token(token)
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
@@ -198,7 +199,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
 @router.post("/logout")
 async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Logout user by invalidating refresh token"""
-    payload = verify_token(token)
+    payload = verify_bearer_token(token)
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -219,7 +220,7 @@ async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Se
 # Dependency for getting current user
 async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
     """Dependency to get current authenticated user"""
-    payload = verify_token(token)
+    payload = verify_bearer_token(token)
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     

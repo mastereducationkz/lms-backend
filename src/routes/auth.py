@@ -5,8 +5,9 @@ from sqlalchemy import func
 from src.utils.auth_utils import (
     hash_password, 
     verify_password, 
-    create_access_token, 
-    verify_token, 
+    create_access_token,
+    verify_token,
+    verify_bearer_token,
     create_refresh_token
 )
 from src.config import get_db
@@ -210,7 +211,7 @@ async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Se
 # Dependency for getting current user
 async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
     """Dependency to get current authenticated user"""
-    payload = verify_token(token)
+    payload = verify_bearer_token(token)
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
