@@ -25,6 +25,9 @@ class UserInDB(Base):
     assignment_zero_completed = Column(Boolean, default=False, nullable=False)
     assignment_zero_completed_at = Column(DateTime, nullable=True)
     student_id = Column(String, unique=True, nullable=True)
+    # Stable central-IdP (Zitadel) subject, captured at OIDC login — the canonical
+    # cross-system identity link (SSO Phase 2). Distinct from the overloaded student_id.
+    central_auth_user_id = Column(String, nullable=True, index=True)
     total_study_time_minutes = Column(Integer, default=0, nullable=False)
     daily_streak = Column(Integer, default=0, nullable=False)
     last_activity_date = Column(Date, nullable=True)

@@ -12,6 +12,7 @@ from src.utils.auth_utils import (
 )
 from src.config import get_db
 from src.schemas.models import UserInDB, Token, UserSchema
+from src.auth.user_resolve import resolve_user_by_payload
 import logging
 from pydantic import BaseModel
 from datetime import datetime
@@ -178,9 +179,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    user_email = payload.get("sub")
-    # Find user by email (case-insensitive)
-    user = db.query(UserInDB).filter(func.lower(UserInDB.email) == user_email.lower()).first()
+    # Resolve by stable central-auth id for OIDC (backfilled), else by email (SSO Phase 2).
+    user = resolve_user_by_payload(db, payload)
     
     if user is None or not user.is_active:
         raise HTTPException(status_code=404, detail="User not found")
@@ -194,9 +194,8 @@ async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Se
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user_email = payload.get("sub")
-    # Find user by email (case-insensitive)
-    user = db.query(UserInDB).filter(func.lower(UserInDB.email) == user_email.lower()).first()
+    # Resolve by stable central-auth id for OIDC (backfilled), else by email (SSO Phase 2).
+    user = resolve_user_by_payload(db, payload)
 
     if user:
         user.refresh_token = None
@@ -215,9 +214,8 @@ async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: S
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    user_email = payload.get("sub")
-    # Find user by email (case-insensitive)
-    user = db.query(UserInDB).filter(func.lower(UserInDB.email) == user_email.lower()).first()
+    # Resolve by stable central-auth id for OIDC (backfilled), else by email (SSO Phase 2).
+    user = resolve_user_by_payload(db, payload)
     
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or inactive")
