@@ -101,6 +101,58 @@ def verify_token(token: str):
         return None
 
 
+def verify_bearer_token(token: str):
+    """Verify a bearer access token, accepting legacy HS256 OR a central-IdP token.
+
+    SSO Phase 2 dual-run seam. Tries the legacy HS256 token first (unchanged path);
+    only if that fails AND ``OIDC_ACCEPT`` is enabled does it try to verify an IdP
+    RS256 token via JWKS and normalize it to a legacy-shaped payload (``sub`` = the
+    lower-cased email claim) so the existing "look the user up by email" resolution
+    works untouched — the LMS user's role/permissions still come from the DB row.
+
+    When ``OIDC_ACCEPT`` is unset this is byte-for-byte identical to ``verify_token``.
+    Always fails closed to ``None`` (never raises) so the auth path can only reject,
+    never 500. Note: this does NOT provision users — an OIDC token only authenticates
+    an already-existing, active LMS user matched by email.
+    """
+    payload = verify_token(token)
+    if payload is not None:
+        return payload
+
+    # Lazy import so a missing crypto backend or OIDC misconfig can never break HS256 auth.
+    try:
+        from src.utils.oidc import oidc_accept_enabled, verify_oidc_token
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not oidc_accept_enabled():
+        return None
+    try:
+        claims = verify_oidc_token(token)
+    except Exception as exc:  # OidcVerifyError / OidcConfigError / anything → reject
+        _logger.info("OIDC bearer token rejected: %s", exc)
+        return None
+
+    email = (claims.get("email") or "").strip().lower()
+    if not email:
+        # Zitadel JWT access tokens don't carry email — resolve it from the userinfo
+        # endpoint using the same (already-verified) access token.
+        try:
+            from src.utils.oidc import fetch_userinfo
+
+            email = (fetch_userinfo(token).get("email") or "").strip().lower()
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.info("OIDC userinfo email resolution failed: %s", exc)
+    if not email:
+        _logger.warning("OIDC token verified but no email (token or userinfo); cannot map to an LMS user")
+        return None
+    return {
+        "sub": email,
+        "email": email,
+        "oidc": True,
+        "central_auth_user_id": claims.get("sub"),
+    }
+
+
 # Password reset tokens are short-lived signed JWTs (no DB column needed). The `pv`
 # (password-version) stamp binds the token to the current password hash, so the token
 # is automatically invalidated once the password changes (single-use behaviour).
