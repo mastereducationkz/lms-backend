@@ -58,9 +58,15 @@ def oidc_jwks_url() -> str:
     return os.getenv("OIDC_JWKS_URL", "").strip()
 
 
-def oidc_audience() -> str:
-    """The audience this resource server (LMS) requires in a token."""
-    return os.getenv("OIDC_AUDIENCE", "lms").strip()
+def oidc_audiences() -> list[str]:
+    """Audiences this resource server (LMS) accepts (comma-separated ``OIDC_AUDIENCE``).
+
+    Zitadel puts resource IDs (project app IDs) in a token's ``aud``, not a free-form
+    string, so this is normally the ``lms-api`` resource ID (and, tolerantly, the web
+    /mobile client IDs). A token is accepted if its ``aud`` contains ANY of these.
+    """
+    raw = os.getenv("OIDC_AUDIENCE", "")
+    return [a.strip() for a in raw.split(",") if a.strip()]
 
 
 def oidc_leeway_seconds() -> int:
@@ -109,7 +115,7 @@ def verify_oidc_claims(
     *,
     jwks: dict,
     issuers: list[str],
-    audience: str,
+    audience,  # str | list[str] — PyJWT accepts either; a list passes if ANY matches
     leeway: int = 60,
 ) -> dict:
     """Full RS256 validation against a JWKS dict. Returns the verified claims.
@@ -173,13 +179,14 @@ def verify_oidc_token(token: str) -> dict:
     """
     issuers = oidc_issuers()
     jwks_url = oidc_jwks_url()
-    if not issuers or not jwks_url:
-        raise OidcConfigError("OIDC_ISSUERS and OIDC_JWKS_URL must be set to accept OIDC tokens")
+    audiences = oidc_audiences()
+    if not issuers or not jwks_url or not audiences:
+        raise OidcConfigError("OIDC_ISSUERS, OIDC_JWKS_URL and OIDC_AUDIENCE must be set to accept OIDC tokens")
     jwks = _fetch_jwks(jwks_url)
     return verify_oidc_claims(
         token,
         jwks=jwks,
         issuers=issuers,
-        audience=oidc_audience(),
+        audience=audiences,
         leeway=oidc_leeway_seconds(),
     )
