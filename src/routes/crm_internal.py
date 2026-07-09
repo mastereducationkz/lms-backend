@@ -1,9 +1,11 @@
 """Internal CRM ↔ LMS routes (service-key auth)."""
+import logging
 import os
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.config import get_db
@@ -16,6 +18,10 @@ from src.schemas.models import (
 from src.lesson_requests.services import create_lesson_request_record
 from src.lesson_requests.helpers import enrich_request, notify_approvers_of_request
 from src.services.email_service import send_invite_email
+from src.services.sso_broker import SsoBrokerError, mint_handoff, sso_broker_enabled
+from src.utils.auth_utils import verify_lms_stored_password
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -66,6 +72,89 @@ def _deliver_invite(user, password: str) -> dict:
         return {"sent": False, "reason": "no_email"}
     send_invite_email(email, user.name or "", email, password)
     return {"sent": True, "reason": None}
+
+
+# --- SSO Phase 0: teacher-login handoff (replaces CRM reading LMS password hashes) ---
+#
+# Today CRM authenticates LMS teachers by reading users.hashed_password directly.
+# Under Phase 0, CRM instead posts the credential here; LMS (the owner) verifies it
+# against its own users table and asks the broker to mint a short-lived handoff that
+# CRM redeems. This removes CRM's cross-DB read of LMS password hashes. The whole
+# path is gated by SSO_BROKER_ENABLED so it is fully dual-run with the legacy flow.
+
+
+class IssueTeacherHandoffBody(BaseModel):
+    email: str
+    password: str
+
+
+class IssueTeacherHandoffResponse(BaseModel):
+    handoff: str
+    expires_at: int
+
+
+def _sso_teacher_roles() -> tuple[str, ...]:
+    """Roles eligible for the teacher-login handoff (matches CRM's LMS_CRM_TEACHER_ROLES)."""
+    raw = os.getenv("SSO_TEACHER_ROLES", "teacher,head_teacher")
+    return tuple(r.strip() for r in raw.split(",") if r.strip())
+
+
+def _teacher_handoff_authorized(user, password: str, roles: tuple[str, ...]) -> bool:
+    """Pure decision: may this user receive a teacher handoff for the given password?
+
+    Kept side-effect-free (no DB / no network) so it is unit-testable. Requires an
+    active user whose role is eligible and whose stored password verifies.
+    """
+    if user is None or not getattr(user, "is_active", False):
+        return False
+    if getattr(user, "role", None) not in roles:
+        return False
+    algorithm = os.getenv("SSO_TEACHER_PASSWORD_ALGORITHM", "auto")
+    return verify_lms_stored_password(password, getattr(user, "hashed_password", None), algorithm=algorithm)
+
+
+def _teacher_handoff_mint_kwargs(user) -> dict:
+    """Pure: the broker mint arguments for an authenticated teacher."""
+    return {
+        "sub": f"lms:{user.id}",
+        "aud": "crm",
+        "scope": ["crm:teacher"],
+        "email": (getattr(user, "email", "") or None),
+        "name": (getattr(user, "name", "") or ""),
+    }
+
+
+@router.post(
+    "/issue-teacher-handoff",
+    response_model=IssueTeacherHandoffResponse,
+    dependencies=[Depends(_require_crm_internal_key)],
+)
+async def crm_issue_teacher_handoff(
+    body: IssueTeacherHandoffBody,
+    db: Session = Depends(get_db),
+) -> IssueTeacherHandoffResponse:
+    """Verify a teacher's LMS credential and return a broker-signed handoff for CRM."""
+    if not sso_broker_enabled():
+        raise HTTPException(status_code=503, detail="SSO broker handoff is disabled")
+
+    email = (body.email or "").strip().lower()
+    roles = _sso_teacher_roles()
+    user = (
+        db.query(UserInDB)
+        .filter(func.lower(UserInDB.email) == email, UserInDB.role.in_(roles))
+        .first()
+    )
+    if not _teacher_handoff_authorized(user, body.password, roles):
+        # Uniform error: never distinguish "no such teacher" from "bad password".
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    try:
+        result = mint_handoff(**_teacher_handoff_mint_kwargs(user))
+    except SsoBrokerError as exc:
+        logger.warning("teacher-handoff mint failed for %s: %s", email, exc)
+        raise HTTPException(status_code=502, detail="SSO broker unavailable") from exc
+
+    return IssueTeacherHandoffResponse(handoff=result["handoff"], expires_at=result["expires_at"])
 
 
 @router.post(
