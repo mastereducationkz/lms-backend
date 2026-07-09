@@ -1,3 +1,5 @@
+import base64
+import hmac
 import os
 import hashlib
 import logging
@@ -34,6 +36,48 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except UnknownHashError:
         # Stored hash format not recognized – treat as invalid credentials
         return False
+
+def _verify_django_pbkdf2_sha256(plain_password: str, encoded_password: str) -> bool:
+    """Verify a Django-style ``pbkdf2_sha256$iterations$salt$hash``."""
+    try:
+        algorithm, iterations_raw, salt, digest = encoded_password.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        derived = hashlib.pbkdf2_hmac(
+            "sha256", plain_password.encode("utf-8"), salt.encode("utf-8"), int(iterations_raw)
+        )
+        return hmac.compare_digest(base64.b64encode(derived).decode("utf-8").strip(), digest)
+    except Exception:
+        return False
+
+
+def verify_lms_stored_password(
+    plain_password: str, stored_password: Optional[str], *, algorithm: str = "auto"
+) -> bool:
+    """Verify a password against an LMS ``users`` hash, tolerating legacy schemes.
+
+    LMS is the credential authority for the SSO handoff flow, so it must accept
+    exactly the hash formats that already exist in its ``users`` table. In ``auto``
+    mode this detects bcrypt (``$2*``), Django pbkdf2-sha256, and finally a
+    plaintext-at-rest fallback (a known legacy state the SSO migration will retire
+    — see SSO_DESIGN.md §E). This preserves parity with the CRM teacher-login path
+    it replaces, so no existing teacher login regresses when the flag is enabled.
+    """
+    if not stored_password:
+        return False
+    mode = (algorithm or "auto").strip().lower()
+    if mode in ("auto", "bcrypt") and stored_password[:4] in ("$2a$", "$2b$", "$2y$"):
+        return verify_password(plain_password, stored_password)
+    if mode in ("auto", "django_pbkdf2_sha256") and stored_password.startswith("pbkdf2_sha256$"):
+        return _verify_django_pbkdf2_sha256(plain_password, stored_password)
+    if mode in ("auto", "plain"):
+        return hmac.compare_digest(plain_password, stored_password)
+    if mode == "bcrypt":
+        return verify_password(plain_password, stored_password)
+    if mode == "django_pbkdf2_sha256":
+        return _verify_django_pbkdf2_sha256(plain_password, stored_password)
+    return False
+
 
 def create_access_token(data: dict):
     to_encode = data.copy()
