@@ -1,12 +1,15 @@
 """Cross-platform student-data sync — LMS publisher side (see SSO_SYNC_DESIGN.md).
 
-LMS is the system-of-record for group membership (the rows physically live in the LMS DB,
-even for CRM edits). This module (a) enqueues change snapshots into ``student_sync_outbox``
-in the same transaction as the LMS write, and (b) drains the outbox by HTTP-pushing to the
-target platforms (SAT/NUET now, IELTS later) idempotently.
+LMS is the system-of-record for groups: the ``groups`` rows physically live in the LMS DB,
+whether they are written by the LMS app or by the CRM's cross-DB writes. Enqueue is therefore
+done by a **database trigger** on the ``groups`` table (``p7_student_sync_group_trigger``), which
+writes a ``group.upserted`` snapshot into ``student_sync_outbox`` in the *same transaction* as
+whichever writer changed the row — so it is atomic and impossible to bypass (the app hook it
+replaced could not see CRM writes).
 
-Everything is gated by ``SYNC_ENABLED`` (off by default) so it is a strict no-op until enabled:
-enqueue does nothing, and the drainer is not started. Transport is HTTP (the live X-API-Key
+This module is the **drainer**: it publishes pending outbox rows by HTTP-pushing to the target
+platforms (SAT/NUET now, IELTS later) idempotently. The drainer is gated by ``SYNC_ENABLED``
+(off by default) so it is a strict no-op until enabled. Transport is HTTP (the live X-API-Key
 path LMS already uses for scores) — no message broker required.
 """
 
@@ -14,9 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import httpx
 from sqlalchemy.orm import Session
@@ -51,45 +52,9 @@ def _sat_api_key() -> str:
     return os.getenv("MASTEREDU_API_KEY", "")
 
 
-# --- payload builders --------------------------------------------------------
-
-def group_snapshot(group) -> dict:
-    """A full desired-state snapshot of an LMS group (idempotent, self-healing)."""
-    return {
-        "lms_group_id": group.id,
-        "name": getattr(group, "name", None),
-        "program_type": getattr(group, "program_type", None),
-        "is_active": bool(getattr(group, "is_active", True)),
-    }
-
-
-# --- enqueue (runs inside the caller's transaction) --------------------------
-
-def enqueue_group_upserted(db: Session, group):
-    """Enqueue a ``group.upserted`` snapshot. No-op (returns None) when sync is off.
-
-    Adds the row to the session but does NOT commit — the caller's transaction owns it, so
-    the event is durable iff the group write commits (atomic). Never raises into the caller.
-    """
-    if not sync_enabled():
-        return None
-    try:
-        event_id = str(uuid.uuid4())
-        payload = {
-            "event_id": event_id,
-            "event_type": "group.upserted",
-            "source": "lms",
-            "group": group_snapshot(group),
-        }
-        row = _outbox_model()(event_id=event_id, event_type="group.upserted", payload=payload)
-        db.add(row)
-        return row
-    except Exception as exc:  # never break the group write because of sync bookkeeping
-        logger.warning("enqueue_group_upserted failed (non-fatal): %s", exc)
-        return None
-
-
 # --- drainer (runs in the scheduler container) -------------------------------
+# Enqueue is done by the `groups` DB trigger (p7_student_sync_group_trigger), not here, so
+# that CRM cross-DB writes are captured too. The drainer only reads/publishes outbox rows.
 
 _ROUTES = {
     # event_type -> (relative path on the SAT api/lms base)
@@ -194,3 +159,76 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
                 retried += 1
         db.commit()
     return {"published": published, "failed": failed, "retried": retried}
+
+
+# --- database trigger DDL (installed by the p7 migration) --------------------
+# Enqueue lives in the DB, not the app, so EVERY writer of the `groups` table is captured:
+# the LMS app AND the CRM's cross-DB writes (crm-master writes groups via lms_write_session_scope)
+# AND any manual SQL. The trigger runs inside the writer's own transaction, so the outbox row is
+# atomic with the group change. Kept here (next to the drainer) so the payload shape the drainer
+# publishes and the trigger produces stay in lockstep; imported verbatim by the migration and tests.
+#
+# CRITICAL: the INSERT is wrapped in EXCEPTION WHEN OTHERS so a sync-bookkeeping failure can NEVER
+# roll back a group write (the trigger is in the hot path of admin + CRM group edits). It fires on
+# UPDATE only when a synced field actually changed, to avoid enqueuing on unrelated column edits.
+# Requires PostgreSQL 13+ for the built-in gen_random_uuid().
+
+GROUP_SYNC_FUNCTION = "student_sync_enqueue_group"
+GROUP_SYNC_TRIGGER = "trg_student_sync_group"
+
+GROUP_SYNC_TRIGGER_UP_SQL = f"""
+CREATE OR REPLACE FUNCTION {GROUP_SYNC_FUNCTION}() RETURNS trigger AS $fn$
+DECLARE
+    v_event_id text;
+BEGIN
+    -- On UPDATE, only enqueue when a field we actually sync changed.
+    IF (TG_OP = 'UPDATE') AND NOT (
+        NEW.name IS DISTINCT FROM OLD.name
+        OR NEW.program_type IS DISTINCT FROM OLD.program_type
+        OR NEW.is_active IS DISTINCT FROM OLD.is_active
+    ) THEN
+        RETURN NULL;
+    END IF;
+
+    BEGIN
+        v_event_id := gen_random_uuid()::text;
+        INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
+        VALUES (
+            v_event_id,
+            'group.upserted',
+            json_build_object(
+                'event_id', v_event_id,
+                'event_type', 'group.upserted',
+                'source', 'lms_db_trigger',
+                'group', json_build_object(
+                    'lms_group_id', NEW.id,
+                    'name', NEW.name,
+                    'program_type', NEW.program_type,
+                    'is_active', NEW.is_active
+                )
+            ),
+            'pending',
+            0,
+            (now() AT TIME ZONE 'utc')
+        );
+    EXCEPTION WHEN OTHERS THEN
+        -- Never break the group write because of sync bookkeeping. (Concatenated, not a '%'
+        -- format string, so the DDL carries no '%' that a raw DBAPI execute would misread.)
+        RAISE WARNING USING MESSAGE =
+            'student_sync_enqueue_group failed for group ' || COALESCE(NEW.id::text, '?') || ': ' || SQLERRM;
+    END;
+
+    RETURN NULL;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS {GROUP_SYNC_TRIGGER} ON groups;
+CREATE TRIGGER {GROUP_SYNC_TRIGGER}
+    AFTER INSERT OR UPDATE ON groups
+    FOR EACH ROW EXECUTE FUNCTION {GROUP_SYNC_FUNCTION}();
+"""
+
+GROUP_SYNC_TRIGGER_DOWN_SQL = f"""
+DROP TRIGGER IF EXISTS {GROUP_SYNC_TRIGGER} ON groups;
+DROP FUNCTION IF EXISTS {GROUP_SYNC_FUNCTION}();
+"""

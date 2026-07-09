@@ -19,7 +19,6 @@ from src.services.email_service import send_invite_email, send_password_changed_
 from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin, require_admin_or_head_curator
 from src.services.group_completion_service import sync_groups_over_status
 from src.services.cache_service import cached
-from src.services.student_sync import enqueue_group_upserted
 import secrets
 import string
 import logging
@@ -1119,10 +1118,8 @@ async def create_group(
     db.add(new_group)
     db.commit()
     db.refresh(new_group)
-
-    # SSO sync: propagate the new group to SAT/NUET (no-op unless SYNC_ENABLED).
-    if enqueue_group_upserted(db, new_group) is not None:
-        db.commit()
+    # Cross-platform sync is captured by a DB trigger on the `groups` table (see
+    # p7_student_sync_group_trigger) so CRM cross-DB writes are covered too — no app hook needed.
 
     course_access = CourseGroupAccess(
         course_id=group_data.course_id,
@@ -1263,11 +1260,8 @@ async def update_group(
 
     db.commit()
     db.refresh(group)
+    # Cross-platform sync is captured by the `groups` DB trigger (see p7_student_sync_group_trigger).
 
-    # SSO sync: propagate the group change to SAT/NUET (no-op unless SYNC_ENABLED).
-    if enqueue_group_upserted(db, group) is not None:
-        db.commit()
-    
     # Create response with teacher name, curator name and student count
     teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
     curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first() if group.curator_id else None
