@@ -86,7 +86,9 @@ def test_drain_publishes_on_2xx(db, monkeypatch):
     assert sent["json"]["group"]["lms_group_id"] == 55
 
 
-def test_drain_retries_on_5xx_then_backs_off(db, monkeypatch):
+def test_drain_503_reschedules_without_spending_attempts(db, monkeypatch):
+    # 503 = consumer deployed but its sync flag is off. Must reschedule WITHOUT burning the
+    # retry budget so a rollout window can't dead-letter valid events.
     monkeypatch.setenv("SYNC_ENABLED", "true")
     student_sync.enqueue_group_upserted(db, _group())
     db.commit()
@@ -96,9 +98,43 @@ def test_drain_retries_on_5xx_then_backs_off(db, monkeypatch):
     assert result == {"published": 0, "failed": 0, "retried": 1}
     row = db.query(StudentSyncOutbox).one()
     assert row.status == "pending"        # still pending, will retry
-    assert row.attempts == 1
+    assert row.attempts == 0              # 503 does NOT spend an attempt
     assert row.next_attempt_at is not None
     assert "503" in row.last_error
+
+
+def test_persistent_503_never_dead_letters(db, monkeypatch):
+    # Consumer left disabled indefinitely: the event must stay pending forever (never "failed"),
+    # so it self-heals the moment the operator enables the consumer.
+    monkeypatch.setenv("SYNC_ENABLED", "true")
+    student_sync.enqueue_group_upserted(db, _group())
+    db.commit()
+    monkeypatch.setattr(student_sync.httpx, "post", lambda *a, **k: _Resp(503, "disabled"))
+
+    for _ in range(_MANY := 12):  # far past _MAX_ATTEMPTS
+        # clear the backoff so each pass re-attempts this row
+        db.query(StudentSyncOutbox).update({StudentSyncOutbox.next_attempt_at: None})
+        db.commit()
+        student_sync.drain_outbox(db)
+    row = db.query(StudentSyncOutbox).one()
+    assert row.status == "pending"
+    assert row.attempts == 0
+
+
+def test_drain_retries_on_5xx_then_backs_off(db, monkeypatch):
+    # A genuine server error (500) DOES spend an attempt and backs off.
+    monkeypatch.setenv("SYNC_ENABLED", "true")
+    student_sync.enqueue_group_upserted(db, _group())
+    db.commit()
+    monkeypatch.setattr(student_sync.httpx, "post", lambda *a, **k: _Resp(500, "boom"))
+
+    result = student_sync.drain_outbox(db)
+    assert result == {"published": 0, "failed": 0, "retried": 1}
+    row = db.query(StudentSyncOutbox).one()
+    assert row.status == "pending"        # still pending, will retry
+    assert row.attempts == 1
+    assert row.next_attempt_at is not None
+    assert "500" in row.last_error
 
 
 def test_drain_transport_error_is_retried(db, monkeypatch):

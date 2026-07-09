@@ -32,6 +32,10 @@ def _outbox_model():
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _MAX_ATTEMPTS = 8
+# A 503 means the target consumer is deployed but its sync flag is still off. We reschedule
+# these WITHOUT spending the retry budget (so a rollout window can't dead-letter valid events)
+# and pick them up quickly once the consumer is enabled.
+_NOT_READY_RETRY_SECONDS = 60
 
 
 def sync_enabled() -> bool:
@@ -93,11 +97,20 @@ _ROUTES = {
 }
 
 
-def _deliver(row, *, timeout: float = 15.0) -> tuple[bool, str]:
-    """POST one outbox row to the target. Returns (ok, detail)."""
+def _deliver(row, *, timeout: float = 15.0) -> tuple[str, str]:
+    """POST one outbox row to the target. Returns (outcome, detail).
+
+    outcome is one of:
+      "ok"        — delivered (2xx); mark done.
+      "not_ready" — target reachable but its sync flag is off (503); reschedule without
+                    spending the retry budget so we never dead-letter a valid event during
+                    a rollout window. Self-heals once the consumer is enabled.
+      "retry"     — transient failure (5xx/timeout/other); spend an attempt, dead-letter
+                    after _MAX_ATTEMPTS.
+    """
     path = _ROUTES.get(row.event_type)
     if path is None:
-        return False, f"no route for event_type {row.event_type}"
+        return "retry", f"no route for event_type {row.event_type}"
     url = f"{_sat_base_url()}{path}"
     try:
         resp = httpx.post(
@@ -107,11 +120,12 @@ def _deliver(row, *, timeout: float = 15.0) -> tuple[bool, str]:
             timeout=timeout,
         )
     except httpx.HTTPError as exc:
-        return False, f"transport error: {exc}"
+        return "retry", f"transport error: {exc}"
     if resp.status_code in (200, 201, 204):
-        return True, "ok"
-    # 503 = target sync feature disabled; retry later. 4xx (except 503) = permanent-ish.
-    return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        return "ok", "ok"
+    if resp.status_code == 503:
+        return "not_ready", f"HTTP 503: {resp.text[:200]}"
+    return "retry", f"HTTP {resp.status_code}: {resp.text[:200]}"
 
 
 def run_drain_loop(stop_event=None, poll_seconds: int = 15) -> None:
@@ -156,13 +170,19 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
     )
     published = failed = retried = 0
     for row in rows:
-        ok, detail = _deliver(row)
-        if ok:
+        outcome, detail = _deliver(row)
+        if outcome == "ok":
             row.status = "done"
             row.published_at = datetime.now(timezone.utc)
             row.last_error = None
             published += 1
-        else:
+        elif outcome == "not_ready":
+            # Consumer deployed but flag off: reschedule without spending the budget so a
+            # rollout window can't dead-letter valid events. Stays pending; flushes on enable.
+            row.last_error = detail
+            row.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=_NOT_READY_RETRY_SECONDS)
+            retried += 1
+        else:  # "retry"
             row.attempts = (row.attempts or 0) + 1
             row.last_error = detail
             if row.attempts >= _MAX_ATTEMPTS:
