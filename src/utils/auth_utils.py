@@ -134,7 +134,16 @@ def verify_bearer_token(token: str):
 
     email = (claims.get("email") or "").strip().lower()
     if not email:
-        _logger.warning("OIDC token verified but has no email claim; cannot map to an LMS user")
+        # Zitadel JWT access tokens don't carry email — resolve it from the userinfo
+        # endpoint using the same (already-verified) access token.
+        try:
+            from src.utils.oidc import fetch_userinfo
+
+            email = (fetch_userinfo(token).get("email") or "").strip().lower()
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.info("OIDC userinfo email resolution failed: %s", exc)
+    if not email:
+        _logger.warning("OIDC token verified but no email (token or userinfo); cannot map to an LMS user")
         return None
     return {
         "sub": email,

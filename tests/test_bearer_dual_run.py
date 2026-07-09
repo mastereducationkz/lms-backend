@@ -36,7 +36,24 @@ def test_oidc_on_maps_email_lowercased(monkeypatch):
 
 def test_oidc_on_but_no_email_rejected(monkeypatch):
     monkeypatch.setenv("OIDC_ACCEPT", "true")
+    monkeypatch.delenv("OIDC_USERINFO_URL", raising=False)  # no userinfo fallback configured
     monkeypatch.setattr(oidc, "verify_oidc_token", lambda t: {"sub": "idp-123"})
+    assert auth_utils.verify_bearer_token("oidc.token") is None
+
+
+def test_oidc_email_resolved_from_userinfo_when_absent_from_token(monkeypatch):
+    monkeypatch.setenv("OIDC_ACCEPT", "true")
+    monkeypatch.setattr(oidc, "verify_oidc_token", lambda t: {"sub": "idp-9"})  # token has no email
+    monkeypatch.setattr(oidc, "fetch_userinfo", lambda t, **k: {"email": "From@Userinfo.com"})
+    p = auth_utils.verify_bearer_token("oidc.token")
+    assert p["sub"] == "from@userinfo.com"
+    assert p["central_auth_user_id"] == "idp-9"
+
+
+def test_oidc_rejected_when_no_email_in_token_or_userinfo(monkeypatch):
+    monkeypatch.setenv("OIDC_ACCEPT", "true")
+    monkeypatch.setattr(oidc, "verify_oidc_token", lambda t: {"sub": "idp-9"})
+    monkeypatch.setattr(oidc, "fetch_userinfo", lambda t, **k: {})
     assert auth_utils.verify_bearer_token("oidc.token") is None
 
 

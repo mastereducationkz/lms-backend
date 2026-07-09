@@ -76,6 +76,28 @@ def oidc_leeway_seconds() -> int:
         return 60
 
 
+def oidc_userinfo_url() -> str:
+    """OIDC userinfo endpoint, used to resolve `email` when it is absent from the token
+    (Zitadel JWT access tokens don't carry email; it comes from userinfo or the ID token)."""
+    return os.getenv("OIDC_USERINFO_URL", "").strip()
+
+
+def fetch_userinfo(token: str, *, timeout: float = 5.0) -> dict:
+    """Call the userinfo endpoint with the presented access token. Returns {} on any
+    failure or if no URL is configured (caller treats a missing email as auth failure)."""
+    url = oidc_userinfo_url()
+    if not url:
+        return {}
+    try:
+        resp = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+    except (httpx.HTTPError, ValueError) as exc:  # transport or non-JSON
+        logger.info("OIDC userinfo fetch failed: %s", exc)
+        return {}
+
+
 # --- JWKS fetch + cache ---------------------------------------------------------
 
 _jwks_cache: dict[str, tuple[float, dict]] = {}
