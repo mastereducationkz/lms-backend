@@ -55,6 +55,8 @@ pydantic==2.11.5
 pydantic_core==2.33.2
 Pygments==2.19.2
 PyJWT==2.10.1
+# Required for RS256/JWKS verification of central-IdP (Zitadel) tokens — SSO Phase 2
+cryptography==44.0.0
 pyparsing==3.2.5
 pytest==9.0.2
 python-dotenv==1.1.0
