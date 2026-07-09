@@ -70,7 +70,16 @@ def mint_handoff(
             timeout=timeout,
         )
         resp.raise_for_status()
-        return resp.json()
     except httpx.HTTPError as exc:
         logger.warning("SSO broker mint failed: %s", exc)
         raise SsoBrokerError(str(exc)) from exc
+
+    # A 200 with a non-JSON/truncated body raises ValueError (json.JSONDecodeError), which is NOT
+    # an httpx.HTTPError — catch it so the caller gets a clean 502, not an uncaught 500.
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise SsoBrokerError(f"broker returned a non-JSON response: {exc}") from exc
+    if not isinstance(data, dict) or "handoff" not in data or "expires_at" not in data:
+        raise SsoBrokerError("broker response missing 'handoff'/'expires_at'")
+    return data

@@ -19,9 +19,13 @@ from src.lesson_requests.services import create_lesson_request_record
 from src.lesson_requests.helpers import enrich_request, notify_approvers_of_request
 from src.services.email_service import send_invite_email
 from src.services.sso_broker import SsoBrokerError, mint_handoff, sso_broker_enabled
-from src.utils.auth_utils import verify_lms_stored_password
+from src.utils.auth_utils import hash_password, verify_lms_stored_password
 
 logger = logging.getLogger(__name__)
+
+# A fixed bcrypt hash so the "no such teacher" / ineligible path spends about the same time as a
+# real password verify, mitigating teacher-account enumeration via response latency. Computed once.
+_DUMMY_BCRYPT_HASH = hash_password("sso-timing-uniform-dummy")
 
 router = APIRouter()
 
@@ -103,14 +107,22 @@ def _teacher_handoff_authorized(user, password: str, roles: tuple[str, ...]) -> 
     """Pure decision: may this user receive a teacher handoff for the given password?
 
     Kept side-effect-free (no DB / no network) so it is unit-testable. Requires an
-    active user whose role is eligible and whose stored password verifies.
+    active user whose role is eligible and whose stored password verifies. Runs a
+    constant-cost dummy verify on the ineligible/not-found path so response timing
+    does not reveal whether a given email is an LMS teacher.
     """
-    if user is None or not getattr(user, "is_active", False):
-        return False
-    if getattr(user, "role", None) not in roles:
+    stored = getattr(user, "hashed_password", None) if user is not None else None
+    eligible = (
+        user is not None
+        and getattr(user, "is_active", False)
+        and getattr(user, "role", None) in roles
+        and bool(stored)
+    )
+    if not eligible:
+        verify_lms_stored_password(password, _DUMMY_BCRYPT_HASH, algorithm="bcrypt")
         return False
     algorithm = os.getenv("SSO_TEACHER_PASSWORD_ALGORITHM", "auto")
-    return verify_lms_stored_password(password, getattr(user, "hashed_password", None), algorithm=algorithm)
+    return verify_lms_stored_password(password, stored, algorithm=algorithm)
 
 
 def _teacher_handoff_mint_kwargs(user) -> dict:

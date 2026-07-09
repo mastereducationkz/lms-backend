@@ -9,8 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import bcrypt
+import pytest
 
 from src.routes import crm_internal
+from src.services import sso_broker
 from src.utils import auth_utils
 
 
@@ -102,3 +104,43 @@ def test_endpoint_disabled_without_flag(monkeypatch):
 def test_endpoint_enabled_with_flag(monkeypatch):
     monkeypatch.setenv("SSO_BROKER_ENABLED", "true")
     assert crm_internal.sso_broker_enabled() is True
+
+
+# --- broker mint client robustness (bad/incomplete 200 bodies -> SsoBrokerError, not 500) ---
+
+class _FakeResp:
+    def __init__(self, payload=None, raise_json=False):
+        self._payload = payload
+        self._raise_json = raise_json
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        if self._raise_json:
+            raise ValueError("not json")
+        return self._payload
+
+
+def test_mint_handoff_raises_on_non_json(monkeypatch):
+    monkeypatch.setenv("SSO_BROKER_URL", "https://broker.test")
+    monkeypatch.setattr(sso_broker.httpx, "post", lambda *a, **k: _FakeResp(raise_json=True))
+    with pytest.raises(sso_broker.SsoBrokerError):
+        sso_broker.mint_handoff(sub="lms:1", aud="crm", scope=[])
+
+
+def test_mint_handoff_raises_on_missing_keys(monkeypatch):
+    monkeypatch.setenv("SSO_BROKER_URL", "https://broker.test")
+    monkeypatch.setattr(sso_broker.httpx, "post", lambda *a, **k: _FakeResp(payload={"jti": "x"}))
+    with pytest.raises(sso_broker.SsoBrokerError):
+        sso_broker.mint_handoff(sub="lms:1", aud="crm", scope=[])
+
+
+def test_mint_handoff_ok(monkeypatch):
+    monkeypatch.setenv("SSO_BROKER_URL", "https://broker.test")
+    monkeypatch.setattr(
+        sso_broker.httpx, "post",
+        lambda *a, **k: _FakeResp(payload={"handoff": "h.e.re", "jti": "x", "expires_at": 123}),
+    )
+    out = sso_broker.mint_handoff(sub="lms:1", aud="crm", scope=["crm:teacher"])
+    assert out["handoff"] == "h.e.re"
