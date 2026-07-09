@@ -1,11 +1,12 @@
 """
 Schedule reconciliation: preserve attendance when regenerating group schedules.
 
-Replaces mass deactivate + create with:
-- Match existing future events to desired slots (exact time, then nearest within tolerance)
-- Update matched events in place (keep event.id -> attendance preserved)
-- Create new events for unmatched desired slots
-- Deactivate only unmatched future events (never touch past)
+Order-based matching:
+- Pair the i-th upcoming existing event with the i-th upcoming desired slot.
+- Move matched events in place (keep event.id -> attendance preserved) so a
+  day/time change is a SHIFT, not a delete+recreate.
+- Create events for extra future slots; deactivate extra future events.
+- Never touch past events, and never (re)create past lessons.
 """
 from __future__ import annotations
 
@@ -15,15 +16,7 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from src.services.attendance_service import AttendanceService
-
 logger = logging.getLogger(__name__)
-
-TOLERANCE_MINUTES = 90
-
-
-def _normalize_dt(dt: datetime) -> datetime:
-    return dt.replace(second=0, microsecond=0)
 
 
 def reconcile_group_schedule(
@@ -48,8 +41,6 @@ def reconcile_group_schedule(
             return dt.replace(tzinfo=timezone.utc)
         return dt
 
-    desired_by_time = {_normalize_dt(dt): (dt, ln) for dt, ln in desired_slots}
-
     existing_events = (
         db.query(Event)
         .join(EventGroup)
@@ -61,66 +52,45 @@ def reconcile_group_schedule(
         .all()
     )
 
-    future_events = [e for e in existing_events if _as_utc(e.start_datetime) >= now_utc]
-    past_events = [e for e in existing_events if _as_utc(e.start_datetime) < now_utc]
-
-    matched: List[Tuple[Event, datetime, int]] = []
-    unmatched_desired: List[Tuple[datetime, int]] = []
-    unmatched_existing: List[Event] = list(future_events)
-
-    for event in future_events:
-        sig = _normalize_dt(event.start_datetime)
-        if sig in desired_by_time:
-            dt, ln = desired_by_time.pop(sig)
-            matched.append((event, dt, ln))
-            unmatched_existing.remove(event)
-            continue
-
-        best_slot = None
-        best_diff = timedelta(minutes=TOLERANCE_MINUTES + 1)
-        for dsig, (dt, ln) in list(desired_by_time.items()):
-            diff = abs((_as_utc(event.start_datetime) - _as_utc(dt)).total_seconds())
-            if diff < best_diff.total_seconds():
-                best_diff = timedelta(seconds=diff)
-                best_slot = (dsig, dt, ln)
-
-        if best_slot and best_diff <= timedelta(minutes=TOLERANCE_MINUTES):
-            dsig, dt, ln = best_slot
-            desired_by_time.pop(dsig)
-            matched.append((event, dt, ln))
-            unmatched_existing.remove(event)
-
-    unmatched_desired = list(desired_by_time.values())
+    # Past events are history — never moved or deactivated here.
+    past_existing = [e for e in existing_events if _as_utc(e.start_datetime) < now_utc]
+    future_existing = sorted(
+        (e for e in existing_events if _as_utc(e.start_datetime) >= now_utc),
+        key=lambda e: _as_utc(e.start_datetime),
+    )
+    # Only future slots are actionable (we never (re)create past lessons).
+    future_desired = sorted(
+        ((dt, ln) for dt, ln in desired_slots if _as_utc(dt) >= now_utc),
+        key=lambda item: _as_utc(item[0]),
+    )
 
     updated = 0
-    for event, target_dt, lesson_number in matched:
+    created = 0
+    deactivated = 0
+
+    # Order-based matching: move the i-th upcoming event onto the i-th new slot.
+    # Moving in place keeps event.id, so attendance/history stay attached and a
+    # day/time change becomes a SHIFT (nothing is lost, count preserved).
+    pair_count = min(len(future_existing), len(future_desired))
+    for i in range(pair_count):
+        event = future_existing[i]
+        target_dt, _ln = future_desired[i]
         end_dt = target_dt + timedelta(minutes=60)
-        changed = (
+        if (
             _as_utc(event.start_datetime) != _as_utc(target_dt)
             or _as_utc(event.end_datetime) != _as_utc(end_dt)
-            or event.title != f"{group_name}: Lesson {lesson_number}"
-        )
-        if changed:
+        ):
             event.start_datetime = target_dt
             event.end_datetime = end_dt
-            event.title = f"{group_name}: Lesson {lesson_number}"
-            event.teacher_id = teacher_id
             event.updated_at = now_utc
             updated += 1
+        event.teacher_id = teacher_id
 
-    created = 0
-    created_event_ids_by_dt: dict = {}
-    for target_dt, lesson_number in unmatched_desired:
-        # Never (re)create PAST lessons. Matching above only considers
-        # future_events, so every past desired slot lands here "unmatched" even
-        # though its past event already exists in past_events. Creating it would
-        # spawn a duplicate on every schedule (re)generation — the root cause of
-        # the doubled/tripled past lessons. Past is history: leave it untouched.
-        if _as_utc(target_dt) < now_utc:
-            continue
+    # Extra new slots (schedule now has more future lessons) -> create.
+    for target_dt, _ln in future_desired[pair_count:]:
         end_dt = target_dt + timedelta(minutes=60)
         new_event = Event(
-            title=f"{group_name}: Lesson {lesson_number}",
+            title=f"{group_name}: Lesson",
             description=f"Scheduled class for {group_name}",
             event_type="class",
             start_datetime=target_dt,
@@ -136,45 +106,46 @@ def reconcile_group_schedule(
         db.add(new_event)
         db.flush()
         db.add(EventGroup(event_id=new_event.id, group_id=group_id))
-        created_event_ids_by_dt[_normalize_dt(target_dt)] = new_event.id
         created += 1
 
-    rebound = 0
-    for event in unmatched_existing:
-        best_new_id = None
-        best_diff_sec = TOLERANCE_MINUTES * 60 + 1
-        for target_dt, _ in unmatched_desired:
-            diff_sec = abs((_as_utc(event.start_datetime) - _as_utc(target_dt)).total_seconds())
-            if diff_sec <= TOLERANCE_MINUTES * 60 and diff_sec < best_diff_sec:
-                best_diff_sec = diff_sec
-                sig = _normalize_dt(target_dt)
-                if sig in created_event_ids_by_dt:
-                    best_new_id = created_event_ids_by_dt[sig]
-        if best_new_id:
-            rebound += AttendanceService.rebind_event_attendance(
-                db, event.id, best_new_id, flush=False
-            )
-
-    deactivated = 0
-    for event in unmatched_existing:
+    # Extra upcoming events (schedule now has fewer future lessons) -> deactivate.
+    for event in future_existing[pair_count:]:
         event.is_active = False
         event.updated_at = now_utc
         deactivated += 1
 
     db.flush()
 
+    # Sequential titles across all active class events (by date) — no gaps.
+    active_sorted = sorted(
+        db.query(Event)
+        .join(EventGroup)
+        .filter(
+            EventGroup.group_id == group_id,
+            Event.event_type == "class",
+            Event.is_active == True,
+        )
+        .all(),
+        key=lambda e: _as_utc(e.start_datetime),
+    )
+    for idx, event in enumerate(active_sorted, start=1):
+        title = f"{group_name}: Lesson {idx}"
+        if event.title != title:
+            event.title = title
+    db.flush()
+
     logger.info(
-        "schedule_reconciliation group_id=%s updated=%s created=%s deactivated=%s rebound=%s",
+        "schedule_reconciliation group_id=%s updated=%s created=%s deactivated=%s past=%s",
         group_id,
         updated,
         created,
         deactivated,
-        rebound,
+        len(past_existing),
     )
     return {
         "updated": updated,
         "created": created,
         "deactivated": deactivated,
-        "rebound": rebound,
-        "past_preserved": len(past_events),
+        "rebound": 0,
+        "past_preserved": len(past_existing),
     }
