@@ -178,7 +178,11 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
     )
     published = failed = retried = 0
     for row in rows:
-        outcome, detail = _deliver(row)
+        if row.event_type == "user.created":
+            # Not an HTTP fan-out: provisions the new user into Zitadel (see p10 trigger notes).
+            outcome, detail = _deliver_user_created(db, row)
+        else:
+            outcome, detail = _deliver(row)
         if outcome == "ok":
             row.status = "done"
             row.published_at = datetime.now(timezone.utc)
@@ -202,6 +206,44 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
                 retried += 1
         db.commit()
     return {"published": published, "failed": failed, "retried": retried}
+
+
+# --- user.created -> Zitadel auto-provisioning --------------------------------
+# New accounts (created by LMS admin endpoints, the CRM's direct cross-DB writes, or the amoCRM
+# webhook — they ALL insert into the LMS `users` table) must appear in Zitadel so "Continue with
+# Master Education" works for them from day one. The p10 trigger enqueues a `user.created` event;
+# this handler (not an HTTP fan-out) provisions the account via the Zitadel Management API and
+# writes the returned id into users.central_auth_user_id.
+#
+# When ZITADEL_PAT is not configured the event completes as a no-op ("done") — the bulk importer
+# (src/services/zitadel_provisioning --import) is the reconciliation path that catches those users
+# up later, since it scans for central_auth_user_id IS NULL. Transient Zitadel failures retry with
+# the normal budget and dead-letter to the replay CLI. The payload deliberately carries NO password
+# hash (outbox rows are operator-visible); the hash is read fresh from the users row at delivery.
+
+
+def _deliver_user_created(db: Session, row) -> tuple[str, str]:
+    from src.services import zitadel_provisioning as zp
+
+    if not zp.zitadel_enabled():
+        return "ok", "zitadel: not configured (bulk import will catch up)"
+
+    from src.auth.models import UserInDB
+
+    user_id = ((row.payload or {}).get("user") or {}).get("lms_user_id")
+    user = db.query(UserInDB).filter(UserInDB.id == user_id).first() if user_id else None
+    if user is None:
+        return "ok", f"zitadel: user {user_id} no longer exists"
+    if user.central_auth_user_id:
+        return "ok", "zitadel: already linked"
+    if not user.email or "@" not in user.email:
+        return "ok", "zitadel: no importable email"
+    try:
+        zitadel_id = zp.provision_user(user.email, user.name, user.hashed_password)
+    except zp.ZitadelError as exc:
+        return "retry", f"zitadel: {exc}"
+    user.central_auth_user_id = zitadel_id
+    return "ok", f"zitadel: provisioned {zitadel_id}"
 
 
 # --- database trigger DDL (installed by the p7 migration) --------------------
@@ -445,4 +487,67 @@ CREATE TRIGGER {USER_SYNC_TRIGGER}
 USER_SYNC_TRIGGER_DOWN_SQL = f"""
 DROP TRIGGER IF EXISTS {USER_SYNC_TRIGGER} ON users;
 DROP FUNCTION IF EXISTS {USER_SYNC_FUNCTION}();
+"""
+
+
+# --- user-created trigger DDL (installed by the p10 migration) -----------------
+# Companion to p9 (which is UPDATE-only): AFTER INSERT on `users`, enqueue a `user.created`
+# event so the drainer can auto-provision the new account into Zitadel ("Continue with Master
+# Education" works from day one). Captures ALL creation paths — LMS admin endpoints, the CRM's
+# direct cross-DB inserts, and the amoCRM webhook — because they all insert into this table.
+# Only fires when the row carries an email (no email = nothing to provision; the bulk importer
+# skips those too). The payload intentionally carries NO password hash — the drainer reads the
+# hash fresh from the users row at delivery time. Fully EXCEPTION-shielded. Requires PG 13+.
+
+USER_CREATED_FUNCTION = "student_sync_enqueue_user_created"
+USER_CREATED_TRIGGER = "trg_student_sync_user_created"
+
+USER_CREATED_TRIGGER_UP_SQL = f"""
+CREATE OR REPLACE FUNCTION {USER_CREATED_FUNCTION}() RETURNS trigger AS $fn$
+DECLARE
+    v_event_id text;
+BEGIN
+    BEGIN
+        IF NEW.email IS NULL OR btrim(NEW.email) = '' OR position('@' in NEW.email) = 0 THEN
+            RETURN NULL;
+        END IF;
+
+        v_event_id := gen_random_uuid()::text;
+        INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
+        VALUES (
+            v_event_id,
+            'user.created',
+            json_build_object(
+                'event_id', v_event_id,
+                'event_type', 'user.created',
+                'source', 'lms_db_trigger',
+                'user', json_build_object(
+                    'lms_user_id', NEW.id,
+                    'email', NEW.email,
+                    'name', NEW.name,
+                    'role', NEW.role
+                )
+            ),
+            'pending',
+            0,
+            (now() AT TIME ZONE 'utc')
+        );
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING USING MESSAGE =
+            'student_sync_enqueue_user_created failed for user ' || COALESCE(NEW.id::text, '?') || ': ' || SQLERRM;
+    END;
+
+    RETURN NULL;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS {USER_CREATED_TRIGGER} ON users;
+CREATE TRIGGER {USER_CREATED_TRIGGER}
+    AFTER INSERT ON users
+    FOR EACH ROW EXECUTE FUNCTION {USER_CREATED_FUNCTION}();
+"""
+
+USER_CREATED_TRIGGER_DOWN_SQL = f"""
+DROP TRIGGER IF EXISTS {USER_CREATED_TRIGGER} ON users;
+DROP FUNCTION IF EXISTS {USER_CREATED_FUNCTION}();
 """
