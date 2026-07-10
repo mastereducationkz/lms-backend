@@ -11,7 +11,7 @@ Two mechanisms, two test styles:
 import os
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 import src.schemas.models  # noqa: F401 - register models
@@ -406,3 +406,77 @@ def test_member_drain_routes_to_membership_endpoint(db, monkeypatch):
     student_sync.drain_outbox(db)
     assert sent["url"].endswith("/api/lms/students/membership")
     assert db.query(StudentSyncOutbox).one().status == "done"
+
+
+# --- backfill (Postgres-only; skips when no PG reachable) -------------------
+
+@pytest.fixture()
+def pg_session():
+    """Throwaway schema with groups/users/group_students/outbox + a Session whose search_path
+    points at it, so the backfill's unqualified SQL resolves there. Skips if no Postgres."""
+    from src.services import sync_backfill  # noqa: F401 - ensure importable
+    try:
+        admin = create_engine(_PG_URL)
+        raw = admin.raw_connection()
+    except Exception as exc:  # pragma: no cover
+        pytest.skip(f"Postgres not reachable for backfill test: {exc}")
+    cur = raw.cursor()
+    cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
+    cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
+    cur.execute(f"SET search_path TO {_TEST_SCHEMA}")
+    cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, is_active boolean)")
+    cur.execute("CREATE TABLE users (id serial PRIMARY KEY, email text, central_auth_user_id text, name text)")
+    cur.execute("CREATE TABLE group_students (id serial PRIMARY KEY, group_id int, student_id int)")
+    cur.execute("CREATE TABLE student_sync_outbox (id serial PRIMARY KEY, event_id text UNIQUE, "
+                "event_type text, payload json, status text, attempts int, created_at timestamp)")
+    # 4 groups (sat, nuet, ielts, general_english), 3 students, memberships incl. a general_english one
+    cur.execute("INSERT INTO groups (id, name, program_type, is_active) VALUES "
+                "(1,'SAT-A','sat',true),(2,'NUET-B','nuet',true),(3,'IELTS-C','ielts',true),(4,'GE-D','general_english',true)")
+    cur.execute("INSERT INTO users (id, email, central_auth_user_id, name) VALUES "
+                "(1,'a@x.io','c1','A'),(2,'b@x.io',NULL,'B'),(3,'c@x.io','c3','C')")
+    cur.execute("INSERT INTO group_students (group_id, student_id) VALUES (1,1),(2,2),(3,3),(4,1)")
+    raw.commit(); cur.close(); raw.close()
+
+    engine = create_engine(_PG_URL, connect_args={"options": f"-csearch_path={_TEST_SCHEMA},public"})
+    session = sessionmaker(bind=engine)()
+    try:
+        yield session
+    finally:
+        session.close(); engine.dispose()
+        r2 = admin.raw_connection(); c2 = r2.cursor()
+        c2.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE"); r2.commit(); c2.close(); r2.close()
+        admin.dispose()
+
+
+def _obx(pg_session):
+    return pg_session.execute(text(f"SELECT event_type, payload FROM {_TEST_SCHEMA}.student_sync_outbox ORDER BY id")).fetchall()
+
+
+def test_backfill_groups_only_sat_nuet(pg_session):
+    from src.services import sync_backfill
+    res = sync_backfill.backfill(pg_session, do_groups=True)
+    assert res["groups"] == 2                       # sat + nuet, NOT ielts/general_english
+    rows = _obx(pg_session)
+    assert {r[0] for r in rows} == {"group.upserted"}
+    progs = {r[1]["group"]["program_type"] for r in rows}
+    assert progs == {"sat", "nuet"}
+    assert all(r[1]["source"] == "lms_backfill" for r in rows)
+
+
+def test_backfill_members_sat_nuet_ielts(pg_session):
+    from src.services import sync_backfill
+    res = sync_backfill.backfill(pg_session, do_members=True)
+    assert res["members"] == 3                       # sat + nuet + ielts members, NOT general_english
+    rows = _obx(pg_session)
+    assert {r[0] for r in rows} == {"member.upserted"}
+    emails = sorted(r[1]["student"]["email"] for r in rows)
+    assert emails == ["a@x.io", "b@x.io", "c@x.io"]
+    one = rows[0][1]
+    assert one["lms_group_id"] and one["group_name"] and one["program_type"] in ("sat", "nuet", "ielts")
+
+
+def test_backfill_dry_run_enqueues_nothing(pg_session):
+    from src.services import sync_backfill
+    res = sync_backfill.backfill(pg_session, do_groups=True, do_members=True, dry_run=True)
+    assert res == {"groups": 2, "members": 3, "dry_run": True}
+    assert _obx(pg_session) == []                     # nothing written
