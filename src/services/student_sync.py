@@ -181,16 +181,19 @@ CREATE OR REPLACE FUNCTION {GROUP_SYNC_FUNCTION}() RETURNS trigger AS $fn$
 DECLARE
     v_event_id text;
 BEGIN
-    -- On UPDATE, only enqueue when a field we actually sync changed.
-    IF (TG_OP = 'UPDATE') AND NOT (
-        NEW.name IS DISTINCT FROM OLD.name
-        OR NEW.program_type IS DISTINCT FROM OLD.program_type
-        OR NEW.is_active IS DISTINCT FROM OLD.is_active
-    ) THEN
-        RETURN NULL;
-    END IF;
-
+    -- The ENTIRE body (including the changed-field guard, which reads NEW/OLD columns) runs inside
+    -- one EXCEPTION shield, so nothing this trigger does — not even a future schema drift that made a
+    -- referenced column disappear — can raise into and roll back the caller's group write.
     BEGIN
+        -- On UPDATE, only enqueue when a field we actually sync changed.
+        IF (TG_OP = 'UPDATE') AND NOT (
+            NEW.name IS DISTINCT FROM OLD.name
+            OR NEW.program_type IS DISTINCT FROM OLD.program_type
+            OR NEW.is_active IS DISTINCT FROM OLD.is_active
+        ) THEN
+            RETURN NULL;
+        END IF;
+
         v_event_id := gen_random_uuid()::text;
         INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
         VALUES (
@@ -204,7 +207,9 @@ BEGIN
                     'lms_group_id', NEW.id,
                     'name', NEW.name,
                     'program_type', NEW.program_type,
-                    'is_active', NEW.is_active
+                    -- is_active is nullable in the LMS model; never emit JSON null (the SAT
+                    -- consumer binds a non-nullable bool). Absent/NULL => active.
+                    'is_active', COALESCE(NEW.is_active, true)
                 )
             ),
             'pending',

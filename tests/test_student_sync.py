@@ -221,6 +221,15 @@ def test_trigger_skips_update_of_unsynced_field(pg):
     assert len(payloads) == 1                     # description change did NOT enqueue
 
 
+def test_trigger_coalesces_null_is_active_to_true(pg):
+    # is_active is nullable in the LMS model; the payload must never carry JSON null (the SAT
+    # consumer binds a non-nullable bool) — a NULL is emitted as true (active).
+    pg.execute(f"INSERT INTO {_TEST_SCHEMA}.groups (name, program_type, is_active) VALUES ('X', 'sat', NULL)")
+    payloads = _outbox_payloads(pg)
+    assert len(payloads) == 1
+    assert payloads[0]["group"]["is_active"] is True
+
+
 def test_trigger_captures_generic_writer(pg):
     # The whole point: a writer that is NOT the LMS app (here: raw SQL, standing in for the CRM's
     # cross-DB write) still produces an outbox row — the app hook could never have seen this.
