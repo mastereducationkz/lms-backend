@@ -88,6 +88,7 @@ def test_drain_publishes_on_2xx(db, monkeypatch):
 def test_drain_503_reschedules_without_spending_attempts(db, monkeypatch):
     # 503 = consumer deployed but its sync flag is off. Must reschedule WITHOUT burning the
     # retry budget so a rollout window can't dead-letter valid events.
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
     _seed(db)
     monkeypatch.setattr(student_sync.httpx, "post", lambda *a, **k: _Resp(503, "disabled"))
 
@@ -103,6 +104,7 @@ def test_drain_503_reschedules_without_spending_attempts(db, monkeypatch):
 def test_persistent_503_never_dead_letters(db, monkeypatch):
     # Consumer left disabled indefinitely: the event must stay pending forever (never "failed"),
     # so it self-heals the moment the operator enables the consumer.
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
     _seed(db)
     monkeypatch.setattr(student_sync.httpx, "post", lambda *a, **k: _Resp(503, "disabled"))
 
@@ -117,6 +119,7 @@ def test_persistent_503_never_dead_letters(db, monkeypatch):
 
 def test_drain_retries_on_5xx_then_backs_off(db, monkeypatch):
     # A genuine server error (500) DOES spend an attempt and backs off.
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
     _seed(db)
     monkeypatch.setattr(student_sync.httpx, "post", lambda *a, **k: _Resp(500, "boom"))
 
@@ -130,6 +133,7 @@ def test_drain_retries_on_5xx_then_backs_off(db, monkeypatch):
 
 
 def test_drain_transport_error_is_retried(db, monkeypatch):
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
     _seed(db)
     import httpx as _httpx
 
@@ -140,6 +144,79 @@ def test_drain_transport_error_is_retried(db, monkeypatch):
     result = student_sync.drain_outbox(db)
     assert result["retried"] == 1
     assert "transport error" in db.query(StudentSyncOutbox).one().last_error
+
+
+# --- multi-target fan-out --------------------------------------------------
+
+def _seed_member(db, eid="m1"):
+    payload = {
+        "event_id": eid, "event_type": "member.upserted", "source": "lms_db_trigger",
+        "lms_group_id": 9, "program_type": "nuet",
+        "student": {"email": "s@x.io", "central_auth_user_id": "c", "name": "S"},
+    }
+    row = StudentSyncOutbox(event_id=eid, event_type="member.upserted", payload=payload)
+    db.add(row); db.commit()
+    return row
+
+
+def _capture_posts(monkeypatch, code=200):
+    posts = []
+    monkeypatch.setattr(student_sync.httpx, "post",
+                        lambda url, json, headers, timeout: posts.append((url, headers.get("X-API-Key"))) or _Resp(code))
+    return posts
+
+
+def test_member_fans_out_only_to_sat_when_ielts_dormant(db, monkeypatch):
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
+    monkeypatch.delenv("IELTS_SYNC_URL", raising=False)     # IELTS not configured
+    _seed_member(db)
+    posts = _capture_posts(monkeypatch)
+    student_sync.drain_outbox(db)
+    assert len(posts) == 1                                   # SAT only
+    assert posts[0][0].endswith("/api/lms/students/membership")
+    assert db.query(StudentSyncOutbox).one().status == "done"
+
+
+def test_member_fans_out_to_both_when_ielts_configured(db, monkeypatch):
+    monkeypatch.setenv("MASTEREDU_API_KEY", "ksat")
+    monkeypatch.setenv("IELTS_SYNC_URL", "https://ielts.example/api")
+    monkeypatch.setenv("IELTS_API_KEY", "kielts")
+    _seed_member(db)
+    posts = _capture_posts(monkeypatch)
+    student_sync.drain_outbox(db)
+    assert len(posts) == 2                                   # SAT + IELTS
+    bases = sorted(u for u, _ in posts)
+    assert any("api.mastereducation.kz" in u for u, _ in posts)
+    assert any(u.startswith("https://ielts.example/api/students/membership") for u, _ in posts)
+    assert db.query(StudentSyncOutbox).one().status == "done"
+
+
+def test_group_event_never_routes_to_ielts(db, monkeypatch):
+    # IELTS has no group entity — a group.upserted must go to SAT only, even with IELTS configured.
+    monkeypatch.setenv("MASTEREDU_API_KEY", "ksat")
+    monkeypatch.setenv("IELTS_SYNC_URL", "https://ielts.example/api")
+    monkeypatch.setenv("IELTS_API_KEY", "kielts")
+    _seed(db)                                                # a group.upserted
+    posts = _capture_posts(monkeypatch)
+    student_sync.drain_outbox(db)
+    assert len(posts) == 1
+    assert posts[0][0].endswith("/api/lms/groups")
+
+
+def test_fanout_not_ready_if_any_target_503(db, monkeypatch):
+    # SAT ok but IELTS 503 => reschedule without spending the budget (re-post to SAT is idempotent).
+    monkeypatch.setenv("MASTEREDU_API_KEY", "ksat")
+    monkeypatch.setenv("IELTS_SYNC_URL", "https://ielts.example/api")
+    monkeypatch.setenv("IELTS_API_KEY", "kielts")
+    _seed_member(db)
+    def post(url, json, headers, timeout):
+        return _Resp(200) if "mastereducation" in url else _Resp(503, "off")
+    monkeypatch.setattr(student_sync.httpx, "post", post)
+    result = student_sync.drain_outbox(db)
+    assert result["retried"] == 1
+    row = db.query(StudentSyncOutbox).one()
+    assert row.status == "pending"
+    assert row.attempts == 0                                 # not_ready doesn't spend budget
 
 
 # --- enqueue trigger (Postgres-only; skips when no PG reachable) ------------

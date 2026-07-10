@@ -43,56 +43,95 @@ def sync_enabled() -> bool:
     return os.getenv("SYNC_ENABLED", "").strip().lower() in _TRUTHY
 
 
-def _sat_base_url() -> str:
-    # Reuse the SAT/NUET api/lms base LMS already talks to for scores.
-    return os.getenv("SAT_SYNC_URL", "https://api.mastereducation.kz/api/lms").rstrip("/")
+# --- targets (fan-out) -------------------------------------------------------
+# Each physical platform is a target with its own base URL + API key and the set of event types
+# it consumes (event_type -> path). An event is delivered to EVERY target that routes it:
+#   group.upserted -> SAT only (IELTS has no group entity)
+#   member.*       -> SAT and IELTS
+# A target is only attempted when its base URL is configured; IELTS stays dormant (skipped) until
+# IELTS_SYNC_URL is set, so this is a strict superset of the previous SAT-only behaviour.
 
-
-def _sat_api_key() -> str:
-    return os.getenv("MASTEREDU_API_KEY", "")
+def _targets() -> list[dict]:
+    return [
+        {
+            "name": "sat",
+            # Reuse the SAT/NUET api/lms base LMS already talks to for scores.
+            "base": os.getenv("SAT_SYNC_URL", "https://api.mastereducation.kz/api/lms").rstrip("/"),
+            "key": os.getenv("MASTEREDU_API_KEY", ""),
+            "routes": {
+                "group.upserted": "/groups",
+                "member.upserted": "/students/membership",
+                "member.removed": "/students/membership",
+            },
+        },
+        {
+            "name": "ielts",
+            "base": os.getenv("IELTS_SYNC_URL", "").rstrip("/"),
+            "key": os.getenv("IELTS_API_KEY", ""),
+            "routes": {
+                # IELTS has no group entity — only student membership (a group label).
+                "member.upserted": "/students/membership",
+                "member.removed": "/students/membership",
+            },
+        },
+    ]
 
 
 # --- drainer (runs in the scheduler container) -------------------------------
-# Enqueue is done by the `groups` DB trigger (p7_student_sync_group_trigger), not here, so
-# that CRM cross-DB writes are captured too. The drainer only reads/publishes outbox rows.
-
-_ROUTES = {
-    # event_type -> (relative path on the SAT api/lms base)
-    "group.upserted": "/groups",
-    "member.upserted": "/students/membership",
-    "member.removed": "/students/membership",
-}
+# Enqueue is done by the `groups`/`group_students` DB triggers (p7/p8), not here, so that CRM
+# cross-DB writes are captured too. The drainer only reads outbox rows and fans them out.
 
 
-def _deliver(row, *, timeout: float = 15.0) -> tuple[str, str]:
-    """POST one outbox row to the target. Returns (outcome, detail).
-
-    outcome is one of:
-      "ok"        — delivered (2xx); mark done.
-      "not_ready" — target reachable but its sync flag is off (503); reschedule without
-                    spending the retry budget so we never dead-letter a valid event during
-                    a rollout window. Self-heals once the consumer is enabled.
-      "retry"     — transient failure (5xx/timeout/other); spend an attempt, dead-letter
-                    after _MAX_ATTEMPTS.
-    """
-    path = _ROUTES.get(row.event_type)
-    if path is None:
-        return "retry", f"no route for event_type {row.event_type}"
-    url = f"{_sat_base_url()}{path}"
+def _post_one(target: dict, row, timeout: float) -> tuple[str, str]:
+    """POST a row to one target. Returns (outcome, detail) — ok / not_ready / retry."""
+    if not target["base"]:
+        return "skip", f"{target['name']}: not configured"
+    if not target["key"]:
+        # Configured to receive this event but no key yet: don't drop it, retry without budget.
+        return "not_ready", f"{target['name']}: api key not configured"
+    url = f"{target['base']}{target['routes'][row.event_type]}"
     try:
         resp = httpx.post(
             url,
             json=row.payload,
-            headers={"X-API-Key": _sat_api_key(), "Content-Type": "application/json"},
+            headers={"X-API-Key": target["key"], "Content-Type": "application/json"},
             timeout=timeout,
         )
     except httpx.HTTPError as exc:
-        return "retry", f"transport error: {exc}"
+        return "retry", f"{target['name']}: transport error: {exc}"
     if resp.status_code in (200, 201, 204):
-        return "ok", "ok"
+        return "ok", f"{target['name']}: ok"
     if resp.status_code == 503:
-        return "not_ready", f"HTTP 503: {resp.text[:200]}"
-    return "retry", f"HTTP {resp.status_code}: {resp.text[:200]}"
+        return "not_ready", f"{target['name']}: HTTP 503: {resp.text[:120]}"
+    return "retry", f"{target['name']}: HTTP {resp.status_code}: {resp.text[:120]}"
+
+
+def _deliver(row, *, timeout: float = 15.0) -> tuple[str, str]:
+    """Fan a row out to every target that routes its event_type. Aggregate outcome:
+
+      "ok"        — delivered to all routing targets (2xx/skip); mark done.
+      "not_ready" — some target reachable-but-not-ready (503 / key missing); reschedule WITHOUT
+                    spending the retry budget (self-heals when that consumer is enabled).
+      "retry"     — some target had a transient failure (5xx/timeout/other); spend an attempt,
+                    dead-letter after _MAX_ATTEMPTS.
+
+    Re-posting to an already-succeeded target on retry is harmless — all consumers are idempotent.
+    'retry' outranks 'not_ready' so a real failure isn't masked by a not-ready sibling.
+    """
+    routing = [t for t in _targets() if row.event_type in t["routes"]]
+    if not routing:
+        return "retry", f"no target for event_type {row.event_type}"
+    outcomes = [_post_one(t, row, timeout) for t in routing]
+    detail = "; ".join(d for _, d in outcomes)
+    kinds = {o for o, _ in outcomes}
+    if kinds == {"skip"}:
+        # Every routing target is unconfigured (e.g. only IELTS routes it and IELTS_SYNC_URL unset).
+        return "ok", detail or "no configured target"
+    if "retry" in kinds:
+        return "retry", detail
+    if "not_ready" in kinds:
+        return "not_ready", detail
+    return "ok", detail
 
 
 def run_drain_loop(stop_event=None, poll_seconds: int = 15) -> None:
