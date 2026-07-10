@@ -59,6 +59,8 @@ def _sat_api_key() -> str:
 _ROUTES = {
     # event_type -> (relative path on the SAT api/lms base)
     "group.upserted": "/groups",
+    "member.upserted": "/students/membership",
+    "member.removed": "/students/membership",
 }
 
 
@@ -236,4 +238,87 @@ CREATE TRIGGER {GROUP_SYNC_TRIGGER}
 GROUP_SYNC_TRIGGER_DOWN_SQL = f"""
 DROP TRIGGER IF EXISTS {GROUP_SYNC_TRIGGER} ON groups;
 DROP FUNCTION IF EXISTS {GROUP_SYNC_FUNCTION}();
+"""
+
+
+# --- membership trigger DDL (installed by the p8 migration) ------------------
+# Same design as the group trigger, on `group_students` (the student<->group M2M). Fires on
+# INSERT (student added to a group => member.upserted) and DELETE (removed => member.removed).
+# LMS mutates membership as delete+insert (not update), so INSERT/DELETE is sufficient. The
+# function joins to `users` (email, central_auth_user_id, name — the consumer's match keys) and
+# `groups` (program_type, name — so the consumer can route/skip and derive the label). Fully
+# EXCEPTION-shielded so it can never roll back a membership write (hot path of admin + CRM
+# enrollment). Enqueues for ALL programs; the consumer skips non-SAT/NUET (200 skipped) — matches
+# the group trigger's "capture-all, skip-at-consumer" philosophy. Requires PostgreSQL 13+.
+
+MEMBER_SYNC_FUNCTION = "student_sync_enqueue_member"
+MEMBER_SYNC_TRIGGER = "trg_student_sync_member"
+
+MEMBER_SYNC_TRIGGER_UP_SQL = f"""
+CREATE OR REPLACE FUNCTION {MEMBER_SYNC_FUNCTION}() RETURNS trigger AS $fn$
+DECLARE
+    v_event_id text;
+    v_evt      text;
+    v_gid      int;
+    v_sid      int;
+    v_email    text;
+    v_cauid    text;
+    v_name     text;
+    v_program  text;
+    v_gname    text;
+BEGIN
+    BEGIN
+        IF TG_OP = 'DELETE' THEN
+            v_evt := 'member.removed'; v_gid := OLD.group_id; v_sid := OLD.student_id;
+        ELSE
+            v_evt := 'member.upserted'; v_gid := NEW.group_id; v_sid := NEW.student_id;
+        END IF;
+
+        SELECT email, central_auth_user_id, name
+          INTO v_email, v_cauid, v_name FROM users WHERE id = v_sid;
+        SELECT program_type, name
+          INTO v_program, v_gname FROM groups WHERE id = v_gid;
+
+        v_event_id := gen_random_uuid()::text;
+        INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
+        VALUES (
+            v_event_id,
+            v_evt,
+            json_build_object(
+                'event_id', v_event_id,
+                'event_type', v_evt,
+                'source', 'lms_db_trigger',
+                'lms_group_id', v_gid,
+                'group_name', v_gname,
+                'program_type', v_program,
+                'student', json_build_object(
+                    'lms_student_id', v_sid,
+                    'email', v_email,
+                    'central_auth_user_id', v_cauid,
+                    'name', v_name
+                )
+            ),
+            'pending',
+            0,
+            (now() AT TIME ZONE 'utc')
+        );
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING USING MESSAGE =
+            'student_sync_enqueue_member failed (g=' || COALESCE(v_gid::text, '?')
+            || ', s=' || COALESCE(v_sid::text, '?') || '): ' || SQLERRM;
+    END;
+
+    RETURN NULL;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS {MEMBER_SYNC_TRIGGER} ON group_students;
+CREATE TRIGGER {MEMBER_SYNC_TRIGGER}
+    AFTER INSERT OR DELETE ON group_students
+    FOR EACH ROW EXECUTE FUNCTION {MEMBER_SYNC_FUNCTION}();
+"""
+
+MEMBER_SYNC_TRIGGER_DOWN_SQL = f"""
+DROP TRIGGER IF EXISTS {MEMBER_SYNC_TRIGGER} ON group_students;
+DROP FUNCTION IF EXISTS {MEMBER_SYNC_FUNCTION}();
 """

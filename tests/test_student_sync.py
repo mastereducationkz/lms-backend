@@ -237,3 +237,95 @@ def test_trigger_captures_generic_writer(pg):
     payloads = _outbox_payloads(pg)
     assert len(payloads) == 1
     assert payloads[0]["group"]["name"] == "crm-made"
+
+
+# --- membership trigger (Postgres-only; skips when no PG reachable) ---------
+
+@pytest.fixture()
+def pg_member():
+    """Throwaway schema with minimal users/groups/group_students + the REAL p8 member trigger."""
+    try:
+        engine = create_engine(_PG_URL)
+        raw = engine.raw_connection()
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"Postgres not reachable for member-trigger test: {exc}")
+    cur = raw.cursor()
+    try:
+        cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
+        cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
+        cur.execute(f"SET search_path TO {_TEST_SCHEMA}, public")
+        cur.execute("CREATE TABLE users (id serial PRIMARY KEY, email text, central_auth_user_id text, name text)")
+        cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text)")
+        cur.execute(
+            "CREATE TABLE group_students (id serial PRIMARY KEY, group_id int, student_id int)"
+        )
+        cur.execute(
+            "CREATE TABLE student_sync_outbox (id serial PRIMARY KEY, event_id text UNIQUE, "
+            "event_type text, payload json, status text, attempts int, created_at timestamp)"
+        )
+        cur.execute(student_sync.MEMBER_SYNC_TRIGGER_UP_SQL)
+        # seed one student + one group to reference
+        cur.execute("INSERT INTO users (id, email, central_auth_user_id, name) "
+                    "VALUES (7, 'stu@x.io', 'central-abc', 'Stu Dent')")
+        cur.execute("INSERT INTO groups (id, name, program_type) VALUES (9, 'NUET-A', 'nuet')")
+        raw.commit()
+        yield cur
+    finally:
+        cur.execute("SET search_path TO public")
+        cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
+        raw.commit()
+        cur.close()
+        raw.close()
+        engine.dispose()
+
+
+def test_member_trigger_enqueues_upserted_on_insert(pg_member):
+    pg_member.execute(f"INSERT INTO {_TEST_SCHEMA}.group_students (group_id, student_id) VALUES (9, 7)")
+    payloads = _outbox_payloads(pg_member)
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p["event_type"] == "member.upserted"
+    assert p["lms_group_id"] == 9
+    assert p["program_type"] == "nuet"
+    assert p["group_name"] == "NUET-A"
+    assert p["student"]["email"] == "stu@x.io"
+    assert p["student"]["central_auth_user_id"] == "central-abc"
+    assert p["student"]["name"] == "Stu Dent"
+    assert p["student"]["lms_student_id"] == 7
+
+
+def test_member_trigger_enqueues_removed_on_delete(pg_member):
+    pg_member.execute(f"INSERT INTO {_TEST_SCHEMA}.group_students (group_id, student_id) VALUES (9, 7)")
+    pg_member.execute(f"DELETE FROM {_TEST_SCHEMA}.group_students WHERE group_id = 9 AND student_id = 7")
+    payloads = _outbox_payloads(pg_member)
+    assert len(payloads) == 2
+    assert payloads[0]["event_type"] == "member.upserted"
+    assert payloads[1]["event_type"] == "member.removed"
+    assert payloads[1]["student"]["email"] == "stu@x.io"   # identity resolved even on delete
+    assert payloads[1]["lms_group_id"] == 9
+
+
+def test_member_trigger_captures_generic_writer(pg_member):
+    # A non-app writer (raw SQL == CRM cross-DB enrollment) is captured too.
+    pg_member.execute(f"INSERT INTO {_TEST_SCHEMA}.group_students (group_id, student_id) VALUES (9, 7)")
+    payloads = _outbox_payloads(pg_member)
+    assert len(payloads) == 1
+    assert payloads[0]["source"] == "lms_db_trigger"
+
+
+def test_member_drain_routes_to_membership_endpoint(db, monkeypatch):
+    # The drainer must POST member events to /students/membership (not /groups).
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
+    payload = {
+        "event_id": "m1", "event_type": "member.upserted", "source": "lms_db_trigger",
+        "lms_group_id": 9, "program_type": "nuet",
+        "student": {"email": "stu@x.io", "central_auth_user_id": "central-abc", "name": "S"},
+    }
+    row = StudentSyncOutbox(event_id="m1", event_type="member.upserted", payload=payload)
+    db.add(row); db.commit()
+    sent = {}
+    monkeypatch.setattr(student_sync.httpx, "post",
+                        lambda url, json, headers, timeout: sent.update(url=url) or _Resp(200))
+    student_sync.drain_outbox(db)
+    assert sent["url"].endswith("/api/lms/students/membership")
+    assert db.query(StudentSyncOutbox).one().status == "done"
