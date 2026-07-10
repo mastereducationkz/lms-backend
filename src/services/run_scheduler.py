@@ -41,6 +41,21 @@ def main():
         except Exception as e:
             logger.error(f"Failed to start video ingest worker: {e}", exc_info=True)
 
+    # Start the cross-platform sync outbox drainer (HTTP-pushes group/membership changes to
+    # SAT/NUET, later IELTS). No-op unless SYNC_ENABLED; runs only here so the API process
+    # never double-drains. See SSO_SYNC_DESIGN.md.
+    try:
+        import threading
+        from src.services.student_sync import run_drain_loop
+        threading.Thread(
+            target=run_drain_loop,
+            kwargs={"poll_seconds": int(os.getenv("SYNC_POLL_SECONDS", "15"))},
+            daemon=True,
+            name="student-sync-drainer",
+        ).start()
+    except Exception as e:
+        logger.error(f"Failed to start student-sync drainer: {e}", exc_info=True)
+
     # Check configuration
     resend_api_key = os.getenv('RESEND_API_KEY')
     postgres_url = os.getenv('POSTGRES_URL')

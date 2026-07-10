@@ -1118,6 +1118,8 @@ async def create_group(
     db.add(new_group)
     db.commit()
     db.refresh(new_group)
+    # Cross-platform sync is captured by a DB trigger on the `groups` table (see
+    # p7_student_sync_group_trigger) so CRM cross-DB writes are covered too — no app hook needed.
 
     course_access = CourseGroupAccess(
         course_id=group_data.course_id,
@@ -1255,10 +1257,11 @@ async def update_group(
     
     if "student_ids" in patch:
         _sync_group_students(db, group_id, patch["student_ids"])
-    
+
     db.commit()
     db.refresh(group)
-    
+    # Cross-platform sync is captured by the `groups` DB trigger (see p7_student_sync_group_trigger).
+
     # Create response with teacher name, curator name and student count
     teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
     curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first() if group.curator_id else None

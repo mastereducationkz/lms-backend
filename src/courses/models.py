@@ -1,9 +1,37 @@
-from sqlalchemy import Column, String, Integer, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index
+from sqlalchemy import Column, String, Integer, BigInteger, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime, timezone
 
 from src.models.base import Base
+
+
+class StudentSyncOutbox(Base):
+    """Transactional outbox for cross-platform student-data sync (see SSO_SYNC_DESIGN.md).
+
+    A row is enqueued in the SAME DB transaction as the LMS-side write (group create/update,
+    membership change), so the intent is durable even if the process dies before delivery. A
+    background drainer in the scheduler container HTTP-pushes each row to the target platforms
+    (SAT/NUET, later IELTS) idempotently and marks it published. ``id`` is the monotonic
+    per-emitter sequence; ``event_id`` is the consumer-side idempotency key.
+    """
+
+    __tablename__ = "student_sync_outbox"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String, nullable=False, unique=True, index=True)
+    event_type = Column(String(64), nullable=False)  # e.g. "group.upserted"
+    payload = Column(JSON, nullable=False)
+    status = Column(String(16), nullable=False, default="pending", server_default="pending")
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    next_attempt_at = Column(DateTime, nullable=True, index=True)
+    published_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_student_sync_outbox_status_next", "status", "next_attempt_at"),
+    )
 
 
 class Group(Base):
