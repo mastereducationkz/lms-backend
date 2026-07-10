@@ -62,6 +62,7 @@ def _targets() -> list[dict]:
                 "group.upserted": "/groups",
                 "member.upserted": "/students/membership",
                 "member.removed": "/students/membership",
+                "user.upserted": "/students/identity",
             },
         },
         {
@@ -72,6 +73,7 @@ def _targets() -> list[dict]:
                 # IELTS has no group entity — only student membership (a group label).
                 "member.upserted": "/students/membership",
                 "member.removed": "/students/membership",
+                "user.upserted": "/students/identity",
             },
         },
     ]
@@ -360,4 +362,87 @@ CREATE TRIGGER {MEMBER_SYNC_TRIGGER}
 MEMBER_SYNC_TRIGGER_DOWN_SQL = f"""
 DROP TRIGGER IF EXISTS {MEMBER_SYNC_TRIGGER} ON group_students;
 DROP FUNCTION IF EXISTS {MEMBER_SYNC_FUNCTION}();
+"""
+
+
+# --- user identity trigger DDL (installed by the p9 migration) ----------------
+# Same design as p7/p8, on `users`: whenever a user's IDENTITY fields (name, email, role,
+# is_active) change — whether via LMS admin/self-service endpoints, the CRM's direct cross-DB
+# writes, or manual SQL — a `user.upserted` snapshot is enqueued so SAT/IELTS can update the
+# matching account. This closes the audited gap where identity edits silently diverged the
+# platforms (and, because CRM writes land in this same `users` table, it is exactly what makes a
+# CRM-side name/email change propagate everywhere).
+#
+# Deliberate choices:
+#   * UPDATE-only (no INSERT): account CREATION flows through the CRM provisioning contract; an
+#     insert event would race provisioning and just no-op on the consumers.
+#   * `old_email` (OLD.email) rides along so consumers can re-key when the email itself changed —
+#     email is the cross-platform match key, so without it an email change would orphan the account.
+#   * password (hashed_password) changes are intentionally NOT in the guard and never synced:
+#     cross-platform password unification is Zitadel's job ("Continue with Master Education"),
+#     not hash-copying (see SSO_DESIGN.md).
+#   * Consumers answer 200 {"updated": false} for unknown users — an identity change for a student
+#     who was never provisioned on a platform is expected and must not dead-letter.
+# Fully EXCEPTION-shielded: can never roll back the user write. Requires PostgreSQL 13+.
+
+USER_SYNC_FUNCTION = "student_sync_enqueue_user"
+USER_SYNC_TRIGGER = "trg_student_sync_user"
+
+USER_SYNC_TRIGGER_UP_SQL = f"""
+CREATE OR REPLACE FUNCTION {USER_SYNC_FUNCTION}() RETURNS trigger AS $fn$
+DECLARE
+    v_event_id text;
+BEGIN
+    BEGIN
+        -- Only enqueue when an identity field we actually sync changed (NOT password).
+        IF NOT (
+            NEW.name IS DISTINCT FROM OLD.name
+            OR NEW.email IS DISTINCT FROM OLD.email
+            OR NEW.role IS DISTINCT FROM OLD.role
+            OR NEW.is_active IS DISTINCT FROM OLD.is_active
+        ) THEN
+            RETURN NULL;
+        END IF;
+
+        v_event_id := gen_random_uuid()::text;
+        INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
+        VALUES (
+            v_event_id,
+            'user.upserted',
+            json_build_object(
+                'event_id', v_event_id,
+                'event_type', 'user.upserted',
+                'source', 'lms_db_trigger',
+                'user', json_build_object(
+                    'lms_user_id', NEW.id,
+                    'email', NEW.email,
+                    'old_email', OLD.email,
+                    'name', NEW.name,
+                    'role', NEW.role,
+                    'is_active', COALESCE(NEW.is_active, true),
+                    'central_auth_user_id', NEW.central_auth_user_id
+                )
+            ),
+            'pending',
+            0,
+            (now() AT TIME ZONE 'utc')
+        );
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING USING MESSAGE =
+            'student_sync_enqueue_user failed for user ' || COALESCE(NEW.id::text, '?') || ': ' || SQLERRM;
+    END;
+
+    RETURN NULL;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS {USER_SYNC_TRIGGER} ON users;
+CREATE TRIGGER {USER_SYNC_TRIGGER}
+    AFTER UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION {USER_SYNC_FUNCTION}();
+"""
+
+USER_SYNC_TRIGGER_DOWN_SQL = f"""
+DROP TRIGGER IF EXISTS {USER_SYNC_TRIGGER} ON users;
+DROP FUNCTION IF EXISTS {USER_SYNC_FUNCTION}();
 """
