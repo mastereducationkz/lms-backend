@@ -187,6 +187,70 @@ def mirror_password(zitadel_user_id: str | None, plaintext_password: str, *, lms
         return False
 
 
+def update_user(
+    zitadel_user_id: str,
+    *,
+    email: str | None = None,
+    name: str | None = None,
+    old_email: str | None = None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Update a linked Zitadel account's email/username/name to match LMS (called from the
+    user.upserted drainer). Without this, an email change leaves Zitadel on the OLD address while
+    the platforms move to the NEW one — and SSO (which matches by verified email) 404s.
+
+    Email is re-imported as VERIFIED and the username is moved with it (both are login handles).
+    Returns True when every attempted update succeeded (or nothing needed changing)."""
+    own_client = client is None
+    client = client or httpx.Client()
+    ok = True
+    try:
+        base, headers = _base_url(), _headers()
+        email_changed = bool(
+            email and old_email and email.strip().lower() != old_email.strip().lower()
+        )
+        if email_changed:
+            e = email.strip()
+            r = client.put(
+                f"{base}/management/v1/users/{zitadel_user_id}/email",
+                headers=headers,
+                json={"email": e, "isEmailVerified": True},
+                timeout=10.0,
+            )
+            if r.status_code != 200:
+                ok = False
+                logger.warning("zitadel email update %s failed: HTTP %s: %s", zitadel_user_id, r.status_code, r.text[:200])
+            # Keep the login name in step with the email; a conflict here is non-fatal (email is
+            # already a valid login handle once verified).
+            try:
+                client.put(
+                    f"{base}/management/v1/users/{zitadel_user_id}/username",
+                    headers=headers,
+                    json={"userName": e.lower()},
+                    timeout=10.0,
+                )
+            except httpx.HTTPError:
+                pass
+        if name and name.strip():
+            first, last = _split_name(name)
+            r = client.put(
+                f"{base}/management/v1/users/{zitadel_user_id}/profile",
+                headers=headers,
+                json={"firstName": first, "lastName": last, "displayName": name.strip()},
+                timeout=10.0,
+            )
+            if r.status_code != 200:
+                ok = False
+                logger.warning("zitadel profile update %s failed: HTTP %s: %s", zitadel_user_id, r.status_code, r.text[:200])
+        return ok
+    except Exception as exc:  # noqa: BLE001 - never crash the drain loop
+        logger.warning("zitadel update_user %s errored: %s", zitadel_user_id, exc)
+        return False
+    finally:
+        if own_client:
+            client.close()
+
+
 def bulk_import(db, *, roles: list[str] | None = None, limit: int | None = None,
                 dry_run: bool = False, sleep_seconds: float = 0.15) -> dict:
     """Provision every active, email-bearing, not-yet-linked LMS user into Zitadel.

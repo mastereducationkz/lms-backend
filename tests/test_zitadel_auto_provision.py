@@ -18,6 +18,12 @@ from src.services import student_sync
 from src.services import zitadel_provisioning as zp
 
 
+class _R:
+    def __init__(self, code, text=""):
+        self.status_code = code
+        self.text = text
+
+
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite:///:memory:")
@@ -48,7 +54,62 @@ def _seed_created(db, user_id, email="new@x.io"):
     return row
 
 
+def _seed_upserted(db, user_id, email="new@x.io", old_email="old@x.io", name="Re Named"):
+    payload = {"event_id": f"evt-u-{user_id}", "event_type": "user.upserted", "source": "lms_db_trigger",
+               "user": {"lms_user_id": user_id, "email": email, "old_email": old_email,
+                        "name": name, "role": "student", "is_active": True, "central_auth_user_id": None}}
+    row = StudentSyncOutbox(event_id=payload["event_id"], event_type="user.upserted", payload=payload)
+    db.add(row)
+    db.commit()
+    return row
+
+
 # --- drainer delivery handler ------------------------------------------------
+
+def test_user_upserted_updates_zitadel_identity(db, monkeypatch):
+    # The fix: an email change must reach Zitadel, not only SAT/IELTS.
+    monkeypatch.setenv("ZITADEL_PAT", "pat")
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
+    u = _mk_user(db, email="new@x.io", cauid="z-linked")   # LMS already holds the NEW email + link
+    _seed_upserted(db, u.id, email="new@x.io", old_email="old@x.io")
+    monkeypatch.setattr(student_sync.httpx, "post", lambda url, json, headers, timeout: _R(200))  # SAT/IELTS ok
+    seen = {}
+    def _upd(zid, *, email=None, name=None, old_email=None):
+        seen.update(zid=zid, email=email, old_email=old_email, name=name)
+        return True
+    from src.services import zitadel_provisioning as zp
+    monkeypatch.setattr(zp, "update_user", _upd)
+    result = student_sync.drain_outbox(db)
+    assert result["published"] == 1
+    assert db.query(StudentSyncOutbox).one().status == "done"
+    # name comes from the freshest source (the DB row), email/old_email from the event.
+    assert seen == {"zid": "z-linked", "email": "new@x.io", "old_email": "old@x.io", "name": "New Comer"}
+
+
+def test_user_upserted_unlinked_user_skips_zitadel(db, monkeypatch):
+    monkeypatch.setenv("ZITADEL_PAT", "pat")
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
+    u = _mk_user(db, email="new@x.io", cauid=None)         # not linked to Zitadel
+    _seed_upserted(db, u.id)
+    monkeypatch.setattr(student_sync.httpx, "post", lambda url, json, headers, timeout: _R(200))
+    from src.services import zitadel_provisioning as zp
+    monkeypatch.setattr(zp, "update_user", lambda *a, **k: pytest.fail("must not call for unlinked user"))
+    result = student_sync.drain_outbox(db)
+    assert result["published"] == 1
+
+
+def test_user_upserted_zitadel_failure_retries(db, monkeypatch):
+    monkeypatch.setenv("ZITADEL_PAT", "pat")
+    monkeypatch.setenv("MASTEREDU_API_KEY", "k")
+    u = _mk_user(db, email="new@x.io", cauid="z-linked")
+    _seed_upserted(db, u.id)
+    monkeypatch.setattr(student_sync.httpx, "post", lambda url, json, headers, timeout: _R(200))
+    from src.services import zitadel_provisioning as zp
+    monkeypatch.setattr(zp, "update_user", lambda *a, **k: False)
+    result = student_sync.drain_outbox(db)
+    assert result["retried"] == 1
+    assert db.query(StudentSyncOutbox).one().status == "pending"
+
 
 def test_unconfigured_zitadel_completes_as_noop(db, monkeypatch):
     monkeypatch.delenv("ZITADEL_PAT", raising=False)
