@@ -107,6 +107,23 @@ def _student_of(payload: dict) -> dict:
     return (payload or {}).get("student") or {}
 
 
+# Internal/test accounts that live in the LMS but must never be provisioned onto a real platform.
+_TEST_LOCALPARTS = {"test", "testing", "testtest", "test.test", "employee", "ftest", "assingmentzerotest"}
+
+
+def _is_test_email(email: str) -> bool:
+    """True for LMS internal/test accounts (the @lms.com domain, or obvious test local-parts)."""
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return True
+    local, _, domain = email.partition("@")
+    if domain == "lms.com":
+        return True
+    if local in _TEST_LOCALPARTS or local.startswith("test") or "test" in local:
+        return True
+    return False
+
+
 def find_gap_students(db: Session) -> list[GapStudent]:
     """Distinct gap students from the failed member.upserted outbox rows, grouped by platform.
 
@@ -124,6 +141,8 @@ def find_gap_students(db: Session) -> list[GapStudent]:
         email = str(student.get("email") or "").strip().lower()
         if not email:
             continue  # nothing to match on; the membership call keys on email
+        if _is_test_email(email):
+            continue  # never provision LMS internal/test accounts onto a real platform
         program = _program_of(payload)
         entry = agg.setdefault(email, {"name": None, "ielts": False, "sat_programs": set()})
         # Keep the first non-empty name we see for this student.
