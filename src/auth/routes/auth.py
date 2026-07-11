@@ -295,6 +295,12 @@ async def reset_password(
     user.updated_at = datetime.utcnow()
     db.commit()
     background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None)
+    # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
+    from src.services.zitadel_provisioning import mirror_password
+
+    background_tasks.add_task(
+        mirror_password, user.central_auth_user_id, payload.new_password, lms_user_id=user.id
+    )
     return {"detail": "Пароль успешно изменён"}
 
 
@@ -315,4 +321,11 @@ async def change_password(
     current_user.updated_at = datetime.utcnow()
     db.commit()
     background_tasks.add_task(send_password_changed_email, current_user.email, current_user.name or "", None)
+    # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
+    from src.services.zitadel_provisioning import mirror_password
+
+    background_tasks.add_task(
+        mirror_password, current_user.central_auth_user_id, payload.new_password,
+        lms_user_id=current_user.id,
+    )
     return {"detail": "Пароль успешно изменён"}

@@ -151,6 +151,42 @@ def provision_user(
             client.close()
 
 
+def mirror_password(zitadel_user_id: str | None, plaintext_password: str, *, lms_user_id=None) -> bool:
+    """Best-effort: keep the user's Master Education (Zitadel) password equal to their LMS one.
+
+    Called (as a FastAPI background task, off the response path) from the password-change/reset
+    endpoints — the only places the plaintext legitimately exists in flight; it is never persisted
+    or enqueued. Zitadel's SetPassword API accepts only plaintext (hash import exists only at user
+    creation), hence an app-layer hook rather than a DB-trigger/outbox flow. Takes primitives, not
+    the ORM object, so it is safe after the request's session has closed. STRICTLY non-fatal: any
+    failure just means that user's ME password stays at its previous value (they can still reset
+    it at the ME login page), and we log it.
+
+    Returns True only when Zitadel actually accepted the new password.
+    """
+    try:
+        if not zitadel_enabled():
+            return False
+        if not zitadel_user_id or not plaintext_password:
+            return False
+        resp = httpx.post(
+            f"{_base_url()}/v2/users/{zitadel_user_id}/password",
+            headers=_headers(),
+            json={"newPassword": {"password": plaintext_password, "changeRequired": False}},
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            return True
+        logger.warning(
+            "zitadel password mirror failed for user id=%s: HTTP %s: %s",
+            lms_user_id, resp.status_code, resp.text[:200],
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 - must never break a password change
+        logger.warning("zitadel password mirror errored for user id=%s: %s", lms_user_id, exc)
+        return False
+
+
 def bulk_import(db, *, roles: list[str] | None = None, limit: int | None = None,
                 dry_run: bool = False, sleep_seconds: float = 0.15) -> dict:
     """Provision every active, email-bearing, not-yet-linked LMS user into Zitadel.

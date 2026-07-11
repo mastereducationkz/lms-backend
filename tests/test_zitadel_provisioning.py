@@ -104,6 +104,47 @@ def test_rejects_non_email():
         zp.provision_user("not-an-email", "A B", None, client=_Client([]))
 
 
+# --- mirror_password ---------------------------------------------------------
+
+def test_mirror_password_posts_v2_setpassword(monkeypatch):
+    calls = []
+    class _OneShot:
+        @staticmethod
+        def post(url, headers=None, json=None, timeout=None):
+            calls.append({"url": url, "json": json})
+            return _Resp(200, {})
+    monkeypatch.setattr(zp, "httpx", _OneShot)
+    assert zp.mirror_password("z-9", "NewSecret1!", lms_user_id=7) is True
+    assert calls[0]["url"].endswith("/v2/users/z-9/password")
+    assert calls[0]["json"] == {"newPassword": {"password": "NewSecret1!", "changeRequired": False}}
+
+
+def test_mirror_password_noops_without_link_or_pat(monkeypatch):
+    monkeypatch.setattr(zp, "httpx", None)  # any HTTP use would explode
+    assert zp.mirror_password(None, "x") is False           # unlinked user
+    assert zp.mirror_password("", "x") is False
+    monkeypatch.setenv("ZITADEL_PAT", "")
+    assert zp.mirror_password("z-9", "x") is False          # module disabled
+
+
+def test_mirror_password_never_raises(monkeypatch):
+    class _Boom:
+        @staticmethod
+        def post(*a, **k):
+            raise RuntimeError("network down")
+    monkeypatch.setattr(zp, "httpx", _Boom)
+    assert zp.mirror_password("z-9", "x", lms_user_id=1) is False  # swallowed + logged
+
+
+def test_mirror_password_false_on_http_error(monkeypatch):
+    class _Err:
+        @staticmethod
+        def post(*a, **k):
+            return _Resp(400, text="policy violation")
+    monkeypatch.setattr(zp, "httpx", _Err)
+    assert zp.mirror_password("z-9", "weak") is False
+
+
 # --- bulk_import ---------------------------------------------------------------
 
 @pytest.fixture()

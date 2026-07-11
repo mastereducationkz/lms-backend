@@ -906,6 +906,12 @@ async def reset_user_password(
     background_tasks.add_task(
         send_password_changed_email, user.email, user.name or "", new_password
     )
+    # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
+    from src.services.zitadel_provisioning import mirror_password
+
+    background_tasks.add_task(
+        mirror_password, user.central_auth_user_id, new_password, lms_user_id=user.id
+    )
 
     return {
         "detail": "Password reset successfully",
@@ -2108,6 +2114,12 @@ async def update_user(
     if user_data.password is not None:
         background_tasks.add_task(
             send_password_changed_email, user.email, user.name or "", user_data.password
+        )
+        # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
+        from src.services.zitadel_provisioning import mirror_password
+
+        background_tasks.add_task(
+            mirror_password, user.central_auth_user_id, user_data.password, lms_user_id=user.id
         )
 
     user_patch = user_data.model_dump(exclude_unset=True)

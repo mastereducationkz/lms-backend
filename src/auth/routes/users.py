@@ -139,6 +139,12 @@ async def update_profile(
     if password_changed:
         from src.services.email_service import send_password_changed_email
         background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None)
+        # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
+        from src.services.zitadel_provisioning import mirror_password
+
+        background_tasks.add_task(
+            mirror_password, user.central_auth_user_id, update.password, lms_user_id=user.id
+        )
 
     return build_user_schema_response(user, db)
 
