@@ -453,7 +453,8 @@ def pg_session():
     cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
     cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
     cur.execute(f"SET search_path TO {_TEST_SCHEMA}")
-    cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, is_active boolean)")
+    cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, "
+                "is_active boolean, teacher_id int, curator_id int)")
     cur.execute("CREATE TABLE users (id serial PRIMARY KEY, email text, central_auth_user_id text, name text)")
     cur.execute("CREATE TABLE group_students (id serial PRIMARY KEY, group_id int, student_id int)")
     cur.execute("CREATE TABLE student_sync_outbox (id serial PRIMARY KEY, event_id text UNIQUE, "
@@ -481,14 +482,16 @@ def _obx(pg_session):
     return pg_session.execute(text(f"SELECT event_type, payload FROM {_TEST_SCHEMA}.student_sync_outbox ORDER BY id")).fetchall()
 
 
-def test_backfill_groups_only_sat_nuet(pg_session):
+def test_backfill_groups_sat_nuet_ielts(pg_session):
     from src.services import sync_backfill
     res = sync_backfill.backfill(pg_session, do_groups=True)
-    assert res["groups"] == 2                       # sat + nuet, NOT ielts/general_english
+    assert res["groups"] == 3                       # sat + nuet + ielts, NOT general_english
     rows = _obx(pg_session)
     assert {r[0] for r in rows} == {"group.upserted"}
     progs = {r[1]["group"]["program_type"] for r in rows}
-    assert progs == {"sat", "nuet"}
+    assert progs == {"sat", "nuet", "ielts"}
+    # teacher/curator keys are always present (null here — no assignment in this fixture)
+    assert all("teacher_email" in r[1]["group"] for r in rows)
     assert all(r[1]["source"] == "lms_backfill" for r in rows)
 
 
@@ -507,5 +510,5 @@ def test_backfill_members_sat_nuet_ielts(pg_session):
 def test_backfill_dry_run_enqueues_nothing(pg_session):
     from src.services import sync_backfill
     res = sync_backfill.backfill(pg_session, do_groups=True, do_members=True, dry_run=True)
-    assert res == {"groups": 2, "members": 3, "dry_run": True}
+    assert res == {"groups": 3, "members": 3, "dry_run": True}
     assert _obx(pg_session) == []                     # nothing written
