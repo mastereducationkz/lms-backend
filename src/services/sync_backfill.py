@@ -38,6 +38,9 @@ _GROUPS_SQL = text(
         LEFT JOIN users t ON t.id = grp.teacher_id
         LEFT JOIN users c ON c.id = grp.curator_id
         WHERE grp.program_type IN :programs
+          -- Only backfill groups that actually have members — a member-less LMS group has no
+          -- reason to exist on any platform, and emitting it would manufacture an empty group.
+          AND EXISTS (SELECT 1 FROM group_students gs WHERE gs.group_id = grp.id)
     )
     INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
     SELECT g.eid, 'group.upserted',
