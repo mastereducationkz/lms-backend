@@ -364,7 +364,8 @@ def pg_member():
         cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
         cur.execute(f"SET search_path TO {_TEST_SCHEMA}, public")
         cur.execute("CREATE TABLE users (id serial PRIMARY KEY, email text, central_auth_user_id text, name text)")
-        cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text)")
+        cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, "
+                    "teacher_id int, curator_id int)")
         cur.execute(
             "CREATE TABLE group_students (id serial PRIMARY KEY, group_id int, student_id int)"
         )
@@ -373,10 +374,13 @@ def pg_member():
             "event_type text, payload json, status text, attempts int, created_at timestamp)"
         )
         cur.execute(student_sync.MEMBER_SYNC_TRIGGER_UP_SQL)
-        # seed one student + one group to reference
+        # seed one student, a teacher + curator, and one group that references them
         cur.execute("INSERT INTO users (id, email, central_auth_user_id, name) "
                     "VALUES (7, 'stu@x.io', 'central-abc', 'Stu Dent')")
-        cur.execute("INSERT INTO groups (id, name, program_type) VALUES (9, 'NUET-A', 'nuet')")
+        cur.execute("INSERT INTO users (id, email, name) VALUES (3, 'teach@x.io', 'Ms Teach')")
+        cur.execute("INSERT INTO users (id, email, name) VALUES (4, 'cur@x.io', 'Mr Cur')")
+        cur.execute("INSERT INTO groups (id, name, program_type, teacher_id, curator_id) "
+                    "VALUES (9, 'NUET-A', 'nuet', 3, 4)")
         raw.commit()
         yield cur
     finally:
@@ -401,6 +405,9 @@ def test_member_trigger_enqueues_upserted_on_insert(pg_member):
     assert p["student"]["central_auth_user_id"] == "central-abc"
     assert p["student"]["name"] == "Stu Dent"
     assert p["student"]["lms_student_id"] == 7
+    # the group's teacher/curator ride along so a lazy group create can link them on first join
+    assert p["teacher_email"] == "teach@x.io" and p["teacher_name"] == "Ms Teach"
+    assert p["curator_email"] == "cur@x.io" and p["curator_name"] == "Mr Cur"
 
 
 def test_member_trigger_enqueues_removed_on_delete(pg_member):
