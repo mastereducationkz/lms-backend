@@ -826,6 +826,30 @@ async def get_weekly_lessons_with_hw_status(
                     payload = await IELTSService.fetch_batch_scores_by_date(
                         emails, score_date_obj.strftime("%Y-%m-%d")
                     )
+                    # Weekly-set windows stay open past their nominal weekend so
+                    # students can finish late, which makes mid-week probe dates
+                    # resolve to LAST week's set. A set belongs to this leaderboard
+                    # week only if it STARTED inside it. A curator-hour date OUTSIDE
+                    # the week can only mean "pull that set" and stays a manual
+                    # override (an in-week one is just the meeting date, no bypass),
+                    # so a set rejected here is NOT marked seen — the pinned probe
+                    # may still claim it.
+                    pinned = bool(
+                        config
+                        and config.curator_hour_date == score_date_obj
+                        and not (week_start_date <= score_date_obj < week_end_date)
+                    )
+                    set_from_raw = payload.get("weeklySetDateFrom")
+                    if set_from_raw and not pinned:
+                        try:
+                            set_started = datetime.fromisoformat(set_from_raw).date()
+                        except ValueError:
+                            set_started = None
+                        if set_started is not None and not (
+                            week_start_date <= set_started < week_end_date
+                        ):
+                            continue
+
                     weekly_set_id = payload.get("weeklySetId")
                     if weekly_set_id is not None:
                         if weekly_set_id in seen_weekly_set_ids:
