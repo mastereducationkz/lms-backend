@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 _GROUPS_SQL = text(
     """
     WITH g AS (
-        SELECT id, name, program_type, is_active, gen_random_uuid()::text AS eid
-        FROM groups
-        WHERE program_type IN :programs
+        SELECT grp.id, grp.name, grp.program_type, grp.is_active,
+               t.email AS teacher_email, t.name AS teacher_name,
+               c.email AS curator_email, c.name AS curator_name,
+               gen_random_uuid()::text AS eid
+        FROM groups grp
+        LEFT JOIN users t ON t.id = grp.teacher_id
+        LEFT JOIN users c ON c.id = grp.curator_id
+        WHERE grp.program_type IN :programs
     )
     INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
     SELECT g.eid, 'group.upserted',
@@ -44,7 +49,11 @@ _GROUPS_SQL = text(
                 'lms_group_id', g.id,
                 'name', g.name,
                 'program_type', g.program_type,
-                'is_active', COALESCE(g.is_active, true)
+                'is_active', COALESCE(g.is_active, true),
+                'teacher_email', g.teacher_email,
+                'teacher_name', g.teacher_name,
+                'curator_email', g.curator_email,
+                'curator_name', g.curator_name
             )
         ),
         'pending', 0, (now() AT TIME ZONE 'utc')
@@ -95,7 +104,9 @@ _COUNT_MEMBERS = text(
 ).bindparams(bindparam("programs", expanding=True))
 
 # SAT/NUET consume groups; members go to SAT/NUET + IELTS. general_english has no target.
-GROUP_PROGRAMS = ["sat", "nuet"]
+# IELTS now consumes group.upserted too (for the group's teacher/curator), so it is included
+# in the group backfill — SAT ignores ielts-program group events; IELTS ignores sat/nuet.
+GROUP_PROGRAMS = ["sat", "nuet", "ielts"]
 MEMBER_PROGRAMS = ["sat", "nuet", "ielts"]
 
 
