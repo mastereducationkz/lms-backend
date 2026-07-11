@@ -929,7 +929,9 @@ async def get_weekly_lessons_with_hw_status(
                         verbal_fb = item.get("verbalFeedback") or {}
                         sat_feedback_map[student_id] = {
                             "math_feedback": math_fb.get("feedbackText"),
+                            "math_feedback_ru": math_fb.get("feedbackTextRu"),
                             "verbal_feedback": verbal_fb.get("feedbackText"),
+                            "verbal_feedback_ru": verbal_fb.get("feedbackTextRu"),
                             "math_test_name": item.get("mathTestName"),
                             "verbal_test_name": item.get("verbalTestName"),
                             "math_completed_at": item.get("mathCompletedAt"),
@@ -996,7 +998,9 @@ async def get_weekly_lessons_with_hw_status(
             "sat_verbal_correct_count": sat_sections.get("verbal_correct"),
             "sat_verbal_total_count": sat_sections.get("verbal_total"),
             "sat_math_feedback": sat_fb.get("math_feedback"),
+            "sat_math_feedback_ru": sat_fb.get("math_feedback_ru"),
             "sat_verbal_feedback": sat_fb.get("verbal_feedback"),
+            "sat_verbal_feedback_ru": sat_fb.get("verbal_feedback_ru"),
             "sat_math_test_name": sat_fb.get("math_test_name"),
             "sat_verbal_test_name": sat_fb.get("verbal_test_name"),
             "sat_math_completed_at": sat_fb.get("math_completed_at"),
