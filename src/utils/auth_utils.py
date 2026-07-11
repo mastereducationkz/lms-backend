@@ -132,24 +132,41 @@ def verify_bearer_token(token: str):
         _logger.info("OIDC bearer token rejected: %s", exc)
         return None
 
+    # Email + its verified flag come from the same source: the token claim if present,
+    # otherwise the userinfo endpoint (Zitadel JWT access tokens don't carry email).
+    from src.utils.oidc import email_is_verified, oidc_require_email_verified
+
     email = (claims.get("email") or "").strip().lower()
+    email_verified = email_is_verified(claims.get("email_verified"))
     if not email:
-        # Zitadel JWT access tokens don't carry email — resolve it from the userinfo
-        # endpoint using the same (already-verified) access token.
         try:
             from src.utils.oidc import fetch_userinfo
 
-            email = (fetch_userinfo(token).get("email") or "").strip().lower()
+            info = fetch_userinfo(token)
+            email = (info.get("email") or "").strip().lower()
+            email_verified = email_is_verified(info.get("email_verified"))
         except Exception as exc:  # pragma: no cover - defensive
             _logger.info("OIDC userinfo email resolution failed: %s", exc)
+
+    # Security: never trust an UNVERIFIED IdP email as an LMS match/link key. Without this,
+    # an IdP account whose (unverified) email equals a victim's LMS email would resolve to —
+    # and backfill its subject onto — the victim's account (see resolve_user_by_payload). We
+    # drop the untrusted email; with no trusted email left the token cannot map to a user and
+    # is rejected. All estate accounts are imported email-verified, so real logins are
+    # unaffected, and a *changed* email is still verified, so subject-first resolution holds.
+    if email and not email_verified and oidc_require_email_verified():
+        _logger.warning("OIDC email %r is not verified; refusing to map it to an LMS user", email)
+        email = ""
+
     if not email:
-        _logger.warning("OIDC token verified but no email (token or userinfo); cannot map to an LMS user")
+        _logger.warning("OIDC token verified but no trusted email (token or userinfo); cannot map to an LMS user")
         return None
     return {
         "sub": email,
         "email": email,
         "oidc": True,
         "central_auth_user_id": claims.get("sub"),
+        "email_verified": email_verified,
     }
 
 
