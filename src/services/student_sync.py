@@ -355,6 +355,10 @@ BEGIN
                 'group', json_build_object(
                     'lms_group_id', NEW.id,
                     'name', NEW.name,
+                    -- The name BEFORE this change (equals name unless it's an actual rename). IELTS
+                    -- keys groups by name, so its update-only consumer needs the old name to FIND a
+                    -- renamed group and rename it in place (otherwise a rename orphans/splits it).
+                    'old_name', CASE WHEN TG_OP = 'UPDATE' THEN OLD.name ELSE NEW.name END,
                     'program_type', NEW.program_type,
                     -- is_active is nullable in the LMS model; never emit JSON null (the SAT
                     -- consumer binds a non-nullable bool). Absent/NULL => active.
@@ -419,6 +423,12 @@ DECLARE
     v_name     text;
     v_program  text;
     v_gname    text;
+    v_teacher_id int;
+    v_curator_id int;
+    v_teacher_email text;
+    v_teacher_name  text;
+    v_curator_email text;
+    v_curator_name  text;
 BEGIN
     BEGIN
         IF TG_OP = 'DELETE' THEN
@@ -429,8 +439,17 @@ BEGIN
 
         SELECT email, central_auth_user_id, name
           INTO v_email, v_cauid, v_name FROM users WHERE id = v_sid;
-        SELECT program_type, name
-          INTO v_program, v_gname FROM groups WHERE id = v_gid;
+        -- Carry the group's teacher/curator too: a name-keyed consumer (IELTS) creates the group
+        -- lazily on the first join, and without this the group would be created teacher-less until
+        -- a later group edit. Resolving them here links the teacher the instant a student joins.
+        SELECT program_type, name, teacher_id, curator_id
+          INTO v_program, v_gname, v_teacher_id, v_curator_id FROM groups WHERE id = v_gid;
+        IF v_teacher_id IS NOT NULL THEN
+            SELECT email, name INTO v_teacher_email, v_teacher_name FROM users WHERE id = v_teacher_id;
+        END IF;
+        IF v_curator_id IS NOT NULL THEN
+            SELECT email, name INTO v_curator_email, v_curator_name FROM users WHERE id = v_curator_id;
+        END IF;
 
         v_event_id := gen_random_uuid()::text;
         INSERT INTO student_sync_outbox (event_id, event_type, payload, status, attempts, created_at)
@@ -444,6 +463,12 @@ BEGIN
                 'lms_group_id', v_gid,
                 'group_name', v_gname,
                 'program_type', v_program,
+                -- group teacher/curator (null when unassigned); consumers that create the group
+                -- lazily use these to link it on the first join.
+                'teacher_email', v_teacher_email,
+                'teacher_name', v_teacher_name,
+                'curator_email', v_curator_email,
+                'curator_name', v_curator_name,
                 'student', json_build_object(
                     'lms_student_id', v_sid,
                     'email', v_email,
