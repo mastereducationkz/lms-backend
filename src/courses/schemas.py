@@ -1,5 +1,5 @@
 from pydantic import BaseModel, field_validator
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List, Literal
 import json
 
@@ -29,6 +29,9 @@ class GroupSchema(BaseModel):
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None
+    # Monday of the group's first class event/schedule — the anchor the
+    # leaderboard numbers its weeks from (created_at can precede it by weeks)
+    week1_start: Optional[date] = None
     max_open_lessons: Optional[int] = None
     course_id: Optional[int] = None
     course_ids: Optional[List[int]] = None

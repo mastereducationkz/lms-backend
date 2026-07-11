@@ -194,7 +194,8 @@ async def get_curator_groups(
             program_type=getattr(group, "program_type", None) or "general_english",
             weekly_set_week_offset=getattr(group, "weekly_set_week_offset", 0) or 0,
             current_week=current_week,
-            max_week=max_week
+            max_week=max_week,
+            week1_start=start_of_week1
         ))
     return result
 

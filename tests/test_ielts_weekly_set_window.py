@@ -186,3 +186,16 @@ def test_curator_hour_date_pins_out_of_week_set(db, monkeypatch):
     assert row["ielts_overall_band"] == 6.0
     assert row["ielts_weekly_set_title"] == "06.06 - 07.06"
     assert row["ielts_listening_feedback"] == "stale feedback"
+
+
+def test_groups_endpoint_exposes_week1_start(db):
+    """/curator/groups returns the Monday of the first class event as
+    week1_start — the anchor the frontend must label week ranges with
+    (created_at can precede the first class by weeks)."""
+    from src.gamification.routes.leaderboard import get_curator_groups
+
+    admin, group, _student = _group_with_student(db, "anchor")
+    groups = asyncio.run(get_curator_groups(current_user=admin, db=db))
+    ours = next(g for g in groups if g.id == group.id)
+    assert ours.week1_start == date(2026, 6, 1)  # Monday of the first event's week
+    assert ours.current_week is not None
