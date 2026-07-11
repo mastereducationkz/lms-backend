@@ -187,17 +187,49 @@ def mirror_password(zitadel_user_id: str | None, plaintext_password: str, *, lms
         return False
 
 
+def set_user_active(zitadel_user_id: str, is_active: bool, *, client: httpx.Client | None = None) -> bool:
+    """Deactivate/reactivate the Zitadel account to match LMS is_active. This is what makes an LMS
+    deactivation a real, estate-wide revoke: a deactivated Zitadel user can no longer authenticate
+    at the Master Education login at all (essential for the SSO-only future — without it a
+    deactivated person could still log in via SSO). Idempotent: 'already in that state' is success."""
+    own_client = client is None
+    client = client or httpx.Client()
+    try:
+        action = "_reactivate" if is_active else "_deactivate"
+        r = client.post(
+            f"{_base_url()}/management/v1/users/{zitadel_user_id}/{action}",
+            headers=_headers(),
+            json={},
+            timeout=10.0,
+        )
+        if r.status_code == 200:
+            return True
+        # Already active/inactive — Zitadel answers with a precondition/AlreadyExists-style error.
+        if r.status_code in (409, 400) and ("already" in r.text.lower() or "state" in r.text.lower()):
+            return True
+        logger.warning("zitadel set_user_active(%s,%s) failed: HTTP %s: %s", zitadel_user_id, is_active, r.status_code, r.text[:200])
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("zitadel set_user_active(%s) errored: %s", zitadel_user_id, exc)
+        return False
+    finally:
+        if own_client:
+            client.close()
+
+
 def update_user(
     zitadel_user_id: str,
     *,
     email: str | None = None,
     name: str | None = None,
     old_email: str | None = None,
+    is_active: bool | None = None,
     client: httpx.Client | None = None,
 ) -> bool:
-    """Update a linked Zitadel account's email/username/name to match LMS (called from the
-    user.upserted drainer). Without this, an email change leaves Zitadel on the OLD address while
-    the platforms move to the NEW one — and SSO (which matches by verified email) 404s.
+    """Update a linked Zitadel account's email/username/name/active-state to match LMS (called from
+    the user.upserted drainer). Without the email part, an email change leaves Zitadel on the OLD
+    address while the platforms move to the NEW one — and SSO (which matches by verified email)
+    404s. Without the active part, an LMS deactivation never disables SSO.
 
     Email is re-imported as VERIFIED and the username is moved with it (both are login handles).
     Returns True when every attempted update succeeded (or nothing needed changing)."""
@@ -242,6 +274,8 @@ def update_user(
             if r.status_code != 200:
                 ok = False
                 logger.warning("zitadel profile update %s failed: HTTP %s: %s", zitadel_user_id, r.status_code, r.text[:200])
+        if is_active is not None:
+            ok = set_user_active(zitadel_user_id, is_active, client=client) and ok
         return ok
     except Exception as exc:  # noqa: BLE001 - never crash the drain loop
         logger.warning("zitadel update_user %s errored: %s", zitadel_user_id, exc)

@@ -88,6 +88,28 @@ def test_update_user_never_raises():
     assert zp.update_user("z1", email="new@x.io", old_email="old@x.io", client=_Boom()) is False
 
 
+def test_set_user_active_deactivate_and_reactivate():
+    c = _Client(responses=[_Resp(200, {}), _Resp(200, {})])
+    assert zp.set_user_active("z1", False, client=c) is True
+    assert c.posts[0]["url"].endswith("/management/v1/users/z1/_deactivate")
+    c2 = _Client(responses=[_Resp(200, {})])
+    assert zp.set_user_active("z1", True, client=c2) is True
+    assert c2.posts[0]["url"].endswith("/management/v1/users/z1/_reactivate")
+
+
+def test_set_user_active_already_in_state_is_success():
+    c = _Client(responses=[_Resp(409, text="user is already deactivated")])
+    assert zp.set_user_active("z1", False, client=c) is True
+
+
+def test_update_user_sets_active_state():
+    # update_user with is_active should also hit the deactivate/reactivate endpoint.
+    c = _Client(responses=[_Resp(200, {})])   # the _deactivate POST
+    ok = zp.update_user("z1", is_active=False, client=c)
+    assert ok is True
+    assert any(p["url"].endswith("/_deactivate") for p in c.posts)
+
+
 @pytest.fixture(autouse=True)
 def _pat(monkeypatch):
     monkeypatch.setenv("ZITADEL_PAT", "test-pat")
