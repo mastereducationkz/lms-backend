@@ -279,6 +279,7 @@ def test_trigger_enqueues_on_group_insert(pg):
     assert p["group"]["name"] == "SAT-A"
     assert p["group"]["is_active"] is True
     assert p["group"]["lms_group_id"] >= 1
+    assert p["group"]["old_name"] == "SAT-A"       # on INSERT, old_name == name (no rename)
     assert p["event_id"]                          # a generated event_id is present
     # event_id is mirrored into both the column and the payload (the drainer's dedup key)
     pg.execute(f"SELECT event_id FROM {_TEST_SCHEMA}.student_sync_outbox ORDER BY id LIMIT 1")
@@ -291,6 +292,8 @@ def test_trigger_enqueues_on_synced_field_update(pg):
     payloads = _outbox_payloads(pg)
     assert len(payloads) == 2                     # insert + rename both enqueued
     assert payloads[1]["group"]["name"] == "N-renamed"
+    # A rename carries the PREVIOUS name so the name-keyed IELTS consumer can find + rename it.
+    assert payloads[1]["group"]["old_name"] == "N"
 
 
 def test_trigger_skips_update_of_unsynced_field(pg):

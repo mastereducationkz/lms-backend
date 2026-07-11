@@ -355,6 +355,10 @@ BEGIN
                 'group', json_build_object(
                     'lms_group_id', NEW.id,
                     'name', NEW.name,
+                    -- The name BEFORE this change (equals name unless it's an actual rename). IELTS
+                    -- keys groups by name, so its update-only consumer needs the old name to FIND a
+                    -- renamed group and rename it in place (otherwise a rename orphans/splits it).
+                    'old_name', CASE WHEN TG_OP = 'UPDATE' THEN OLD.name ELSE NEW.name END,
                     'program_type', NEW.program_type,
                     -- is_active is nullable in the LMS model; never emit JSON null (the SAT
                     -- consumer binds a non-nullable bool). Absent/NULL => active.
