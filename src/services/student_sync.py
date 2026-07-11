@@ -183,6 +183,10 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
         if row.event_type == "user.created":
             # Not an HTTP fan-out: provisions the new user into Zitadel (see p10 trigger notes).
             outcome, detail = _deliver_user_created(db, row)
+        elif row.event_type == "user.upserted":
+            # Fan out to SAT/IELTS AND update the Zitadel identity (email/name) — otherwise an
+            # email change breaks SSO (Zitadel keeps the old email; the platforms get the new one).
+            outcome, detail = _deliver_user_upserted(db, row)
         else:
             outcome, detail = _deliver(row)
         if outcome == "ok":
@@ -246,6 +250,42 @@ def _deliver_user_created(db: Session, row) -> tuple[str, str]:
         return "retry", f"zitadel: {exc}"
     user.central_auth_user_id = zitadel_id
     return "ok", f"zitadel: provisioned {zitadel_id}"
+
+
+def _deliver_user_upserted(db: Session, row) -> tuple[str, str]:
+    """user.upserted: fan out to SAT/IELTS (the /students/identity HTTP consumers) AND update the
+    linked Zitadel account's email/name. The Zitadel update is the fix for the email-change bug:
+    without it, Zitadel keeps the OLD email while the platforms get the NEW one, so SSO login
+    returns the old email and 404s. Aggregate outcome: an HTTP retry OR a Zitadel failure => retry;
+    an unlinked user / Zitadel-off simply skips the Zitadel step (the HTTP outcome stands)."""
+    http_outcome, http_detail = _deliver(row)
+
+    from src.services import zitadel_provisioning as zp
+
+    if not zp.zitadel_enabled():
+        return http_outcome, f"{http_detail}; zitadel: not configured"
+
+    from src.auth.models import UserInDB
+
+    payload_user = (row.payload or {}).get("user") or {}
+    user_id = payload_user.get("lms_user_id")
+    db_user = db.query(UserInDB).filter(UserInDB.id == user_id).first() if user_id else None
+    # Prefer the live link on the row; fall back to the snapshot in the payload.
+    zitadel_id = getattr(db_user, "central_auth_user_id", None) or payload_user.get("central_auth_user_id")
+    if not zitadel_id:
+        return http_outcome, f"{http_detail}; zitadel: user not linked"
+
+    # Use the freshest identity values (the DB row), falling back to the event payload.
+    new_email = (getattr(db_user, "email", None) or payload_user.get("email") or "").strip()
+    new_name = (getattr(db_user, "name", None) or payload_user.get("name") or "").strip()
+    old_email = (payload_user.get("old_email") or "").strip()
+    try:
+        ok = zp.update_user(zitadel_id, email=new_email, name=new_name, old_email=old_email)
+    except Exception as exc:  # noqa: BLE001 - never let a Zitadel hiccup crash the drain loop
+        return "retry", f"{http_detail}; zitadel: {exc}"
+    if not ok:
+        return "retry", f"{http_detail}; zitadel: update failed"
+    return http_outcome, f"{http_detail}; zitadel: identity updated"
 
 
 # --- database trigger DDL (installed by the p7 migration) --------------------

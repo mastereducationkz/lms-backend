@@ -26,15 +26,21 @@ class _Resp:
 
 
 class _Client:
-    """Scripted httpx.Client stand-in: records posts, returns queued responses."""
+    """Scripted httpx.Client stand-in: records posts/puts, returns queued responses."""
 
-    def __init__(self, responses):
-        self.responses = list(responses)
+    def __init__(self, responses=None, put_responses=None):
+        self.responses = list(responses or [])
+        self.put_responses = list(put_responses or [])
         self.posts = []
+        self.puts = []
 
     def post(self, url, headers=None, json=None, timeout=None):
         self.posts.append({"url": url, "json": json, "headers": headers})
         return self.responses.pop(0)
+
+    def put(self, url, headers=None, json=None, timeout=None):
+        self.puts.append({"url": url, "json": json, "headers": headers})
+        return self.put_responses.pop(0) if self.put_responses else _Resp(200, {})
 
     def close(self):
         pass
@@ -44,6 +50,42 @@ class _Client:
 
     def __exit__(self, *a):
         pass
+
+
+# --- update_user (identity change -> Zitadel) --------------------------------
+
+def test_update_user_changes_email_and_username_and_name():
+    c = _Client()
+    ok = zp.update_user("z1", email="new@x.io", name="New Name", old_email="old@x.io", client=c)
+    assert ok is True
+    urls = [p["url"] for p in c.puts]
+    assert any(u.endswith("/management/v1/users/z1/email") for u in urls)
+    assert any(u.endswith("/management/v1/users/z1/username") for u in urls)
+    assert any(u.endswith("/management/v1/users/z1/profile") for u in urls)
+    email_put = next(p for p in c.puts if p["url"].endswith("/email"))
+    assert email_put["json"] == {"email": "new@x.io", "isEmailVerified": True}
+
+
+def test_update_user_skips_email_when_unchanged():
+    c = _Client()
+    zp.update_user("z1", email="same@x.io", name="Same Name", old_email="SAME@x.io", client=c)
+    urls = [p["url"] for p in c.puts]
+    assert not any(u.endswith("/email") for u in urls)   # case-insensitive equal => no email change
+    assert any(u.endswith("/profile") for u in urls)     # name still updated
+
+
+def test_update_user_returns_false_on_email_http_error():
+    c = _Client(put_responses=[_Resp(400, text="bad")])
+    assert zp.update_user("z1", email="new@x.io", name="N", old_email="old@x.io", client=c) is False
+
+
+def test_update_user_never_raises():
+    class _Boom:
+        def put(self, *a, **k):
+            raise RuntimeError("network down")
+        def close(self):
+            pass
+    assert zp.update_user("z1", email="new@x.io", old_email="old@x.io", client=_Boom()) is False
 
 
 @pytest.fixture(autouse=True)
