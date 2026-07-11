@@ -82,6 +82,27 @@ def oidc_userinfo_url() -> str:
     return os.getenv("OIDC_USERINFO_URL", "").strip()
 
 
+def oidc_require_email_verified() -> bool:
+    """When true (the default), an IdP-supplied email is only trusted as an LMS match
+    key if the token/userinfo marks it verified. This closes an account-takeover path:
+    without it, an IdP account whose (unverified) email happens to equal a victim's LMS
+    email would resolve to — and link its subject onto — the victim's account. An
+    already-linked user still authenticates via the stable subject, so enforcing this
+    only ever rejects a *new* email-based match, never an established login.
+    Operators can set ``OIDC_REQUIRE_EMAIL_VERIFIED=false`` as a break-glass escape."""
+    return os.getenv("OIDC_REQUIRE_EMAIL_VERIFIED", "true").strip().lower() in _TRUTHY
+
+
+def email_is_verified(value) -> bool:
+    """Normalize an ``email_verified`` claim (JSON bool, or a stringy "true"/"1") to a
+    strict bool. Anything absent or unrecognized is treated as NOT verified."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUTHY
+    return False
+
+
 def fetch_userinfo(token: str, *, timeout: float = 5.0) -> dict:
     """Call the userinfo endpoint with the presented access token. Returns {} on any
     failure or if no URL is configured (caller treats a missing email as auth failure)."""
