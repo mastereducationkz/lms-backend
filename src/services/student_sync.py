@@ -70,7 +70,9 @@ def _targets() -> list[dict]:
             "base": os.getenv("IELTS_SYNC_URL", "").rstrip("/"),
             "key": os.getenv("IELTS_API_KEY", ""),
             "routes": {
-                # IELTS has no group entity — only student membership (a group label).
+                # IELTS now consumes the group entity too (for the group's teacher/curator),
+                # in addition to student membership.
+                "group.upserted": "/students/groups",
                 "member.upserted": "/students/membership",
                 "member.removed": "/students/membership",
                 "user.upserted": "/students/identity",
@@ -265,18 +267,34 @@ GROUP_SYNC_TRIGGER_UP_SQL = f"""
 CREATE OR REPLACE FUNCTION {GROUP_SYNC_FUNCTION}() RETURNS trigger AS $fn$
 DECLARE
     v_event_id text;
+    v_teacher_email text;
+    v_teacher_name  text;
+    v_curator_email text;
+    v_curator_name  text;
 BEGIN
     -- The ENTIRE body (including the changed-field guard, which reads NEW/OLD columns) runs inside
     -- one EXCEPTION shield, so nothing this trigger does — not even a future schema drift that made a
     -- referenced column disappear — can raise into and roll back the caller's group write.
     BEGIN
-        -- On UPDATE, only enqueue when a field we actually sync changed.
+        -- On UPDATE, only enqueue when a field we actually sync changed. teacher_id/curator_id are
+        -- included so a re-assignment propagates the group's teacher to the other platforms (without
+        -- this, synced groups have no teacher and teachers can't see their students).
         IF (TG_OP = 'UPDATE') AND NOT (
             NEW.name IS DISTINCT FROM OLD.name
             OR NEW.program_type IS DISTINCT FROM OLD.program_type
             OR NEW.is_active IS DISTINCT FROM OLD.is_active
+            OR NEW.teacher_id IS DISTINCT FROM OLD.teacher_id
+            OR NEW.curator_id IS DISTINCT FROM OLD.curator_id
         ) THEN
             RETURN NULL;
+        END IF;
+
+        -- Resolve the group's teacher/curator identity (email is the cross-platform match key).
+        IF NEW.teacher_id IS NOT NULL THEN
+            SELECT email, name INTO v_teacher_email, v_teacher_name FROM users WHERE id = NEW.teacher_id;
+        END IF;
+        IF NEW.curator_id IS NOT NULL THEN
+            SELECT email, name INTO v_curator_email, v_curator_name FROM users WHERE id = NEW.curator_id;
         END IF;
 
         v_event_id := gen_random_uuid()::text;
@@ -294,7 +312,13 @@ BEGIN
                     'program_type', NEW.program_type,
                     -- is_active is nullable in the LMS model; never emit JSON null (the SAT
                     -- consumer binds a non-nullable bool). Absent/NULL => active.
-                    'is_active', COALESCE(NEW.is_active, true)
+                    'is_active', COALESCE(NEW.is_active, true),
+                    -- Teacher/curator ride along so consumers can set the group's FK by email.
+                    -- null when unassigned => consumer clears the assignment.
+                    'teacher_email', v_teacher_email,
+                    'teacher_name', v_teacher_name,
+                    'curator_email', v_curator_email,
+                    'curator_name', v_curator_name
                 )
             ),
             'pending',
