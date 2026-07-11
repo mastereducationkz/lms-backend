@@ -98,7 +98,10 @@ def _item(email, band, feedback):
         "writingBand": None, "speakingBand": None, "overallBand": band,
         "listeningTestName": "L1", "readingTestName": None, "writingTestName": None,
         "listeningFeedback": feedback, "readingFeedback": None,
+        "listeningFeedbackRu": f"{feedback} (ru)" if feedback else None,
+        "readingFeedbackRu": None,
         "writingFeedback": None, "speakingFeedback": None,
+        "writingFeedbackRu": None, "speakingFeedbackRu": None,
     }
 
 
@@ -155,6 +158,8 @@ def test_current_week_set_shown(db, monkeypatch):
     assert row["ielts_overall_band"] == 7.5
     assert row["ielts_weekly_set_title"] == "13.06 - 14.06"
     assert row["ielts_listening_feedback"] == "current-week feedback"
+    assert row["ielts_listening_feedback_ru"] == "current-week feedback (ru)"
+    assert row["ielts_writing_feedback_ru"] is None
 
 
 def test_in_week_curator_hour_date_is_not_a_pin(db, monkeypatch):
