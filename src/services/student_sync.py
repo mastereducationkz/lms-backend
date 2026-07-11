@@ -279,8 +279,14 @@ def _deliver_user_upserted(db: Session, row) -> tuple[str, str]:
     new_email = (getattr(db_user, "email", None) or payload_user.get("email") or "").strip()
     new_name = (getattr(db_user, "name", None) or payload_user.get("name") or "").strip()
     old_email = (payload_user.get("old_email") or "").strip()
+    # is_active from the freshest source; disables/enables the Zitadel account (revoke on deactivate).
+    is_active = getattr(db_user, "is_active", None)
+    if is_active is None:
+        is_active = payload_user.get("is_active")
     try:
-        ok = zp.update_user(zitadel_id, email=new_email, name=new_name, old_email=old_email)
+        ok = zp.update_user(
+            zitadel_id, email=new_email, name=new_name, old_email=old_email, is_active=is_active
+        )
     except Exception as exc:  # noqa: BLE001 - never let a Zitadel hiccup crash the drain loop
         return "retry", f"{http_detail}; zitadel: {exc}"
     if not ok:

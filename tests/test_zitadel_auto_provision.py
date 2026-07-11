@@ -74,8 +74,8 @@ def test_user_upserted_updates_zitadel_identity(db, monkeypatch):
     _seed_upserted(db, u.id, email="new@x.io", old_email="old@x.io")
     monkeypatch.setattr(student_sync.httpx, "post", lambda url, json, headers, timeout: _R(200))  # SAT/IELTS ok
     seen = {}
-    def _upd(zid, *, email=None, name=None, old_email=None):
-        seen.update(zid=zid, email=email, old_email=old_email, name=name)
+    def _upd(zid, *, email=None, name=None, old_email=None, is_active=None):
+        seen.update(zid=zid, email=email, old_email=old_email, name=name, is_active=is_active)
         return True
     from src.services import zitadel_provisioning as zp
     monkeypatch.setattr(zp, "update_user", _upd)
@@ -83,7 +83,8 @@ def test_user_upserted_updates_zitadel_identity(db, monkeypatch):
     assert result["published"] == 1
     assert db.query(StudentSyncOutbox).one().status == "done"
     # name comes from the freshest source (the DB row), email/old_email from the event.
-    assert seen == {"zid": "z-linked", "email": "new@x.io", "old_email": "old@x.io", "name": "New Comer"}
+    assert seen == {"zid": "z-linked", "email": "new@x.io", "old_email": "old@x.io",
+                    "name": "New Comer", "is_active": True}
 
 
 def test_user_upserted_unlinked_user_skips_zitadel(db, monkeypatch):
