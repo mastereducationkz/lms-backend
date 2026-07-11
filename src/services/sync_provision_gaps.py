@@ -262,6 +262,7 @@ def provision_gaps(
     platform: str = "all",
     dry_run: bool = False,
     limit: int | None = None,
+    sleep_seconds: float = 0.6,
 ) -> dict:
     """Provision the missing platform-local accounts for gap students.
 
@@ -308,7 +309,13 @@ def provision_gaps(
         ]
         return result
 
-    for gap in gaps:
+    # Pace requests: IELTS enforces 120/min and SAT may throttle too. A small inter-request sleep
+    # keeps a large run comfortably under the limit (~100/min at 0.6s) so nothing is dropped to 429.
+    import time as _time
+
+    for i, gap in enumerate(gaps):
+        if i and sleep_seconds:
+            _time.sleep(sleep_seconds)
         outcome, detail = _provision_one(gap)
         result[outcome] += 1
         result["by_platform"][gap.platform][outcome] += 1
@@ -341,13 +348,22 @@ def main() -> None:
         default=None,
         help="cap the number of gap students processed",
     )
+    parser.add_argument(
+        "--sleep",
+        type=float,
+        default=0.6,
+        help="seconds between provisioning requests, to stay under platform rate limits (default 0.6)",
+    )
     args = parser.parse_args()
 
     from src.config import SessionLocal
 
     db = SessionLocal()
     try:
-        result = provision_gaps(db, platform=args.platform, dry_run=args.dry_run, limit=args.limit)
+        result = provision_gaps(
+            db, platform=args.platform, dry_run=args.dry_run, limit=args.limit,
+            sleep_seconds=args.sleep,
+        )
         print("provision:", result)
         print(
             "\nnext step (not run by this tool): re-queue the dead-lettered memberships so the "
