@@ -191,16 +191,17 @@ def test_member_fans_out_to_both_when_ielts_configured(db, monkeypatch):
     assert db.query(StudentSyncOutbox).one().status == "done"
 
 
-def test_group_event_never_routes_to_ielts(db, monkeypatch):
-    # IELTS has no group entity — a group.upserted must go to SAT only, even with IELTS configured.
+def test_group_event_routes_to_both_platforms(db, monkeypatch):
+    # group.upserted now also carries the teacher/curator, so IELTS consumes it too (its own path).
     monkeypatch.setenv("MASTEREDU_API_KEY", "ksat")
     monkeypatch.setenv("IELTS_SYNC_URL", "https://ielts.example/api")
     monkeypatch.setenv("IELTS_API_KEY", "kielts")
     _seed(db)                                                # a group.upserted
     posts = _capture_posts(monkeypatch)
     student_sync.drain_outbox(db)
-    assert len(posts) == 1
-    assert posts[0][0].endswith("/api/lms/groups")
+    assert len(posts) == 2
+    assert any(u.endswith("/api/lms/groups") for u, _ in posts)          # SAT
+    assert any(u.endswith("/api/students/groups") for u, _ in posts)     # IELTS
 
 
 def test_fanout_not_ready_if_any_target_503(db, monkeypatch):
@@ -241,9 +242,10 @@ def pg():
         cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
         cur.execute(f"SET search_path TO {_TEST_SCHEMA}, public")
         # Minimal shapes: only the columns the trigger reads/writes.
+        cur.execute("CREATE TABLE users (id serial PRIMARY KEY, email text, name text)")
         cur.execute(
             "CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, "
-            "is_active boolean DEFAULT true, description text)"
+            "is_active boolean DEFAULT true, description text, teacher_id int, curator_id int)"
         )
         cur.execute(
             "CREATE TABLE student_sync_outbox (id serial PRIMARY KEY, event_id text UNIQUE, "
@@ -305,6 +307,33 @@ def test_trigger_coalesces_null_is_active_to_true(pg):
     payloads = _outbox_payloads(pg)
     assert len(payloads) == 1
     assert payloads[0]["group"]["is_active"] is True
+
+
+def test_trigger_embeds_teacher_and_curator_identity(pg):
+    pg.execute(f"INSERT INTO {_TEST_SCHEMA}.users (email, name) VALUES ('teach@x.io','Ms Teach')")
+    pg.execute(f"INSERT INTO {_TEST_SCHEMA}.users (email, name) VALUES ('cur@x.io','Mr Cur')")
+    pg.execute(
+        f"INSERT INTO {_TEST_SCHEMA}.groups (name, program_type, teacher_id, curator_id) "
+        f"VALUES ('SAT-A', 'sat', 1, 2)"
+    )
+    g = _outbox_payloads(pg)[0]["group"]
+    assert g["teacher_email"] == "teach@x.io" and g["teacher_name"] == "Ms Teach"
+    assert g["curator_email"] == "cur@x.io" and g["curator_name"] == "Mr Cur"
+
+
+def test_trigger_fires_on_teacher_reassignment(pg):
+    pg.execute(f"INSERT INTO {_TEST_SCHEMA}.users (email, name) VALUES ('t1@x.io','T1')")
+    pg.execute(f"INSERT INTO {_TEST_SCHEMA}.groups (name, program_type) VALUES ('G', 'sat')")  # insert => 1
+    pg.execute(f"UPDATE {_TEST_SCHEMA}.groups SET teacher_id = 1")                              # reassign => 2
+    payloads = _outbox_payloads(pg)
+    assert len(payloads) == 2
+    assert payloads[1]["group"]["teacher_email"] == "t1@x.io"
+
+
+def test_trigger_unassigned_teacher_is_null(pg):
+    pg.execute(f"INSERT INTO {_TEST_SCHEMA}.groups (name, program_type) VALUES ('G', 'sat')")
+    g = _outbox_payloads(pg)[0]["group"]
+    assert g["teacher_email"] is None and g["curator_email"] is None  # consumer clears the FK
 
 
 def test_trigger_captures_generic_writer(pg):
@@ -424,7 +453,8 @@ def pg_session():
     cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
     cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
     cur.execute(f"SET search_path TO {_TEST_SCHEMA}")
-    cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, is_active boolean)")
+    cur.execute("CREATE TABLE groups (id serial PRIMARY KEY, name text, program_type text, "
+                "is_active boolean, teacher_id int, curator_id int)")
     cur.execute("CREATE TABLE users (id serial PRIMARY KEY, email text, central_auth_user_id text, name text)")
     cur.execute("CREATE TABLE group_students (id serial PRIMARY KEY, group_id int, student_id int)")
     cur.execute("CREATE TABLE student_sync_outbox (id serial PRIMARY KEY, event_id text UNIQUE, "
@@ -452,14 +482,16 @@ def _obx(pg_session):
     return pg_session.execute(text(f"SELECT event_type, payload FROM {_TEST_SCHEMA}.student_sync_outbox ORDER BY id")).fetchall()
 
 
-def test_backfill_groups_only_sat_nuet(pg_session):
+def test_backfill_groups_sat_nuet_ielts(pg_session):
     from src.services import sync_backfill
     res = sync_backfill.backfill(pg_session, do_groups=True)
-    assert res["groups"] == 2                       # sat + nuet, NOT ielts/general_english
+    assert res["groups"] == 3                       # sat + nuet + ielts, NOT general_english
     rows = _obx(pg_session)
     assert {r[0] for r in rows} == {"group.upserted"}
     progs = {r[1]["group"]["program_type"] for r in rows}
-    assert progs == {"sat", "nuet"}
+    assert progs == {"sat", "nuet", "ielts"}
+    # teacher/curator keys are always present (null here — no assignment in this fixture)
+    assert all("teacher_email" in r[1]["group"] for r in rows)
     assert all(r[1]["source"] == "lms_backfill" for r in rows)
 
 
@@ -478,5 +510,5 @@ def test_backfill_members_sat_nuet_ielts(pg_session):
 def test_backfill_dry_run_enqueues_nothing(pg_session):
     from src.services import sync_backfill
     res = sync_backfill.backfill(pg_session, do_groups=True, do_members=True, dry_run=True)
-    assert res == {"groups": 2, "members": 3, "dry_run": True}
+    assert res == {"groups": 3, "members": 3, "dry_run": True}
     assert _obx(pg_session) == []                     # nothing written
