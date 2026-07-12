@@ -7,7 +7,7 @@ def register_routes(app: FastAPI):
     from src.admin.routes import (
         admin_router, dashboard_router,
         head_teacher_router, analytics_router, media_router,
-        sat_schedules_router,
+        sat_schedules_router, weekly_top_students_router,
     )
     from src.courses.routes import courses_router
     from src.assignments.routes import assignments_router, assignment_zero_router
@@ -25,6 +25,7 @@ def register_routes(app: FastAPI):
     app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
     app.include_router(admin_router, prefix="/admin", tags=["Admin"])
     app.include_router(admin_progress_router, prefix="/admin", tags=["Admin Progress"])
+    app.include_router(weekly_top_students_router, prefix="/admin", tags=["Admin"])
     app.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
     app.include_router(users_router, prefix="/users", tags=["Users"])
     app.include_router(courses_router, prefix="/courses", tags=["Courses"])

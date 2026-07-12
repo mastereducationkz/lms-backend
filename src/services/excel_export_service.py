@@ -444,6 +444,142 @@ class ExcelExportService:
         else:
             return "Not Started"
 
+    def create_weekly_top_students_workbook(self, data: Dict[str, Any]) -> BytesIO:
+        """Build the Weekly Top Students workbook from the leaderboard payload.
+
+        ``data`` is the dict returned by
+        ``weekly_top_students_service.compute_weekly_top_students``.
+        """
+        wb = Workbook()
+        if 'Sheet' in wb.sheetnames:
+            wb.remove(wb['Sheet'])
+
+        week_label = f"{data.get('week_start', '')} — {data.get('week_end', '')}"
+        self._create_weekly_leaderboard_sheet(wb, data.get('students', []), week_label)
+        self._create_needs_attention_sheet(wb, data.get('needs_attention', []), week_label)
+
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        return buffer
+
+    def _create_weekly_leaderboard_sheet(
+        self,
+        wb: Workbook,
+        students: List[Dict[str, Any]],
+        week_label: str,
+    ):
+        ws = wb.create_sheet("Top Students")
+
+        ws.merge_cells('A1:N1')
+        title_cell = ws['A1']
+        title_cell.value = f"Weekly Top Students — {week_label}"
+        title_cell.font = Font(size=16, bold=True, color='FFFFFF')
+        title_cell.fill = PatternFill(start_color=self.COLORS['header'],
+                                      end_color=self.COLORS['header'], fill_type='solid')
+        title_cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[1].height = 30
+
+        headers = [
+            '#', 'Student', 'Group', 'Teacher', 'Curator', 'Program',
+            'HW (on-time/submitted/due)', 'HW avg %', 'Steps/wk', '% course/wk',
+            'Study min', 'Points', 'Streak', 'Activity Score',
+        ]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=2, column=col, value=header)
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill(start_color=self.COLORS['header'],
+                                    end_color=self.COLORS['header'], fill_type='solid')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[2].height = 25
+
+        for idx, s in enumerate(students, 3):
+            hw = s.get('homework', {})
+            hw_summary = f"{hw.get('on_time', 0)}/{hw.get('submitted', 0)}/{hw.get('due', 0)}"
+            score = s.get('activity_score', 0)
+            row_data = [
+                s.get('rank', idx - 2),
+                s.get('student_name', 'N/A'),
+                s.get('group_name') or '—',
+                s.get('teacher_name', '—'),
+                s.get('curator_name', '—'),
+                s.get('program_type') or '—',
+                hw_summary,
+                hw.get('avg_pct') if hw.get('avg_pct') is not None else '—',
+                s.get('steps_week', 0),
+                s.get('course_pct_week', 0),
+                s.get('study_minutes_week', 0),
+                s.get('points_week', 0),
+                s.get('daily_streak', 0),
+                score,
+            ]
+            for col, value in enumerate(row_data, 1):
+                cell = ws.cell(row=idx, column=col, value=value)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                if col == 14:  # Activity Score
+                    cell.font = Font(bold=True)
+                    if score >= 70:
+                        fill = self.COLORS['excellent']
+                    elif score >= 40:
+                        fill = self.COLORS['good']
+                    else:
+                        fill = self.COLORS['needs_attention']
+                    cell.fill = PatternFill(start_color=fill, end_color=fill, fill_type='solid')
+                if col == 10:  # % course/wk
+                    cell.number_format = '0.0"%"'
+
+        ws.freeze_panes = 'A3'
+        for col in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(col)].width = 15
+        ws.column_dimensions['B'].width = 28
+        ws.column_dimensions['C'].width = 26
+        ws.column_dimensions['G'].width = 26
+
+    def _create_needs_attention_sheet(
+        self,
+        wb: Workbook,
+        rows: List[Dict[str, Any]],
+        week_label: str,
+    ):
+        ws = wb.create_sheet("Needs Attention")
+
+        ws.merge_cells('A1:G1')
+        title_cell = ws['A1']
+        title_cell.value = f"Needs Attention (HW) — {week_label}"
+        title_cell.font = Font(size=14, bold=True, color='FFFFFF')
+        title_cell.fill = PatternFill(start_color=self.COLORS['needs_attention'],
+                                      end_color=self.COLORS['needs_attention'], fill_type='solid')
+        title_cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[1].height = 28
+
+        headers = ['Student', 'Group', 'Teacher', 'Curator', 'Due', 'Submitted', 'On-time']
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=2, column=col, value=header)
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill(start_color=self.COLORS['header'],
+                                    end_color=self.COLORS['header'], fill_type='solid')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        for idx, r in enumerate(rows, 3):
+            row_data = [
+                r.get('student_name', 'N/A'),
+                r.get('group_name') or '—',
+                r.get('teacher_name', '—'),
+                r.get('curator_name', '—'),
+                r.get('due', 0),
+                r.get('submitted', 0),
+                r.get('on_time', 0),
+            ]
+            for col, value in enumerate(row_data, 1):
+                cell = ws.cell(row=idx, column=col, value=value)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        ws.freeze_panes = 'A3'
+        for col in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(col)].width = 16
+        ws.column_dimensions['A'].width = 28
+        ws.column_dimensions['B'].width = 26
+
 
 # Singleton instance
 _export_service = None
