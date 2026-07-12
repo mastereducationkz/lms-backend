@@ -162,13 +162,13 @@ def compute_weekly_top_students(
     student_streak = {r.id: (r.daily_streak or 0) for r in valid_rows}
     valid_set = set(student_ids)
 
-    # Primary group per student: prefer active & not-over, then newest.
+    # Primary group per student (for display): prefer active & not-over, then newest.
+    # Built from the *filtered* memberships so a program/group-filtered view shows
+    # the group that matched the filter.
     primary_group: Dict[int, Any] = {}
-    student_group_ids: Dict[int, set] = {}
     for m in memberships:
         if m.student_id not in valid_set:
             continue
-        student_group_ids.setdefault(m.student_id, set()).add(m.group_id)
         cur = primary_group.get(m.student_id)
         # Rank candidate: (not is_over) first, then most recent created_at.
         cand_key = (0 if m.is_over else 1, m.created_at or datetime.min)
@@ -194,7 +194,23 @@ def compute_weekly_top_students(
         for r in db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(staff_ids)).all()
     } if staff_ids else {}
 
-    # 2) Homework this week (due for the student's group + matching submissions). #
+    # Homework is scored across ALL of a student's active groups, independent of
+    # the program/group filter (which only selects WHO appears). Otherwise a
+    # student in both an IELTS and a SAT group, viewed under the IELTS filter,
+    # would have their SAT homework hidden — dropping the HW penalty and inflating
+    # their score. Steps/points are already whole-student, so this keeps HW
+    # consistent with them.
+    all_membership = (
+        db.query(GroupStudent.student_id, GroupStudent.group_id)
+        .join(Group, Group.id == GroupStudent.group_id)
+        .filter(GroupStudent.student_id.in_(student_ids), Group.is_active.is_(True))
+        .all()
+    )
+    student_group_ids: Dict[int, set] = {}
+    for sid, gid in all_membership:
+        student_group_ids.setdefault(sid, set()).add(gid)
+
+    # 2) Homework this week (due across all the student's active groups). ----- #
     hw = _homework_metrics(db, student_group_ids, start_utc, end_utc)
 
     # 3) Course steps + study time this week. -------------------------------- #
