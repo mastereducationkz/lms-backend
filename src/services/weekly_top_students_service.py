@@ -38,9 +38,9 @@ from src.schemas.models import (
 )
 
 # Default dimension weights (sum to 1.0). Tunable here; a follow-up could expose
-# them as query params. When Homework is N/A for a student (no HW due this week),
-# its weight is dropped and the rest are renormalized so the student is not
-# penalized for having no assignments.
+# them as query params. When no homework is due this week, the homework slice
+# counts as 0 (not dropped) — so a student with no homework activity cannot top
+# the board on the other dimensions alone (max ~65/100).
 WEIGHTS = {
     "homework": 0.35,
     "course": 0.35,
@@ -163,12 +163,15 @@ def compute_weekly_top_students(
     valid_set = set(student_ids)
 
     # Primary group per student (for display): prefer active & not-over, then newest.
-    # Built from the *filtered* memberships so a program/group-filtered view shows
-    # the group that matched the filter.
+    # Group scope is driven by the *filtered* memberships, so a program/group
+    # filter scopes both the displayed group and the homework to that selection
+    # (e.g. an IELTS filter shows only IELTS-group homework).
     primary_group: Dict[int, Any] = {}
+    student_group_ids: Dict[int, set] = {}
     for m in memberships:
         if m.student_id not in valid_set:
             continue
+        student_group_ids.setdefault(m.student_id, set()).add(m.group_id)
         cur = primary_group.get(m.student_id)
         # Rank candidate: (not is_over) first, then most recent created_at.
         cand_key = (0 if m.is_over else 1, m.created_at or datetime.min)
@@ -194,23 +197,9 @@ def compute_weekly_top_students(
         for r in db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(staff_ids)).all()
     } if staff_ids else {}
 
-    # Homework is scored across ALL of a student's active groups, independent of
-    # the program/group filter (which only selects WHO appears). Otherwise a
-    # student in both an IELTS and a SAT group, viewed under the IELTS filter,
-    # would have their SAT homework hidden — dropping the HW penalty and inflating
-    # their score. Steps/points are already whole-student, so this keeps HW
-    # consistent with them.
-    all_membership = (
-        db.query(GroupStudent.student_id, GroupStudent.group_id)
-        .join(Group, Group.id == GroupStudent.group_id)
-        .filter(GroupStudent.student_id.in_(student_ids), Group.is_active.is_(True))
-        .all()
-    )
-    student_group_ids: Dict[int, set] = {}
-    for sid, gid in all_membership:
-        student_group_ids.setdefault(sid, set()).add(gid)
-
-    # 2) Homework this week (due across all the student's active groups). ----- #
+    # 2) Homework this week (due for the student's in-scope groups). ---------- #
+    # student_group_ids reflects the active filter, so an IELTS filter counts only
+    # IELTS-group homework.
     hw = _homework_metrics(db, student_group_ids, start_utc, end_utc)
 
     # 3) Course steps + study time this week. -------------------------------- #
@@ -563,18 +552,19 @@ def _composite(
     study_sub: float,
     engagement_sub: float,
 ) -> float:
-    """Weighted composite; drops+renormalizes the HW weight when HW is N/A."""
-    parts = [
-        (hw_sub, WEIGHTS["homework"]),
-        (course_sub, WEIGHTS["course"]),
-        (study_sub, WEIGHTS["study"]),
-        (engagement_sub, WEIGHTS["engagement"]),
-    ]
-    active = [(v, w) for v, w in parts if v is not None]
-    total_w = sum(w for _, w in active)
-    if total_w <= 0:
-        return 0.0
-    return sum(v * w for v, w in active) / total_w
+    """Weighted composite (weights sum to 1.0).
+
+    No homework due this week (``hw_sub is None``) counts as 0 for the homework
+    slice — it is NOT dropped/renormalized. So a student with no homework activity
+    can reach at most ~65/100 and cannot outrank a student who also did homework.
+    """
+    hw = hw_sub if hw_sub is not None else 0.0
+    return (
+        hw * WEIGHTS["homework"]
+        + course_sub * WEIGHTS["course"]
+        + study_sub * WEIGHTS["study"]
+        + engagement_sub * WEIGHTS["engagement"]
+    )
 
 
 def _empty_result(monday: date, sunday: date, limit: int) -> Dict[str, Any]:

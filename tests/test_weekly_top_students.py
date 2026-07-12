@@ -60,13 +60,21 @@ def test_composite_all_dimensions():
     assert got == pytest.approx(expected)
 
 
-def test_composite_renormalizes_when_homework_na():
-    # HW None -> its 0.35 weight is dropped and the remaining 0.65 renormalizes.
+def test_composite_homework_na_counts_as_zero():
+    # HW None -> homework slice contributes 0 (no renormalization).
     got = _composite(None, 100.0, 0.0, 0.0)
-    assert got == pytest.approx(100.0 * WEIGHTS["course"] / 0.65)
+    assert got == pytest.approx(100.0 * WEIGHTS["course"])
 
 
-def test_composite_zero_when_no_active_dimensions():
+def test_composite_no_homework_caps_below_full():
+    # Perfect on every other dimension but no homework -> capped at ~65/100,
+    # so a no-homework student cannot outrank a full-homework student.
+    got = _composite(None, 100.0, 100.0, 100.0)
+    assert got == pytest.approx(65.0)
+    assert got < _composite(1.0, 100.0, 100.0, 100.0)
+
+
+def test_composite_zero_when_nothing():
     assert _composite(None, 0.0, 0.0, 0.0) == 0.0
 
 
