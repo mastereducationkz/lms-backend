@@ -86,6 +86,20 @@ def test_update_user_returns_false_on_email_http_error():
     assert zp.update_user("z1", email="new@x.io", name="N", old_email="old@x.io", client=c) is False
 
 
+def test_update_user_treats_profile_not_changed_as_success():
+    # Zitadel rejects an unchanged profile with 400 'Profile not changed (COMMAND-2M0fs)'. That is a
+    # no-op (the name already matches), so update_user must NOT fail the event (the other
+    # false-negative that dead-lettered replays whose SAT/IELTS side already delivered).
+    c = _Client(put_responses=[_Resp(400, text='{"message":"Profile not changed (COMMAND-2M0fs)"}')])
+    assert zp.update_user("z1", name="Same Name", client=c) is True
+
+
+def test_update_user_treats_email_not_changed_as_success():
+    # On a replay the email may already be the new value -> Zitadel answers 'not changed'.
+    c = _Client(put_responses=[_Resp(400, text="email not changed"), _Resp(200, {})])
+    assert zp.update_user("z1", email="new@x.io", old_email="old@x.io", client=c) is True
+
+
 def test_update_user_never_raises():
     class _Boom:
         def put(self, *a, **k):

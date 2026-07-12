@@ -244,6 +244,20 @@ def set_user_active(zitadel_user_id: str, is_active: bool, *, client: httpx.Clie
             client.close()
 
 
+def _is_noop_update(r) -> bool:
+    """True when a Zitadel update PUT either succeeded (200) OR was a no-op it rejects with a
+    precondition error because the value already matches — e.g. profile 'Profile not changed'
+    (COMMAND-2M0fs) or an unchanged email/username. A no-op means the desired state is already
+    present, so the caller must treat it as success; failing it dead-letters an event whose SAT/
+    IELTS side already delivered (the root cause of the false-negative backlog)."""
+    if r.status_code == 200:
+        return True
+    if r.status_code in (400, 409):
+        t = r.text.lower()
+        return "not changed" in t or "already" in t
+    return False
+
+
 def update_user(
     zitadel_user_id: str,
     *,
@@ -276,7 +290,7 @@ def update_user(
                 json={"email": e, "isEmailVerified": True},
                 timeout=10.0,
             )
-            if r.status_code != 200:
+            if not _is_noop_update(r):
                 ok = False
                 logger.warning("zitadel email update %s failed: HTTP %s: %s", zitadel_user_id, r.status_code, r.text[:200])
             # Keep the login name in step with the email; a conflict here is non-fatal (email is
@@ -298,7 +312,7 @@ def update_user(
                 json={"firstName": first, "lastName": last, "displayName": name.strip()},
                 timeout=10.0,
             )
-            if r.status_code != 200:
+            if not _is_noop_update(r):
                 ok = False
                 logger.warning("zitadel profile update %s failed: HTTP %s: %s", zitadel_user_id, r.status_code, r.text[:200])
         if is_active is not None:
