@@ -187,14 +187,40 @@ def mirror_password(zitadel_user_id: str | None, plaintext_password: str, *, lms
         return False
 
 
+def _get_user_state(client: httpx.Client, zitadel_user_id: str) -> str | None:
+    """Return the Zitadel user's lifecycle state (e.g. 'USER_STATE_ACTIVE'/'USER_STATE_INACTIVE'),
+    or None if it can't be read. Used to make (de)activation a no-op when already in the target
+    state, rather than posting a redundant transition and depending on Zitadel's error wording."""
+    try:
+        r = client.get(
+            f"{_base_url()}/management/v1/users/{zitadel_user_id}",
+            headers=_headers(),
+            timeout=10.0,
+        )
+        if r.status_code == 200:
+            return ((r.json() or {}).get("user") or {}).get("state")
+    except Exception as exc:  # noqa: BLE001
+        logger.info("zitadel get_user_state(%s) unreadable: %s", zitadel_user_id, exc)
+    return None
+
+
 def set_user_active(zitadel_user_id: str, is_active: bool, *, client: httpx.Client | None = None) -> bool:
     """Deactivate/reactivate the Zitadel account to match LMS is_active. This is what makes an LMS
     deactivation a real, estate-wide revoke: a deactivated Zitadel user can no longer authenticate
     at the Master Education login at all (essential for the SSO-only future — without it a
-    deactivated person could still log in via SSO). Idempotent: 'already in that state' is success."""
+    deactivated person could still log in via SSO).
+
+    Idempotent by state pre-check: if the account is ALREADY in the target state we return success
+    without posting a transition. This is the robust fix for the false-negative dead-letters where a
+    routine identity edit (name/role) re-emitted a redundant _reactivate on an already-active user;
+    Zitadel's precondition response was not always recognized as success, so a fully-delivered
+    SAT+IELTS sync was wrongly marked failed and dead-lettered."""
     own_client = client is None
     client = client or httpx.Client()
     try:
+        target_state = "USER_STATE_ACTIVE" if is_active else "USER_STATE_INACTIVE"
+        if _get_user_state(client, zitadel_user_id) == target_state:
+            return True  # already in the desired state — nothing to do (the common no-op case)
         action = "_reactivate" if is_active else "_deactivate"
         r = client.post(
             f"{_base_url()}/management/v1/users/{zitadel_user_id}/{action}",
@@ -204,7 +230,8 @@ def set_user_active(zitadel_user_id: str, is_active: bool, *, client: httpx.Clie
         )
         if r.status_code == 200:
             return True
-        # Already active/inactive — Zitadel answers with a precondition/AlreadyExists-style error.
+        # Belt-and-suspenders for a race between the state read and the post: Zitadel answers a
+        # redundant transition with a precondition/AlreadyExists-style error — treat it as success.
         if r.status_code in (409, 400) and ("already" in r.text.lower() or "state" in r.text.lower()):
             return True
         logger.warning("zitadel set_user_active(%s,%s) failed: HTTP %s: %s", zitadel_user_id, is_active, r.status_code, r.text[:200])

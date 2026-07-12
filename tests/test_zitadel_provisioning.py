@@ -28,11 +28,13 @@ class _Resp:
 class _Client:
     """Scripted httpx.Client stand-in: records posts/puts, returns queued responses."""
 
-    def __init__(self, responses=None, put_responses=None):
+    def __init__(self, responses=None, put_responses=None, get_responses=None):
         self.responses = list(responses or [])
         self.put_responses = list(put_responses or [])
+        self.get_responses = list(get_responses or [])
         self.posts = []
         self.puts = []
+        self.gets = []
 
     def post(self, url, headers=None, json=None, timeout=None):
         self.posts.append({"url": url, "json": json, "headers": headers})
@@ -41,6 +43,11 @@ class _Client:
     def put(self, url, headers=None, json=None, timeout=None):
         self.puts.append({"url": url, "json": json, "headers": headers})
         return self.put_responses.pop(0) if self.put_responses else _Resp(200, {})
+
+    def get(self, url, headers=None, timeout=None):
+        self.gets.append({"url": url})
+        # Default: report the account ACTIVE so a deactivate still posts a transition.
+        return self.get_responses.pop(0) if self.get_responses else _Resp(200, {"user": {"state": "USER_STATE_ACTIVE"}})
 
     def close(self):
         pass
@@ -89,17 +96,34 @@ def test_update_user_never_raises():
 
 
 def test_set_user_active_deactivate_and_reactivate():
-    c = _Client(responses=[_Resp(200, {}), _Resp(200, {})])
+    # currently ACTIVE (default GET) + deactivate => posts _deactivate
+    c = _Client(responses=[_Resp(200, {})])
     assert zp.set_user_active("z1", False, client=c) is True
     assert c.posts[0]["url"].endswith("/management/v1/users/z1/_deactivate")
-    c2 = _Client(responses=[_Resp(200, {})])
+    # currently INACTIVE + reactivate => posts _reactivate
+    c2 = _Client(responses=[_Resp(200, {})],
+                 get_responses=[_Resp(200, {"user": {"state": "USER_STATE_INACTIVE"}})])
     assert zp.set_user_active("z1", True, client=c2) is True
     assert c2.posts[0]["url"].endswith("/management/v1/users/z1/_reactivate")
 
 
-def test_set_user_active_already_in_state_is_success():
-    c = _Client(responses=[_Resp(409, text="user is already deactivated")])
+def test_set_user_active_already_in_target_state_skips_post():
+    # The 72-row false-negative fix: an already-ACTIVE user asked to reactivate is a no-op success
+    # (no redundant _reactivate posted), so a routine identity edit can't dead-letter the event.
+    c = _Client(get_responses=[_Resp(200, {"user": {"state": "USER_STATE_ACTIVE"}})])
+    assert zp.set_user_active("z1", True, client=c) is True
+    assert c.posts == []                       # no transition posted
+    # symmetric: already-INACTIVE + deactivate => no post
+    c2 = _Client(get_responses=[_Resp(200, {"user": {"state": "USER_STATE_INACTIVE"}})])
+    assert zp.set_user_active("z1", False, client=c2) is True
+    assert c2.posts == []
+
+
+def test_set_user_active_still_posts_when_state_unreadable():
+    # If the state GET fails, fall through and post the transition (accept Zitadel's answer).
+    c = _Client(responses=[_Resp(200, {})], get_responses=[_Resp(500, text="boom")])
     assert zp.set_user_active("z1", False, client=c) is True
+    assert c.posts[0]["url"].endswith("/_deactivate")
 
 
 def test_update_user_sets_active_state():
