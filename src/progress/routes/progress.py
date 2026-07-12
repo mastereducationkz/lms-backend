@@ -29,7 +29,7 @@ from src.progress.services.lesson_completion import (
     get_group_lesson_progress_summary,
 )
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
-from src.services.cache_service import cached
+from src.services.cache_service import cached, invalidate
 from src.utils.course_access import get_user_courses, student_has_only_special_groups
 from src.utils.quiz_passing_score import resolve_quiz_passing_score_percent
 
@@ -489,9 +489,14 @@ async def mark_lesson_complete(
     
     # Обновляем daily streak
     update_daily_streak(current_user, db)
-    
+
     db.commit()
-    
+
+    # Completing a lesson changes is_completed and unlocks the next lesson (accessibility
+    # is derived on read). Drop the cached course structure + progress so clients see it
+    # immediately instead of waiting out the 60s TTL.
+    invalidate("courses:modules:*", "courses:module-lessons:*", "progress:*")
+
     return {"detail": "Lesson marked as complete", "time_spent": time_spent}
 
 @router.post("/lesson/{lesson_id}/start")
