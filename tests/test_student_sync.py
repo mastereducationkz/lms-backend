@@ -421,6 +421,26 @@ def test_member_trigger_enqueues_removed_on_delete(pg_member):
     assert payloads[1]["lms_group_id"] == 9
 
 
+def test_member_trigger_reemits_upserted_on_touch_update(pg_member):
+    # p14: a no-op touch UPDATE re-emits the full canonical member.upserted — the CRM uses this
+    # right after provisioning a platform account so memberships that predate the account sync.
+    pg_member.execute(f"INSERT INTO {_TEST_SCHEMA}.group_students (group_id, student_id) VALUES (9, 7)")
+    pg_member.execute(
+        f"UPDATE {_TEST_SCHEMA}.group_students SET student_id = student_id "
+        "WHERE group_id = 9 AND student_id = 7"
+    )
+    payloads = _outbox_payloads(pg_member)
+    assert len(payloads) == 2
+    assert [p["event_type"] for p in payloads] == ["member.upserted", "member.upserted"]
+    touched = payloads[1]
+    assert touched["lms_group_id"] == 9
+    assert touched["student"]["lms_student_id"] == 7
+    assert touched["student"]["email"] == "stu@x.io"
+    # teacher/curator still ride along on the re-emit (same function, NEW values)
+    assert touched["teacher_email"] == "teach@x.io"
+    assert touched["curator_email"] == "cur@x.io"
+
+
 def test_member_trigger_captures_generic_writer(pg_member):
     # A non-app writer (raw SQL == CRM cross-DB enrollment) is captured too.
     pg_member.execute(f"INSERT INTO {_TEST_SCHEMA}.group_students (group_id, student_id) VALUES (9, 7)")

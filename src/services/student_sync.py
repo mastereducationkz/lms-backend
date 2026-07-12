@@ -400,8 +400,14 @@ DROP FUNCTION IF EXISTS {GROUP_SYNC_FUNCTION}();
 
 # --- membership trigger DDL (installed by the p8 migration) ------------------
 # Same design as the group trigger, on `group_students` (the student<->group M2M). Fires on
-# INSERT (student added to a group => member.upserted) and DELETE (removed => member.removed).
-# LMS mutates membership as delete+insert (not update), so INSERT/DELETE is sufficient. The
+# INSERT (student added to a group => member.upserted), DELETE (removed => member.removed) and —
+# since p14 — UPDATE (=> member.upserted with the row's CURRENT values). LMS mutates membership
+# as delete+insert, so UPDATE never fires organically; it exists as a deliberate RE-EMIT hook:
+# a no-op touch (UPDATE ... SET student_id = student_id) re-enqueues the canonical membership
+# snapshot. The CRM uses this right after provisioning a platform account for a student whose
+# memberships predate the account (their original events 404-dead-lettered against a student
+# the platform didn't know yet). Note an UPDATE that re-points group_id would emit upserted for
+# the new group without a removed for the old — don't mutate membership that way. The
 # function joins to `users` (email, central_auth_user_id, name — the consumer's match keys) and
 # `groups` (program_type, name — so the consumer can route/skip and derive the label). Fully
 # EXCEPTION-shielded so it can never roll back a membership write (hot path of admin + CRM
@@ -492,7 +498,7 @@ $fn$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS {MEMBER_SYNC_TRIGGER} ON group_students;
 CREATE TRIGGER {MEMBER_SYNC_TRIGGER}
-    AFTER INSERT OR DELETE ON group_students
+    AFTER INSERT OR UPDATE OR DELETE ON group_students
     FOR EACH ROW EXECUTE FUNCTION {MEMBER_SYNC_FUNCTION}();
 """
 
