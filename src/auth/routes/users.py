@@ -129,7 +129,11 @@ async def update_profile(
         user.name = update.name
     if update.password is not None:
         from src.utils.auth_utils import hash_password
+        from src.utils.password_policy import password_policy_error
 
+        _pw_err = password_policy_error(update.password)
+        if _pw_err:
+            raise HTTPException(status_code=400, detail=_pw_err)
         user.hashed_password = hash_password(update.password)
         user.refresh_token = None  # Invalidate other sessions
         password_changed = True
