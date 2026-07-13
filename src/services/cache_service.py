@@ -207,39 +207,57 @@ def cached(
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
+        is_async = inspect.iscoroutinefunction(func)
 
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            client = get_client()
-            if client is None:
-                return await func(*args, **kwargs)
-
+        def _cache_key(args: Any, kwargs: Any):
+            """Build the cache key, or None if the cache should be bypassed for this call."""
+            if get_client() is None:
+                return None
             try:
                 bound = signature.bind_partial(*args, **kwargs)
                 bound.apply_defaults()
             except TypeError:
-                return await func(*args, **kwargs)
-
+                return None
             user = bound.arguments.get(user_arg)
             user_id = getattr(user, "id", None) if user is not None else None
             user_role = getattr(user, "role", None) if user is not None else None
-
             key_parts = [
                 str(user_id) if user_id is not None else "anon",
                 str(user_role) if user_role is not None else "norole",
             ]
             for name in selected:
                 key_parts.append(f"{name}={bound.arguments.get(name)!r}")
-            key = f"{namespace}:{_stable_hash(key_parts)}"
+            return f"{namespace}:{_stable_hash(key_parts)}"
 
+        # Emit a wrapper that MATCHES the wrapped handler's sync/async nature. Most handlers were
+        # converted from `async def` to plain `def` (so FastAPI runs them in its threadpool instead
+        # of blocking the event loop); awaiting those would raise "object ... can't be used in
+        # 'await' expression". The sync path also keeps the threadpool benefit for cached handlers.
+        @functools.wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            key = _cache_key(args, kwargs)
+            if key is None:
+                return await func(*args, **kwargs)
             hit = get_json(key)
             if hit is not None:
                 return hit
-
             result = await func(*args, **kwargs)
             set_json(key, result, ttl_seconds=ttl)
             return result
 
+        @functools.wraps(func)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            key = _cache_key(args, kwargs)
+            if key is None:
+                return func(*args, **kwargs)
+            hit = get_json(key)
+            if hit is not None:
+                return hit
+            result = func(*args, **kwargs)
+            set_json(key, result, ttl_seconds=ttl)
+            return result
+
+        wrapper = async_wrapper if is_async else sync_wrapper
         wrapper.__cache_namespace__ = namespace  # type: ignore[attr-defined]
         return wrapper
 
