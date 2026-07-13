@@ -67,6 +67,10 @@ services:
       - .env
     environment:
       - POSTGRES_URL=${POSTGRES_URL}
+      # Runtime traffic goes through pgbouncer (POSTGRES_URL), but `alembic upgrade head` in
+      # start.sh must hit Postgres directly — pgbouncer's transaction pooling breaks
+      # CREATE INDEX CONCURRENTLY and other non-transactional DDL.
+      - MIGRATION_DATABASE_URL=postgresql://myuser:${POSTGRES_PASSWORD}@postgres:5432/lms_db
       - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
       - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME}

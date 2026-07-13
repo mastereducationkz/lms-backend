@@ -203,15 +203,18 @@ from src.messages.routes.socket_messages import create_socket_app
 socket_app = create_socket_app(app)
 
 # Background workers
-try:
-    from src.services.rabbitmq_consumer import start_rabbitmq_consumer_thread
-    if os.getenv('RABBITMQ_URL'):
+# RabbitMQ is disabled by default: CRM->LMS user sync happens via direct DB writes, not this
+# consumer, so leaving it on just spammed "Failed to connect to RabbitMQ" on every boot. Set
+# ENABLE_RABBITMQ=true only if a broker is actually deployed and this consumer is wanted.
+if os.getenv('ENABLE_RABBITMQ', 'false').strip().lower() in ('1', 'true', 'yes'):
+    try:
+        from src.services.rabbitmq_consumer import start_rabbitmq_consumer_thread
         start_rabbitmq_consumer_thread()
         logging.info("RabbitMQ consumer initialized")
-    else:
-        logging.warning("RabbitMQ URL not configured, skipping consumer")
-except Exception as e:
-    logging.error(f"Failed to initialize RabbitMQ consumer: {e}")
+    except Exception as e:
+        logging.error(f"Failed to initialize RabbitMQ consumer: {e}")
+else:
+    logging.info("RabbitMQ consumer disabled (set ENABLE_RABBITMQ=true to enable)")
 
 try:
     from src.services.lesson_reminder_scheduler import start_lesson_reminder_scheduler

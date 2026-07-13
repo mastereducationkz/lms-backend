@@ -61,9 +61,14 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # Get database URL from environment or config
-    database_url = os.getenv("POSTGRES_URL", "postgresql://myuser:mypassword@localhost:5432/lms_db")
-    
+    # Migrations must connect DIRECTLY to Postgres, never through pgbouncer: pgbouncer runs in
+    # transaction pooling mode, under which `CREATE INDEX CONCURRENTLY` and other non-transactional
+    # DDL fail. MIGRATION_DATABASE_URL points straight at postgres:5432 (set in docker-compose);
+    # fall back to POSTGRES_URL for local/dev where there is no pooler.
+    database_url = os.getenv("MIGRATION_DATABASE_URL") or os.getenv(
+        "POSTGRES_URL", "postgresql://myuser:mypassword@localhost:5432/lms_db"
+    )
+
     # Override the config with our database URL
     config.set_main_option("sqlalchemy.url", database_url)
     
