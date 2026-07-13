@@ -129,3 +129,49 @@ def test_verify_oidc_token_end_to_end_with_mocked_jwks(monkeypatch):
     monkeypatch.setattr(oidc, "_fetch_jwks", lambda url, **kw: JWKS)
     claims = oidc.verify_oidc_token(_token())
     assert claims["sub"] == "idp-user-123"
+
+
+class _JwksResp:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+def test_jwks_stale_while_revalidate(monkeypatch):
+    """A failing JWKS refresh must serve the last-known-good keys, not lock every SSO
+    login out — the production bug: a 5s timeout to the EU JWKS endpoint made every
+    token 'fail validation' and bounced students back to login."""
+    url = "https://id.mastereducation.kz/.well-known/jwks.json"
+    oidc.clear_jwks_cache()
+
+    # 1) first fetch succeeds and populates the cache
+    monkeypatch.setattr(oidc.httpx, "get", lambda u, **kw: _JwksResp(JWKS))
+    assert oidc._fetch_jwks(url) == JWKS
+
+    # 2) force the cache stale, then make the network time out
+    oidc._jwks_cache[url] = (0.0, JWKS)  # epoch timestamp => treated as expired
+
+    def _boom(u, **kw):
+        raise oidc.httpx.ConnectTimeout("simulated JWKS timeout")
+
+    monkeypatch.setattr(oidc.httpx, "get", _boom)
+    # stale-while-revalidate: returns the cached keys instead of raising
+    assert oidc._fetch_jwks(url) == JWKS
+
+
+def test_jwks_fails_closed_when_never_fetched(monkeypatch):
+    """With no cached keys, a failing fetch must fail closed (raise), never accept blindly."""
+    url = "https://id.mastereducation.kz/.well-known/jwks-cold.json"
+    oidc.clear_jwks_cache()
+
+    def _boom(u, **kw):
+        raise oidc.httpx.ConnectTimeout("simulated JWKS timeout")
+
+    monkeypatch.setattr(oidc.httpx, "get", _boom)
+    with pytest.raises(oidc.OidcConfigError):
+        oidc._fetch_jwks(url)

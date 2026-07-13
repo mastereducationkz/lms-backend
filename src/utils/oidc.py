@@ -103,9 +103,12 @@ def email_is_verified(value) -> bool:
     return False
 
 
-def fetch_userinfo(token: str, *, timeout: float = 5.0) -> dict:
+def fetch_userinfo(token: str, *, timeout: float = 15.0) -> dict:
     """Call the userinfo endpoint with the presented access token. Returns {} on any
-    failure or if no URL is configured (caller treats a missing email as auth failure)."""
+    failure or if no URL is configured (caller treats a missing email as auth failure).
+
+    Timeout is generous (15s): the IdP is in the EU and occasionally slow from our region;
+    a too-tight timeout here silently drops the email and turns a valid login into a 401."""
     url = oidc_userinfo_url()
     if not url:
         return {}
@@ -126,8 +129,14 @@ _jwks_lock = threading.Lock()
 _JWKS_TTL_SECONDS = 600  # 10 minutes
 
 
-def _fetch_jwks(url: str, *, timeout: float = 5.0) -> dict:
-    """Fetch a JWKS document with a short TTL cache. Raises OidcConfigError on failure."""
+def _fetch_jwks(url: str, *, timeout: float = 15.0) -> dict:
+    """Fetch a JWKS document with a short TTL cache.
+
+    Resilience (stale-while-revalidate): the IdP JWKS endpoint lives in the EU and is
+    occasionally slow/unreachable from our region. Signing keys rotate rarely, so when a
+    refresh fails we keep serving the last-known-good keys (with a ~30s retry backoff)
+    instead of failing every SSO login — a transient JWKS blip must not lock users out.
+    We only raise when we have never successfully fetched a key set."""
     now = time.time()
     with _jwks_lock:
         cached = _jwks_cache.get(url)
@@ -137,10 +146,16 @@ def _fetch_jwks(url: str, *, timeout: float = 5.0) -> dict:
         resp = httpx.get(url, timeout=timeout)
         resp.raise_for_status()
         jwks = resp.json()
+        if not isinstance(jwks, dict) or "keys" not in jwks:
+            raise ValueError("malformed JWKS document (no 'keys')")
     except (httpx.HTTPError, ValueError) as exc:
+        if cached is not None:
+            logger.warning("OIDC JWKS refresh failed (%s); serving cached keys from %s", exc, url)
+            with _jwks_lock:
+                # back off ~30s before the next refresh attempt while serving stale keys
+                _jwks_cache[url] = (now - _JWKS_TTL_SECONDS + 30, cached[1])
+            return cached[1]
         raise OidcConfigError(f"could not fetch JWKS from {url}: {exc}") from exc
-    if not isinstance(jwks, dict) or "keys" not in jwks:
-        raise OidcConfigError(f"JWKS at {url} is malformed")
     with _jwks_lock:
         _jwks_cache[url] = (now, jwks)
     return jwks
