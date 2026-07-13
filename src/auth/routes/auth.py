@@ -13,6 +13,7 @@ from src.utils.auth_utils import (
     verify_password_reset_token,
     password_stamp_matches,
 )
+from src.utils.password_policy import password_policy_error
 from src.services.email_service import (
     send_password_reset_email,
     send_password_changed_email,
@@ -282,8 +283,9 @@ async def reset_password(
     db: Session = Depends(get_db),
 ):
     """Set a new password using a reset token from the email link."""
-    if not payload.new_password or len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 6 символов")
+    _pw_err = password_policy_error(payload.new_password)
+    if _pw_err:
+        raise HTTPException(status_code=400, detail=_pw_err)
     data = verify_password_reset_token(payload.token)
     if not data or not data.get("uid"):
         raise HTTPException(status_code=400, detail="Недействительная или истёкшая ссылка")
@@ -314,8 +316,9 @@ async def change_password(
     """Change the password of the authenticated user (requires the current password)."""
     if not verify_password(payload.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Текущий пароль неверен")
-    if not payload.new_password or len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 6 символов")
+    _pw_err = password_policy_error(payload.new_password)
+    if _pw_err:
+        raise HTTPException(status_code=400, detail=_pw_err)
     current_user.hashed_password = hash_password(payload.new_password)
     current_user.refresh_token = None
     current_user.updated_at = datetime.utcnow()

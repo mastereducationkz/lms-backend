@@ -322,9 +322,10 @@ def _admin_operational_counts(db: Session) -> dict:
 
 
 def generate_password(length: int = 8) -> str:
-    """Generate a random password"""
-    characters = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(characters) for _ in range(length))
+    """Generate a random password that satisfies the password policy (>= 8 chars, >= 1 digit), so
+    admin-generated passwords always mirror to Zitadel."""
+    from src.utils.password_policy import generate_compliant_password
+    return generate_compliant_password(length)
 
 def generate_student_id() -> str:
     """Generate a unique student ID"""
@@ -2103,6 +2104,10 @@ async def update_user(
     if user_data.is_analytics_hidden is not None:
         user.is_analytics_hidden = user_data.is_analytics_hidden
     if user_data.password is not None:
+        from src.utils.password_policy import password_policy_error
+        _pw_err = password_policy_error(user_data.password)
+        if _pw_err:
+            raise HTTPException(status_code=400, detail=_pw_err)
         user.hashed_password = hash_password(user_data.password)
         user.refresh_token = None  # Invalidate sessions
     
