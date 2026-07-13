@@ -27,11 +27,18 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 
-# Database setup with connection pooling
+# Database setup with connection pooling.
+# Sizing is deliberately bounded so the whole fleet stays under Postgres's default
+# max_connections=100: the app runs 4 uvicorn workers (see Dockerfile), and each worker opens up
+# to pool_size + max_overflow connections. 4 * (10 + 10) = 80 leaves headroom for the scheduler
+# container, migrations and admin sessions. (The previous 10 + 20 allowed 4 * 30 = 120, which can
+# exhaust the server's connection slots under load and surface as "too many connections" errors.)
+# pool_timeout makes a brief pool shortage wait instead of erroring immediately.
 engine = create_engine(
     POSTGRES_URL,
     pool_size=10,
-    max_overflow=20,
+    max_overflow=10,
+    pool_timeout=30,
     pool_pre_ping=True,
     pool_recycle=3600
 )

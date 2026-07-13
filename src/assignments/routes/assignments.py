@@ -1318,25 +1318,38 @@ async def get_assignment_submissions(
         query = query.filter(AssignmentSubmission.user_id.in_(allowed_student_ids))
     
     submissions = query.order_by(desc(AssignmentSubmission.submitted_at)).all()
-    
+
+    # Batch-load every author + grader name in ONE query instead of two queries per submission
+    # (an N+1 that made this endpoint scale ~2N with group size — the main grading-page slowdown).
+    needed_user_ids = set()
+    for s in submissions:
+        needed_user_ids.add(s.user_id)
+        if s.graded_by:
+            needed_user_ids.add(s.graded_by)
+    names_by_id = {}
+    if needed_user_ids:
+        names_by_id = {
+            uid: name
+            for uid, name in db.query(UserInDB.id, UserInDB.name)
+            .filter(UserInDB.id.in_(needed_user_ids)).all()
+        }
+
     # Enhance submissions with user and grader names
     result = []
     for submission in submissions:
         submission_data = AssignmentSubmissionSchema.from_orm(submission)
-        
-        # Get user name
-        user = db.query(UserInDB).filter(UserInDB.id == submission.user_id).first()
-        if user:
-            submission_data.user_name = user.name
-        
-        # Get grader name
+
+        user_name = names_by_id.get(submission.user_id)
+        if user_name is not None:
+            submission_data.user_name = user_name
+
         if submission.graded_by:
-            grader = db.query(UserInDB).filter(UserInDB.id == submission.graded_by).first()
-            if grader:
-                submission_data.grader_name = grader.name
-        
+            grader_name = names_by_id.get(submission.graded_by)
+            if grader_name is not None:
+                submission_data.grader_name = grader_name
+
         result.append(submission_data)
-    
+
     return result
 
 @router.get("/{assignment_id}/submissions/{submission_id}", response_model=AssignmentSubmissionSchema)
@@ -2095,6 +2108,9 @@ def normalize_multi_task_content(content: Dict[str, Any], db: Session) -> Dict[s
     if not content or not isinstance(content.get("tasks"), list):
         return content
 
+    # Collect the first lesson id of every course_unit task that still needs a course_id, then
+    # resolve them all with ONE Lesson->Module query instead of two queries per task.
+    pending = []  # list of (task_content_dict, first_lesson_id)
     for task in content["tasks"]:
         if not isinstance(task, dict) or task.get("task_type") != "course_unit":
             continue
@@ -2108,14 +2124,25 @@ def normalize_multi_task_content(content: Dict[str, Any], db: Session) -> Dict[s
         if course_id or not lesson_ids:
             continue
 
-        first_lesson_id = lesson_ids[0]
-        lesson = db.query(Lesson).filter(Lesson.id == first_lesson_id).first()
-        if not lesson:
-            continue
+        pending.append((task_content, lesson_ids[0]))
 
-        module = db.query(Module).filter(Module.id == lesson.module_id).first()
-        if module:
-            task_content["course_id"] = module.course_id
+    if not pending:
+        return content
+
+    wanted_lesson_ids = {lid for _, lid in pending}
+    # Only lessons whose module exists yield a row (inner join), matching the old
+    # "lesson found AND module found" condition exactly.
+    course_by_lesson = {
+        lesson_id: c_id
+        for lesson_id, c_id in db.query(Lesson.id, Module.course_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .filter(Lesson.id.in_(wanted_lesson_ids)).all()
+    }
+
+    for task_content, first_lesson_id in pending:
+        resolved = course_by_lesson.get(first_lesson_id)
+        if resolved is not None:
+            task_content["course_id"] = resolved
 
     return content
 

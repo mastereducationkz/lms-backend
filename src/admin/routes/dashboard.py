@@ -1649,8 +1649,6 @@ async def get_curator_student_homework(
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    sync_groups_over_status(db)
-
     # Groups this student belongs to
     student_group_ids = [gs.group_id for gs in db.query(GroupStudent).filter(
         GroupStudent.student_id == student_id
@@ -1665,6 +1663,11 @@ async def get_curator_student_homework(
 
     if not student_group_ids:
         return {"student_id": student.id, "student_name": student.name, "items": []}
+
+    # Refresh "over" status for THIS student's groups only. Previously this GET called
+    # sync_groups_over_status(db) unscoped — a full scan of every group and its events plus a
+    # COMMIT — on every request; scoping it keeps the same result without the table-wide write.
+    sync_groups_over_status(db, group_ids=student_group_ids)
 
     groups = db.query(Group).filter(Group.id.in_(student_group_ids)).all()
 

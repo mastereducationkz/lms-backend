@@ -801,7 +801,48 @@ async def get_student_progress_overview(
         raise HTTPException(status_code=403, detail="Only students can access this endpoint")
     
     courses = get_user_courses(current_user.id, db)
-    
+
+    # ---- Batch every per-course/module/lesson/step query up front. This endpoint previously
+    # walked course -> module -> lesson and issued a Step query AND a StepProgress query per
+    # lesson (plus a teacher query per course) — hundreds of queries per dashboard load. ----
+    _course_ids = [c.id for c in courses]
+    modules_by_course: Dict[int, List[Module]] = {}
+    lessons_by_module: Dict[int, List[Lesson]] = {}
+    steps_count_by_lesson: Dict[int, int] = {}
+    progress_by_lesson: Dict[int, List[StepProgress]] = {}
+    teacher_names: Dict[int, str] = {}
+    if _course_ids:
+        _modules = (
+            db.query(Module).filter(Module.course_id.in_(_course_ids)).order_by(Module.order_index).all()
+        )
+        for _m in _modules:
+            modules_by_course.setdefault(_m.course_id, []).append(_m)
+        _module_ids = [_m.id for _m in _modules]
+        if _module_ids:
+            _lessons = (
+                db.query(Lesson).filter(Lesson.module_id.in_(_module_ids)).order_by(Lesson.order_index).all()
+            )
+            for _l in _lessons:
+                lessons_by_module.setdefault(_l.module_id, []).append(_l)
+            _lesson_ids = [_l.id for _l in _lessons]
+            if _lesson_ids:
+                for _lid, _cnt in (
+                    db.query(Step.lesson_id, func.count(Step.id))
+                    .filter(Step.lesson_id.in_(_lesson_ids)).group_by(Step.lesson_id).all()
+                ):
+                    steps_count_by_lesson[_lid] = _cnt
+                for _sp in (
+                    db.query(StepProgress).filter(
+                        StepProgress.user_id == current_user.id,
+                        StepProgress.lesson_id.in_(_lesson_ids),
+                    ).all()
+                ):
+                    progress_by_lesson.setdefault(_sp.lesson_id, []).append(_sp)
+    _teacher_ids = {c.teacher_id for c in courses if c.teacher_id}
+    if _teacher_ids:
+        for _t in db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(_teacher_ids)).all():
+            teacher_names[_t.id] = _t.name
+
     # Calculate overall statistics
     total_courses = len(courses)
     total_lessons = 0
@@ -813,8 +854,7 @@ async def get_student_progress_overview(
     course_progress = []
     
     for course in courses:
-        # Get modules for this course
-        modules = db.query(Module).filter(Module.course_id == course.id).order_by(Module.order_index).all()
+        modules = modules_by_course.get(course.id, [])
         
         course_lessons = 0
         course_steps = 0
@@ -823,30 +863,26 @@ async def get_student_progress_overview(
         course_time_spent = 0
         
         for module in modules:
-            # Get lessons for this module
-            lessons = db.query(Lesson).filter(Lesson.module_id == module.id).order_by(Lesson.order_index).all()
+            lessons = lessons_by_module.get(module.id, [])
             
             for lesson in lessons:
                 course_lessons += 1
                 total_lessons += 1
                 
-                # Get steps for this lesson
-                steps = db.query(Step).filter(Step.lesson_id == lesson.id).order_by(Step.order_index).all()
-                course_steps += len(steps)
-                total_steps += len(steps)
+                # Step count for this lesson (from a single batched grouped query).
+                steps_count = steps_count_by_lesson.get(lesson.id, 0)
+                course_steps += steps_count
+                total_steps += steps_count
                 
-                # Get step progress for this lesson
-                step_progress = db.query(StepProgress).filter(
-                    StepProgress.user_id == current_user.id,
-                    StepProgress.lesson_id == lesson.id
-                ).all()
+                # This student's step-progress rows for this lesson (from one batched query).
+                step_progress = progress_by_lesson.get(lesson.id, [])
                 
                 lesson_completed_steps = len([sp for sp in step_progress if sp.status == "completed"])
                 course_completed_steps += lesson_completed_steps
                 completed_steps += lesson_completed_steps
                 
                 # Calculate lesson completion (if all steps are completed, lesson is completed)
-                if len(steps) > 0 and lesson_completed_steps == len(steps):
+                if steps_count > 0 and lesson_completed_steps == steps_count:
                     course_completed_lessons += 1
                     completed_lessons += 1
                 
@@ -861,14 +897,13 @@ async def get_student_progress_overview(
             course_completion_percentage = (course_completed_steps / course_steps) * 100
         
 
-        # Get teach info
-        teacher = db.query(UserInDB).filter(UserInDB.id == course.teacher_id).first()
+        # Teacher name comes from the batched teacher_names map (no per-course query).
         
         course_progress.append({
             "course_id": course.id,
             "course_title": course.title,
             "teacher_id": course.teacher_id,
-            "teacher_name": teacher.name if teacher else "Unknown",
+            "teacher_name": teacher_names.get(course.teacher_id, "Unknown"),
             "cover_image_url": course.cover_image_url,
             "total_lessons": course_lessons,
             "total_steps": course_steps,
@@ -912,20 +947,17 @@ def get_student_group_teachers(student_id: int, db: Session) -> List[Dict[str, A
         Group.is_active == True
     ).all()
     
-    teachers = []
-    teacher_ids = set()
-    
-    for group in groups:
-        if group.teacher_id and group.teacher_id not in teacher_ids:
-            teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
-            if teacher:
-                teachers.append({
-                    "id": teacher.id,
-                    "name": teacher.name
-                })
-                teacher_ids.add(teacher.id)
-                
-    return teachers
+    # De-dupe teacher ids preserving first-seen order, then resolve names in ONE query
+    # (was one query per group).
+    ordered_ids = list(dict.fromkeys(g.teacher_id for g in groups if g.teacher_id))
+    if not ordered_ids:
+        return []
+
+    names = {
+        t.id: t.name
+        for t in db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(ordered_ids)).all()
+    }
+    return [{"id": tid, "name": names[tid]} for tid in ordered_ids if tid in names]
 
 @router.get("/student/{student_id}/overview")
 @cached(namespace="progress:overview-by-id", ttl=45, key_args=("student_id",))
@@ -957,7 +989,47 @@ async def get_student_progress_overview_by_id(
             raise HTTPException(status_code=403, detail="Access denied to this student")
     
     courses = get_user_courses(student_id, db)
-    
+
+    # ---- Batch every per-course/module/lesson/step query up front (was a nested course -> module
+    # -> lesson N+1 issuing a Step + StepProgress query per lesson and a teacher query per course). ----
+    _course_ids = [c.id for c in courses]
+    modules_by_course: Dict[int, List[Module]] = {}
+    lessons_by_module: Dict[int, List[Lesson]] = {}
+    steps_count_by_lesson: Dict[int, int] = {}
+    progress_by_lesson: Dict[int, List[StepProgress]] = {}
+    teacher_names: Dict[int, str] = {}
+    if _course_ids:
+        _modules = (
+            db.query(Module).filter(Module.course_id.in_(_course_ids)).order_by(Module.order_index).all()
+        )
+        for _m in _modules:
+            modules_by_course.setdefault(_m.course_id, []).append(_m)
+        _module_ids = [_m.id for _m in _modules]
+        if _module_ids:
+            _lessons = (
+                db.query(Lesson).filter(Lesson.module_id.in_(_module_ids)).order_by(Lesson.order_index).all()
+            )
+            for _l in _lessons:
+                lessons_by_module.setdefault(_l.module_id, []).append(_l)
+            _lesson_ids = [_l.id for _l in _lessons]
+            if _lesson_ids:
+                for _lid, _cnt in (
+                    db.query(Step.lesson_id, func.count(Step.id))
+                    .filter(Step.lesson_id.in_(_lesson_ids)).group_by(Step.lesson_id).all()
+                ):
+                    steps_count_by_lesson[_lid] = _cnt
+                for _sp in (
+                    db.query(StepProgress).filter(
+                        StepProgress.user_id == student_id,
+                        StepProgress.lesson_id.in_(_lesson_ids),
+                    ).all()
+                ):
+                    progress_by_lesson.setdefault(_sp.lesson_id, []).append(_sp)
+    _teacher_ids = {c.teacher_id for c in courses if c.teacher_id}
+    if _teacher_ids:
+        for _t in db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(_teacher_ids)).all():
+            teacher_names[_t.id] = _t.name
+
     # Calculate overall statistics
     total_courses = len(courses)
     total_lessons = 0
@@ -969,8 +1041,7 @@ async def get_student_progress_overview_by_id(
     course_progress = []
     
     for course in courses:
-        # Get modules for this course
-        modules = db.query(Module).filter(Module.course_id == course.id).order_by(Module.order_index).all()
+        modules = modules_by_course.get(course.id, [])
         
         course_lessons = 0
         course_steps = 0
@@ -979,30 +1050,26 @@ async def get_student_progress_overview_by_id(
         course_time_spent = 0
         
         for module in modules:
-            # Get lessons for this module
-            lessons = db.query(Lesson).filter(Lesson.module_id == module.id).order_by(Lesson.order_index).all()
+            lessons = lessons_by_module.get(module.id, [])
             
             for lesson in lessons:
                 course_lessons += 1
                 total_lessons += 1
                 
-                # Get steps for this lesson
-                steps = db.query(Step).filter(Step.lesson_id == lesson.id).order_by(Step.order_index).all()
-                course_steps += len(steps)
-                total_steps += len(steps)
+                # Step count for this lesson (from a single batched grouped query).
+                steps_count = steps_count_by_lesson.get(lesson.id, 0)
+                course_steps += steps_count
+                total_steps += steps_count
                 
-                # Get step progress for this lesson
-                step_progress = db.query(StepProgress).filter(
-                    StepProgress.user_id == student_id,
-                    StepProgress.lesson_id == lesson.id
-                ).all()
+                # This student's step-progress rows for this lesson (from one batched query).
+                step_progress = progress_by_lesson.get(lesson.id, [])
                 
                 lesson_completed_steps = len([sp for sp in step_progress if sp.status == "completed"])
                 course_completed_steps += lesson_completed_steps
                 completed_steps += lesson_completed_steps
                 
                 # Calculate lesson completion (if all steps are completed, lesson is completed)
-                if len(steps) > 0 and lesson_completed_steps == len(steps):
+                if steps_count > 0 and lesson_completed_steps == steps_count:
                     course_completed_lessons += 1
                     completed_lessons += 1
                 
@@ -1016,13 +1083,12 @@ async def get_student_progress_overview_by_id(
         if course_steps > 0:
             course_completion_percentage = (course_completed_steps / course_steps) * 100
         
-        # Get teacher info
-        teacher = db.query(UserInDB).filter(UserInDB.id == course.teacher_id).first()
+        # Teacher name comes from the batched teacher_names map (no per-course query).
         
         course_progress.append({
             "course_id": course.id,
             "course_title": course.title,
-            "teacher_name": teacher.name if teacher else "Unknown",
+            "teacher_name": teacher_names.get(course.teacher_id, "Unknown"),
             "cover_image_url": course.cover_image_url,
             "total_lessons": course_lessons,
             "total_steps": course_steps,
