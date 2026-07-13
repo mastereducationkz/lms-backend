@@ -129,7 +129,7 @@ def _fake_fetch(email, current_set_completed):
 
 
 def _week2_row(db, admin, group):
-    result = asyncio.run(_weekly_lessons_endpoint()(
+    result = _maybe_run(_weekly_lessons_endpoint()(
         group.id, week_number=2, current_user=admin, db=db))
     assert len(result["students"]) == 1
     return result["students"][0]
@@ -200,7 +200,14 @@ def test_groups_endpoint_exposes_week1_start(db):
     from src.gamification.routes.leaderboard import get_curator_groups
 
     admin, group, _student = _group_with_student(db, "anchor")
-    groups = asyncio.run(get_curator_groups(current_user=admin, db=db))
+    groups = _maybe_run(get_curator_groups(current_user=admin, db=db))
     ours = next(g for g in groups if g.id == group.id)
     assert ours.week1_start == date(2026, 6, 1)  # Monday of the first event's week
     assert ours.current_week is not None
+
+
+def _maybe_run(_result):
+    """Handlers converted from async def to def now return values directly; still run coroutines
+    for any endpoint that remained async."""
+    import asyncio as _asyncio
+    return _asyncio.run(_result) if _asyncio.iscoroutine(_result) else _result

@@ -50,7 +50,7 @@ def head_teacher_can_access_group(db: Session, head_teacher_user_id: int, group_
 router = APIRouter()
 
 @router.get("/curator/groups", response_model=List[GroupSchema])
-async def get_curator_groups(
+def get_curator_groups(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -206,7 +206,7 @@ class GroupWeekOffsetInputSchema(BaseModel):
 
 
 @router.post("/curator/group-week-offset")
-async def set_group_week_offset(
+def set_group_week_offset(
     data: GroupWeekOffsetInputSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
@@ -495,7 +495,7 @@ async def get_group_leaderboard(
     return result
 
 @router.post("/config", response_model=LeaderboardConfigSchema)
-async def update_leaderboard_config(
+def update_leaderboard_config(
     payload: LeaderboardConfigUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1101,7 +1101,7 @@ async def get_weekly_lessons_with_hw_status(
     }
 
 @router.get("/curator/full-attendance/{group_id}")
-async def get_group_full_attendance_matrix(
+def get_group_full_attendance_matrix(
     group_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1257,7 +1257,7 @@ async def get_group_full_attendance_matrix(
     }
 
 @router.post("/curator/leaderboard")
-async def update_leaderboard_entry(
+def update_leaderboard_entry(
     data: LeaderboardEntryCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1495,7 +1495,7 @@ async def get_weekly_lessons_with_hw_status(
 
 
 @router.post("/curator/leaderboard-config")
-async def update_leaderboard_config(
+def update_leaderboard_config(
     data: LeaderboardConfigUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1537,7 +1537,7 @@ class BulkAttendanceInputSchema(BaseModel):
     updates: List[AttendanceInputSchema]
 
 @router.post("/curator/attendance/bulk")
-async def update_attendance_bulk(
+def update_attendance_bulk(
     data: BulkAttendanceInputSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1625,7 +1625,7 @@ class LessonTopicInputSchema(BaseModel):
 
 
 @router.post("/curator/lesson-topic")
-async def set_lesson_topic(
+def set_lesson_topic(
     data: LessonTopicInputSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
@@ -1690,7 +1690,7 @@ async def set_lesson_topic(
     return {"status": "success", "event_id": real_event_id, "topic": event.topic}
 
 @router.post("/curator/attendance")
-async def update_attendance(
+def update_attendance(
     data: AttendanceInputSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1828,7 +1828,7 @@ class GroupScheduleResponse(BaseModel):
 
 
 @router.post("/curator/schedule/generate")
-async def generate_schedule(
+def generate_schedule(
     data: ScheduleGenerationSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1919,7 +1919,7 @@ async def generate_schedule(
     return {"message": f"Schedule generated successfully. Created {lessons_created} individual lessons."}
 
 @router.get("/curator/schedule/{group_id}", response_model=GroupScheduleResponse)
-async def get_group_schedule(
+def get_group_schedule(
     group_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2002,7 +2002,7 @@ from src.schemas.models import StepProgress
 from datetime import timedelta
 
 @router.get("/student/my-ranking")
-async def get_student_ranking(
+def get_student_ranking(
     period: str = Query("all_time", regex="^(all_time|this_week|this_month)$"),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2164,7 +2164,7 @@ async def get_student_ranking(
 
 
 @router.get("/group-schedules/{group_id}")
-async def get_group_schedules(
+def get_group_schedules(
     group_id: int,
     weeks_back: int = Query(default=4, ge=0, le=12),
     weeks_ahead: int = Query(default=8, ge=0, le=24),

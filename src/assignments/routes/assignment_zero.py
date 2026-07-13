@@ -119,7 +119,7 @@ class CuratorUpcomingExamRow(AssignmentZeroSubmissionSchema):
 # =============================================================================
 
 @router.get("/status")
-async def get_assignment_zero_status(
+def get_assignment_zero_status(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -174,7 +174,7 @@ async def get_assignment_zero_status(
     }
 
 @router.get("/my-submission", response_model=AssignmentZeroSubmissionSchema)
-async def get_my_assignment_zero_submission(
+def get_my_assignment_zero_submission(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -198,7 +198,7 @@ async def get_my_assignment_zero_submission(
     return AssignmentZeroSubmissionSchema.model_validate(submission)
 
 @router.post("/save-progress", response_model=AssignmentZeroSubmissionSchema)
-async def save_assignment_zero_progress(
+def save_assignment_zero_progress(
     data: AssignmentZeroSaveProgressSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -311,7 +311,7 @@ async def save_assignment_zero_progress(
         return AssignmentZeroSubmissionSchema.model_validate(draft)
 
 @router.post("/submit", response_model=AssignmentZeroSubmissionSchema)
-async def submit_assignment_zero(
+def submit_assignment_zero(
     data: AssignmentZeroSubmitSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -499,7 +499,7 @@ async def submit_assignment_zero(
 
 
 @router.patch("/planned-date", response_model=AssignmentZeroSubmissionSchema)
-async def update_planned_exam_date(
+def update_planned_exam_date(
     data: AssignmentZeroPlannedDateUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -529,7 +529,7 @@ async def update_planned_exam_date(
 
 
 @router.patch("/exam-result", response_model=AssignmentZeroSubmissionSchema)
-async def update_exam_result(
+def update_exam_result(
     data: AssignmentZeroExamResultUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -563,7 +563,7 @@ async def update_exam_result(
 
 
 @router.get("/ielts-date-prompt-status")
-async def get_ielts_date_prompt_status(
+def get_ielts_date_prompt_status(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -622,7 +622,7 @@ async def get_ielts_date_prompt_status(
 
 
 @router.get("/exam-countdown")
-async def get_exam_countdown(
+def get_exam_countdown(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
@@ -717,7 +717,7 @@ async def get_exam_countdown(
 
 
 @router.post("/ielts-date-prompt-touch")
-async def touch_ielts_date_prompt(
+def touch_ielts_date_prompt(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -772,7 +772,7 @@ async def upload_screenshot(
 # =============================================================================
 
 @router.get("/submissions", response_model=list[AssignmentZeroSubmissionSchema])
-async def get_all_submissions(
+def get_all_submissions(
     group_name: str | None = None,
     skip: int = 0,
     limit: int = 100,
@@ -793,7 +793,7 @@ async def get_all_submissions(
     return [AssignmentZeroSubmissionSchema.model_validate(s) for s in submissions]
 
 @router.get("/submissions/{user_id}", response_model=AssignmentZeroSubmissionSchema)
-async def get_submission_by_user(
+def get_submission_by_user(
     user_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -813,7 +813,7 @@ async def get_submission_by_user(
 
 
 @router.get("/curator/upcoming", response_model=list[CuratorUpcomingExamRow])
-async def get_curator_upcoming_exam_results(
+def get_curator_upcoming_exam_results(
     days: int = 7,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
@@ -903,7 +903,7 @@ async def get_curator_upcoming_exam_results(
 
 
 @router.patch("/curator/planned-date", response_model=AssignmentZeroSubmissionSchema)
-async def curator_update_planned_exam_date(
+def curator_update_planned_exam_date(
     user_id: int,
     data: AssignmentZeroPlannedDateUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -938,7 +938,7 @@ async def curator_update_planned_exam_date(
 
 
 @router.patch("/curator/exam-result", response_model=AssignmentZeroSubmissionSchema)
-async def curator_update_exam_result(
+def curator_update_exam_result(
     user_id: int,
     data: AssignmentZeroExamResultUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),

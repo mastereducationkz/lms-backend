@@ -33,7 +33,7 @@ class UpdateQuestionRequest(BaseModel):
 
 
 @router.post("/report-error", response_model=ReportErrorResponse)
-async def report_question_error(
+def report_question_error(
     request: ReportErrorRequest,
     background_tasks: BackgroundTasks,
     current_user: UserInDB = Depends(get_current_user),
@@ -117,7 +117,7 @@ async def report_question_error(
 
 
 @router.get("/error-reports")
-async def get_error_reports(
+def get_error_reports(
     status: Optional[str] = None,
     current_user: UserInDB = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -213,7 +213,7 @@ async def get_error_reports(
 
 
 @router.get("/error-reports/{report_id}")
-async def get_error_report_detail(
+def get_error_report_detail(
     report_id: int,
     current_user: UserInDB = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -347,7 +347,7 @@ async def get_error_report_detail(
 
 
 @router.patch("/error-reports/{report_id}")
-async def update_error_report(
+def update_error_report(
     report_id: int,
     status: str,
     sync_same_question: bool = True,
@@ -401,7 +401,7 @@ async def update_error_report(
 
 
 @router.put("/update-question/{step_id}/{question_id}")
-async def update_question(
+def update_question(
     step_id: int,
     question_id: str,
     request: UpdateQuestionRequest,

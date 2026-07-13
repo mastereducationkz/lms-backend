@@ -67,7 +67,7 @@ class CompleteDailyQuestionsRequest(BaseModel):
 # =============================================================================
 
 @router.get("/status")
-async def get_daily_questions_status(
+def get_daily_questions_status(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -220,7 +220,7 @@ async def get_daily_question_recommendations(
 
 
 @router.post("/complete")
-async def complete_daily_questions(
+def complete_daily_questions(
     request: CompleteDailyQuestionsRequest,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)

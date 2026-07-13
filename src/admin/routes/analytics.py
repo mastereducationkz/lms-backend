@@ -28,7 +28,7 @@ router = APIRouter()
 
 @router.get("/student/{student_id}/detailed")
 @cached(namespace="analytics:student-detailed", ttl=90, key_args=("student_id", "course_id"))
-async def get_detailed_student_analytics(
+def get_detailed_student_analytics(
     student_id: int,
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -805,7 +805,7 @@ async def get_course_analytics_overview(
     }
 
 @router.get("/video-engagement/{course_id}")
-async def get_video_engagement_analytics(
+def get_video_engagement_analytics(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -868,7 +868,7 @@ async def get_video_engagement_analytics(
     }
 
 @router.get("/quiz-performance/{course_id}")
-async def get_quiz_performance_analytics(
+def get_quiz_performance_analytics(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -985,7 +985,7 @@ def extract_correct_answers_from_gaps(text: str, separator: str = ',') -> List[s
     ttl=60,
     key_args=("course_id", "group_id", "lesson_id", "limit")
 )
-async def get_quiz_question_errors(
+def get_quiz_question_errors(
     course_id: int,
     group_id: Optional[int] = None,
     lesson_id: Optional[int] = None,
@@ -1270,7 +1270,7 @@ async def get_quiz_question_errors(
 
 @router.get("/students/all")
 @cached(namespace="analytics:students-all", ttl=60, key_args=("course_id",))
-async def get_all_students_analytics(
+def get_all_students_analytics(
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1503,7 +1503,7 @@ async def get_all_students_analytics(
 
 @router.get("/groups")
 @cached(namespace="analytics:groups", ttl=90)
-async def get_groups_analytics(
+def get_groups_analytics(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -1642,7 +1642,7 @@ async def get_groups_analytics(
     }
 
 @router.get("/course/{course_id}/groups")
-async def get_course_groups_analytics(
+def get_course_groups_analytics(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1842,7 +1842,7 @@ async def get_course_groups_analytics(
     }
 
 @router.get("/group/{group_id}/students")
-async def get_group_students_analytics(
+def get_group_students_analytics(
     group_id: int,
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2040,7 +2040,7 @@ async def get_group_students_analytics(
     }
 
 @router.get("/student/{student_id}/progress-history")
-async def get_student_progress_history(
+def get_student_progress_history(
     student_id: int,
     course_id: Optional[int] = None,
     days: int = Query(30, description="Number of days to look back"),
@@ -2131,7 +2131,7 @@ async def get_student_progress_history(
         "history": history_data
     }
 
-async def generate_student_pdf_report(student_data: dict, progress_data: dict) -> bytes:
+def generate_student_pdf_report(student_data: dict, progress_data: dict) -> bytes:
     """Генерация PDF отчета для студента"""
     try:
         from reportlab.lib.pagesizes import letter, A4
@@ -2259,7 +2259,7 @@ Email: {student_data.get('student_email', 'N/A')}
         return report_text.encode('utf-8')
 
 @router.post("/export/student/{student_id}")
-async def export_student_report(
+def export_student_report(
     student_id: int,
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2304,7 +2304,7 @@ async def export_student_report(
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
 @router.post("/export/group/{group_id}")
-async def export_group_report(
+def export_group_report(
     group_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2429,7 +2429,7 @@ async def export_group_report(
         raise HTTPException(status_code=500, detail=f"Failed to generate group report: {str(e)}")
 
 @router.post("/export/all-students")
-async def export_all_students_report(
+def export_all_students_report(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -2748,7 +2748,7 @@ STUDENTS:
 # =============================================================================
 
 @router.get("/student/{student_id}/detailed-progress")
-async def get_student_detailed_progress(
+def get_student_detailed_progress(
     student_id: int,
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -3087,7 +3087,7 @@ async def get_student_detailed_progress(
         raise HTTPException(status_code=500, detail=f"Failed to get detailed progress: {str(e)}")
 
 @router.get("/student/{student_id}/learning-path")
-async def get_student_learning_path(
+def get_student_learning_path(
     student_id: int,
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -3167,7 +3167,7 @@ async def get_student_learning_path(
         raise HTTPException(status_code=500, detail=f"Failed to get learning path: {str(e)}")
 
 @router.get("/export-excel")
-async def export_analytics_to_excel(
+def export_analytics_to_excel(
     course_id: int,
     group_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -3725,7 +3725,7 @@ async def get_student_sat_scores(
             return {"testResults": [], "error": str(e)}
 
 @router.get("/course/{course_id}/progress-history")
-async def get_course_progress_history(
+def get_course_progress_history(
     course_id: int,
     group_id: Optional[int] = Query(None),
     range_type: str = Query("all", alias="range"),

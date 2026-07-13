@@ -23,7 +23,7 @@ from src.services.cache_service import cached
 router = APIRouter()
 
 @router.get("/my", response_model=List[EventSchema])
-async def get_my_events(
+def get_my_events(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=1000),
     event_type: Optional[str] = Query(None),
@@ -367,7 +367,7 @@ async def get_my_events(
 
 @router.get("/calendar", response_model=List[EventSchema])
 @cached(namespace="events:calendar", ttl=30, key_args=("year", "month"))
-async def get_calendar_events(
+def get_calendar_events(
     year: int = Query(..., ge=2020, le=2030),
     month: int = Query(..., ge=1, le=12),
     db: Session = Depends(get_db),
@@ -742,7 +742,7 @@ async def get_calendar_events(
     return result
 
 @router.get("/upcoming", response_model=List[EventSchema])
-async def get_upcoming_events(
+def get_upcoming_events(
     limit: int = Query(10, le=50),
     days_ahead: int = Query(7, ge=1, le=30),
     db: Session = Depends(get_db),
@@ -935,7 +935,7 @@ async def get_upcoming_events(
     return result[:limit]
 
 @router.get("/group/{group_id}/classes", response_model=List[EventSchema])
-async def get_group_class_events(
+def get_group_class_events(
     group_id: int,
     weeks_back: int = Query(1, ge=0, le=52),
     weeks_ahead: int = Query(8, ge=0, le=52),
@@ -987,7 +987,7 @@ async def get_group_class_events(
     return events
 
 @router.get("/{event_id}", response_model=EventSchema)
-async def get_event_details(
+def get_event_details(
     event_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency)
@@ -1074,7 +1074,7 @@ async def get_event_details(
     return event_data
 
 @router.post("/{event_id}/register")
-async def register_for_event(
+def register_for_event(
     event_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency)
@@ -1131,7 +1131,7 @@ async def register_for_event(
     return {"detail": "Successfully registered for event"}
 
 @router.delete("/{event_id}/register")
-async def unregister_from_event(
+def unregister_from_event(
     event_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency)
@@ -1152,7 +1152,7 @@ async def unregister_from_event(
     return {"detail": "Successfully unregistered from event"}
 
 @router.post("/curator/create", response_model=EventSchema)
-async def create_curator_event(
+def create_curator_event(
     event_data: CreateEventRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency)
@@ -1260,7 +1260,7 @@ async def create_curator_event(
     
     return result
 @router.get("/{event_id}/participants", response_model=List[EventStudentSchema])
-async def get_event_participants(
+def get_event_participants(
     event_id: int,
     group_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
@@ -1308,7 +1308,7 @@ async def get_event_participants(
     return results
 
 @router.post("/{event_id}/attendance")
-async def update_event_attendance(
+def update_event_attendance(
     event_id: int,
     data: AttendanceBulkUpdateSchema,
     db: Session = Depends(get_db),

@@ -160,7 +160,7 @@ def to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
 # =============================================================================
 
 @router.get("/", response_model=List[AssignmentSchema])
-async def get_assignments(
+def get_assignments(
     lesson_id: Optional[str] = None,
     course_id: Optional[int] = None,
     group_id: Optional[int] = None,
@@ -285,7 +285,7 @@ async def get_assignments(
     return [_to_enriched_schema(a) for a in assignments]
 
 @router.patch("/{assignment_id}/toggle-visibility", response_model=AssignmentSchema)
-async def toggle_assignment_visibility(
+def toggle_assignment_visibility(
     assignment_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -325,7 +325,7 @@ async def toggle_assignment_visibility(
     return _to_enriched_schema(assignment)
 
 @router.get("/assigned-lessons/{course_id}")
-async def get_assigned_lessons_for_course(
+def get_assigned_lessons_for_course(
     course_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -402,7 +402,7 @@ async def get_assigned_lessons_for_course(
 
 
 @router.get("/previous-homework")
-async def get_student_previous_homework(
+def get_student_previous_homework(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
@@ -469,7 +469,7 @@ async def get_student_previous_homework(
 
 
 @router.post("/", response_model=AssignmentSchema)
-async def create_assignment(
+def create_assignment(
     assignment_data: AssignmentCreateSchema,
     lesson_id: Optional[int] = None,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -713,7 +713,7 @@ async def create_assignment(
     return result_assignment
 
 @router.get("/{assignment_id}", response_model=AssignmentSchema)
-async def get_assignment(
+def get_assignment(
     assignment_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -790,7 +790,7 @@ async def get_assignment(
     return assignment_data
 
 @router.put("/{assignment_id}", response_model=AssignmentSchema)
-async def update_assignment(
+def update_assignment(
     assignment_id: int,
     assignment_data: AssignmentCreateSchema,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -923,7 +923,7 @@ async def update_assignment(
     return result_assignment
 
 @router.delete("/{assignment_id}")
-async def delete_assignment(
+def delete_assignment(
     assignment_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -1004,7 +1004,7 @@ async def upload_audio(
     return {"url": file_url, "filename": unique_filename}
 
 @router.post("/{assignment_id}/submit", response_model=AssignmentSubmissionSchema)
-async def submit_assignment(
+def submit_assignment(
     assignment_id: int,
     submission_data: SubmitAssignmentSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1242,7 +1242,7 @@ async def submit_assignment(
 
 
 @router.get("/{assignment_id}/submissions", response_model=List[AssignmentSubmissionSchema])
-async def get_assignment_submissions(
+def get_assignment_submissions(
     assignment_id: int,
     user_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1353,7 +1353,7 @@ async def get_assignment_submissions(
     return result
 
 @router.get("/{assignment_id}/submissions/{submission_id}", response_model=AssignmentSubmissionSchema)
-async def get_submission(
+def get_submission(
     assignment_id: int,
     submission_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1437,7 +1437,7 @@ async def get_submission(
     return submission_data
 
 @router.get("/submissions/my", response_model=List[AssignmentSubmissionSchema])
-async def get_my_submissions(
+def get_my_submissions(
     course_id: Optional[int] = None,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=1000),
@@ -1461,7 +1461,7 @@ async def get_my_submissions(
     return [AssignmentSubmissionSchema.from_orm(submission) for submission in submissions]
 
 @router.get("/submissions/unseen-graded-count")
-async def get_unseen_graded_count(
+def get_unseen_graded_count(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -1505,7 +1505,7 @@ async def mark_submission_seen(
     return {"success": True}
 
 @router.put("/submissions/{submission_id}/allow-resubmit")
-async def allow_resubmission(
+def allow_resubmission(
     submission_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1709,7 +1709,7 @@ async def grade_submission(
     return submission_data
 
 @router.patch("/{assignment_id}/submissions/{submission_id}/toggle-visibility", response_model=AssignmentSubmissionSchema)
-async def toggle_submission_visibility(
+def toggle_submission_visibility(
     assignment_id: int,
     submission_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -1777,7 +1777,7 @@ async def toggle_submission_visibility(
 # =============================================================================
 
 @router.get("/{assignment_id}/student-progress", response_model=Dict[str, Any])
-async def get_assignment_student_progress(
+def get_assignment_student_progress(
     assignment_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2016,7 +2016,7 @@ async def get_assignment_student_progress(
     }
 
 @router.get("/{assignment_id}/status", response_model=Dict[str, Any])
-async def get_assignment_status_for_student(
+def get_assignment_status_for_student(
     assignment_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2322,7 +2322,7 @@ def update_student_progress(assignment: Assignment, user_id: int, score: Optiona
 # =============================================================================
 
 @router.get("/types")
-async def get_assignment_types():
+def get_assignment_types():
     """Get supported assignment types and their schemas"""
     return {
         "supported_types": [
@@ -2481,7 +2481,7 @@ def sync_assignment_linked_lessons(assignment: Assignment, db: Session):
 # =============================================================================
 
 @router.post("/{assignment_id}/extensions", response_model=AssignmentExtensionSchema)
-async def grant_extension(
+def grant_extension(
     assignment_id: int,
     extension_data: GrantExtensionSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2542,7 +2542,7 @@ async def grant_extension(
     return result
 
 @router.get("/{assignment_id}/extensions", response_model=List[AssignmentExtensionSchema])
-async def get_assignment_extensions(
+def get_assignment_extensions(
     assignment_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2574,7 +2574,7 @@ async def get_assignment_extensions(
     return result
 
 @router.delete("/{assignment_id}/extensions/{student_id}")
-async def revoke_extension(
+def revoke_extension(
     assignment_id: int,
     student_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2598,7 +2598,7 @@ async def revoke_extension(
     return {"message": "Extension revoked successfully"}
 
 @router.get("/{assignment_id}/my-extension", response_model=Optional[AssignmentExtensionSchema])
-async def get_my_extension(
+def get_my_extension(
     assignment_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)

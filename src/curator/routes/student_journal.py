@@ -67,7 +67,7 @@ def _build_student_query(db: Session, allowed_group_ids: Optional[List[int]], gr
 # ---------------------------------------------------------------------------
 
 @router.get("/list", summary="List students with aggregated metrics")
-async def list_students(
+def list_students(
     group_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
@@ -189,7 +189,7 @@ async def list_students(
 # ---------------------------------------------------------------------------
 
 @router.get("/groups", summary="List groups accessible to current user")
-async def list_groups(
+def list_groups(
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),
 ):
@@ -206,7 +206,7 @@ async def list_groups(
 # ---------------------------------------------------------------------------
 
 @router.get("/{student_id}/profile", summary="Full profile for a student")
-async def get_student_profile(
+def get_student_profile(
     student_id: int,
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),

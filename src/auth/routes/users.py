@@ -15,7 +15,7 @@ router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
     payload = verify_token(token)
     if payload is None or "sub" not in payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -32,7 +32,7 @@ class UserUpdate(BaseModel):
 
 
 @router.get("/users/{user_id}", response_model=UserSchema)
-async def get_user_by_id(user_id: int, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+def get_user_by_id(user_id: int, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -46,7 +46,7 @@ async def get_user_by_id(user_id: int, db: Session = Depends(get_db), token: str
 
 
 @router.get("/groups/me", response_model=List[GroupSchema])
-async def get_my_groups(
+def get_my_groups(
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
 ):
@@ -114,7 +114,7 @@ async def get_my_groups(
 
 
 @router.put("/{user_id}", response_model=UserSchema)
-async def update_profile(
+def update_profile(
     user_id: int,
     update: UserUpdate,
     background_tasks: BackgroundTasks,
@@ -154,7 +154,7 @@ async def update_profile(
 
 
 @router.post("/complete-onboarding", response_model=UserSchema)
-async def complete_onboarding(
+def complete_onboarding(
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
 ):
@@ -197,7 +197,7 @@ def _upsert_push_token(db: Session, user_id: int, token: str, platform: str, dev
 
 
 @router.post("/push-token")
-async def register_push_token(
+def register_push_token(
     token_data: PushTokenRequest,
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
@@ -215,7 +215,7 @@ async def register_push_token(
 
 
 @router.delete("/push-token")
-async def remove_push_token(
+def remove_push_token(
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
 ):
@@ -238,7 +238,7 @@ class PushTokenRegisterRequest(BaseModel):
 
 
 @router.post("/push-tokens")
-async def add_push_token(
+def add_push_token(
     body: PushTokenRegisterRequest,
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),
@@ -254,7 +254,7 @@ async def add_push_token(
 
 
 @router.delete("/push-tokens/{token}")
-async def delete_push_token(
+def delete_push_token(
     token: str,
     db: Session = Depends(get_db),
     user: UserInDB = Depends(get_current_user),

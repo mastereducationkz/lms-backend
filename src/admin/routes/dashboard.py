@@ -58,7 +58,7 @@ def _compute_group_program_end(group) -> Optional[date]:
     ttl=45,
     key_args=("group_id", "start_date", "end_date"),
 )
-async def get_dashboard_stats(
+def get_dashboard_stats(
     group_id: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1374,7 +1374,7 @@ def get_admin_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSche
 
 @router.get("/curator/homework-by-group")
 @cached(namespace="dashboard:curator-homework", ttl=45, key_args=("group_id",))
-async def get_curator_homework_by_group(
+def get_curator_homework_by_group(
     group_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1626,7 +1626,7 @@ async def get_curator_homework_by_group(
 
 
 @router.get("/curator/student/{student_id}/homework")
-async def get_curator_student_homework(
+def get_curator_student_homework(
     student_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1757,7 +1757,7 @@ async def get_curator_student_homework(
 
 @router.get("/curator/{curator_id}")
 @cached(namespace="dashboard:curator-details", ttl=45, key_args=("curator_id",))
-async def get_curator_details(
+def get_curator_details(
     curator_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2097,7 +2097,7 @@ async def get_curator_details(
 
 @router.get("/my-courses", response_model=List[CourseProgressSchema])
 @cached(namespace="dashboard:my-courses-progress", ttl=60)
-async def get_my_courses(
+def get_my_courses(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -2157,7 +2157,7 @@ async def get_my_courses(
 
 @router.get("/recent-activity")
 @cached(namespace="dashboard:recent-activity", ttl=30, key_args=("limit",))
-async def get_recent_activity(
+def get_recent_activity(
     limit: int = 10,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2192,7 +2192,7 @@ async def get_recent_activity(
     return {"recent_activities": activities}
 
 @router.post("/update-study-time")
-async def update_study_time(
+def update_study_time(
     minutes_studied: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2212,7 +2212,7 @@ async def update_study_time(
 
 @router.get("/teacher/pending-submissions")
 @cached(namespace="dashboard:teacher-pending", ttl=30, key_args=("limit", "offset"))
-async def get_teacher_pending_submissions(
+def get_teacher_pending_submissions(
     limit: Optional[int] = Query(None, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2357,7 +2357,7 @@ async def get_teacher_pending_submissions(
 
 @router.get("/teacher/auto-grade-unit-homework/preview")
 @cached(namespace="dashboard:teacher-auto-grade-preview", ttl=30)
-async def get_teacher_auto_grade_unit_homework_preview(
+def get_teacher_auto_grade_unit_homework_preview(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -2469,7 +2469,7 @@ async def get_teacher_auto_grade_unit_homework_preview(
 
 
 @router.post("/teacher/auto-grade-unit-homework")
-async def auto_grade_teacher_unit_homework(
+def auto_grade_teacher_unit_homework(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -2605,7 +2605,7 @@ async def auto_grade_teacher_unit_homework(
 
 @router.get("/teacher/recent-submissions")
 @cached(namespace="dashboard:teacher-recent-submissions", ttl=30, key_args=("limit",))
-async def get_teacher_recent_submissions(
+def get_teacher_recent_submissions(
     limit: int = 10,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2752,7 +2752,7 @@ async def get_teacher_recent_submissions(
     ttl=120,
     key_args=("period_start", "period_end", "lesson_rate"),
 )
-async def get_teacher_salary_breakdown(
+def get_teacher_salary_breakdown(
     period_start: str = Query(..., description="Start date YYYY-MM-DD"),
     period_end: str = Query(..., description="End date YYYY-MM-DD"),
     lesson_rate: int = Query(4000, ge=0, le=1_000_000),
@@ -2874,7 +2874,7 @@ async def get_teacher_salary_breakdown(
 
 @router.get("/teacher/students-progress")
 @cached(namespace="dashboard:teacher-students-progress", ttl=45)
-async def get_teacher_students_progress(
+def get_teacher_students_progress(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):

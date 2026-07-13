@@ -90,7 +90,7 @@ def _get_date_range(
 
 
 @router.get("/schedules")
-async def get_sat_group_schedules(
+def get_sat_group_schedules(
     filter: FilterType = Query("all", description="Predefined filter: all | past | upcoming | today | this_week | this_month"),
     date_filter: Optional[date] = Query(None, alias="date", description="Specific date (YYYY-MM-DD). Overrides 'filter'."),
     week_date: Optional[date] = Query(None, description="Any date inside the target week (YYYY-MM-DD). Overrides 'filter'."),

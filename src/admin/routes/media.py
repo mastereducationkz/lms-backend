@@ -222,7 +222,7 @@ async def upload_step_attachment(
     }
 
 @router.delete("/steps/{step_id}/attachments/{attachment_id}")
-async def delete_step_attachment(
+def delete_step_attachment(
     step_id: int,
     attachment_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -269,7 +269,7 @@ async def delete_step_attachment(
     
     return {"detail": "Attachment deleted successfully"}
 @router.put("/courses/{course_id}/thumbnail-url")
-async def set_course_thumbnail_url(
+def set_course_thumbnail_url(
     course_id: int,
     data: ThumbnailUrlSchema,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -299,7 +299,7 @@ async def set_course_thumbnail_url(
 # =============================================================================
 
 @router.post("/videos/youtube", response_model=VideoUploadResponse)
-async def add_youtube_video(
+def add_youtube_video(
     video_data: YouTubeVideoSchema,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -328,7 +328,7 @@ async def add_youtube_video(
     return response
 
 @router.get("/videos/youtube/validate")
-async def validate_youtube_url(
+def validate_youtube_url(
     url: str,
     current_user: UserInDB = Depends(get_current_user_dependency)
 ):
@@ -349,7 +349,7 @@ async def validate_youtube_url(
     }
 
 @router.put("/lessons/{lesson_id}/video")
-async def update_lesson_video(
+def update_lesson_video(
     lesson_id: int,
     video_data: YouTubeVideoSchema,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -470,7 +470,7 @@ async def upload_lesson_material(
     )
 
 @router.get("/materials/{material_id}")
-async def get_material_info(
+def get_material_info(
     material_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -502,7 +502,7 @@ async def get_material_info(
     }
 
 @router.delete("/materials/{material_id}")
-async def delete_material(
+def delete_material(
     material_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -538,7 +538,7 @@ async def delete_material(
 # =============================================================================
 
 @router.get("/library")
-async def get_media_library(
+def get_media_library(
     lesson_id: Optional[int] = None,
     file_type: Optional[str] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -771,7 +771,7 @@ async def upload_submission_file(
     }
 
 @router.get("/files/{file_type}/{filename:path}")
-async def download_file(
+def download_file(
     file_type: str,
     filename: str,
     current_user: UserInDB = Depends(get_current_user_dependency),

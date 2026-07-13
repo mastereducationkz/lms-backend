@@ -11,7 +11,7 @@ Covers the set-topic endpoint (`POST /leaderboard/curator/lesson-topic`):
 
 Uses a real Postgres session (SessionLocal) like the other integration tests
 and rolls everything back at the end, leaving no trace in the database.
-The async endpoint is driven directly via asyncio.run() so no HTTP/JWT layer
+The async endpoint is driven directly via _maybe_run() so no HTTP/JWT layer
 is required.
 """
 import asyncio
@@ -100,7 +100,7 @@ def _class_event(db, group_id, created_by, title="G: Lesson 1"):
 
 
 def _set(db, user, group_id, event_id, topic):
-    return asyncio.run(
+    return _maybe_run(
         set_lesson_topic(
             LessonTopicInputSchema(group_id=group_id, event_id=event_id, topic=topic),
             current_user=user,
@@ -225,3 +225,10 @@ def test_virtual_schedule_id_is_materialized(db):
     real = db.query(Event).filter(Event.id == res["event_id"]).first()
     assert real is not None
     assert real.topic == "Materialized topic"
+
+
+def _maybe_run(_result):
+    """Handlers converted from async def to def now return values directly; still run coroutines
+    for any endpoint that remained async."""
+    import asyncio as _asyncio
+    return _asyncio.run(_result) if _asyncio.iscoroutine(_result) else _result

@@ -45,7 +45,7 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 @router.post("/login", response_model=Token)
-async def login(user: UserLogin, response: Response, db: Session = Depends(get_db)):
+def login(user: UserLogin, response: Response, db: Session = Depends(get_db)):
     """Simple login with email and password"""
     try:
         logger.info(f"Attempting login for email: {user.email}")
@@ -119,7 +119,7 @@ async def login(user: UserLogin, response: Response, db: Session = Depends(get_d
         raise HTTPException(status_code=500, detail="Login failed")
 
 @router.post("/refresh", response_model=Token)
-async def refresh_token(request: RefreshTokenRequest, response: Response, db: Session = Depends(get_db)):
+def refresh_token(request: RefreshTokenRequest, response: Response, db: Session = Depends(get_db)):
     """Refresh access token using refresh token"""
     try:
         token = request.refresh_token
@@ -183,7 +183,7 @@ async def refresh_token(request: RefreshTokenRequest, response: Response, db: Se
         raise HTTPException(status_code=500, detail="Could not refresh token")
 
 @router.get("/me", response_model=UserSchema)
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Get current user information"""
     payload = verify_bearer_token(token)
     if payload is None:
@@ -198,7 +198,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return build_user_schema_response(user, db)
 
 @router.post("/logout")
-async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def logout(response: Response, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Logout user by invalidating refresh token"""
     payload = verify_bearer_token(token)
     if payload is None:
@@ -218,7 +218,7 @@ async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Se
     return {"detail": "Logged out successfully"}
 
 # Dependency for getting current user
-async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
+def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
     """Dependency to get current authenticated user"""
     payload = verify_bearer_token(token)
     if payload is None:
@@ -233,14 +233,14 @@ async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: S
     return user
 
 # Admin-only dependency  
-async def require_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
+def require_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
     """Dependency to require admin role"""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
 # Teacher or admin dependency
-async def require_teacher_or_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
+def require_teacher_or_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
     """Dependency to require teacher or admin role"""
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Teacher or admin access required")
@@ -262,7 +262,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 @router.post("/forgot-password")
-async def forgot_password(
+def forgot_password(
     payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -277,7 +277,7 @@ async def forgot_password(
 
 
 @router.post("/reset-password")
-async def reset_password(
+def reset_password(
     payload: ResetPasswordRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -307,7 +307,7 @@ async def reset_password(
 
 
 @router.post("/change-password")
-async def change_password(
+def change_password(
     payload: ChangePasswordRequest,
     background_tasks: BackgroundTasks,
     current_user: UserInDB = Depends(get_current_user_dependency),

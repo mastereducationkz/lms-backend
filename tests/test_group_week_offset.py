@@ -71,7 +71,7 @@ def _user(db, email, role):
 
 
 def _set_offset(db, user, group_id, offset):
-    return asyncio.run(
+    return _maybe_run(
         set_group_week_offset(
             GroupWeekOffsetInputSchema(group_id=group_id, offset=offset),
             current_user=user,
@@ -141,7 +141,14 @@ def test_nuet_resolution_subtracts_offset(db, monkeypatch):
     monkeypatch.setattr(SATService, "fetch_batch_scores_by_week", staticmethod(fake_week))
 
     # Viewing leaderboard week 3 with offset 1 ⇒ content week 2.
-    asyncio.run(_weekly_lessons_endpoint()(
+    _maybe_run(_weekly_lessons_endpoint()(
         group.id, week_number=3, current_user=admin, db=db))
     assert captured.get("exam_type") == "NUET"
     assert captured.get("week") == 2
+
+
+def _maybe_run(_result):
+    """Handlers converted from async def to def now return values directly; still run coroutines
+    for any endpoint that remained async."""
+    import asyncio as _asyncio
+    return _asyncio.run(_result) if _asyncio.iscoroutine(_result) else _result

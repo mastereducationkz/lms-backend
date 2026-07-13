@@ -289,7 +289,7 @@ def _student_leaderboard_self_only(
 # =============================================================================
 
 @router.get("/status", response_model=GamificationStatsResponse)
-async def get_gamification_status(
+def get_gamification_status(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -325,7 +325,7 @@ async def get_gamification_status(
 
 
 @router.get("/bonus-allowance", response_model=dict)
-async def get_bonus_allowance(
+def get_bonus_allowance(
     group_id: Optional[int] = Query(None, description="Optional group ID to check limit for"),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -349,7 +349,7 @@ async def get_bonus_allowance(
 
 
 @router.post("/bonus")
-async def give_teacher_bonus(
+def give_teacher_bonus(
     request: TeacherBonusRequest,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -412,7 +412,7 @@ async def give_teacher_bonus(
 
 
 @router.get("/leaderboard", response_model=LeaderboardResponse)
-async def get_leaderboard(
+def get_leaderboard(
     period: str = Query("monthly", description="'monthly' or 'all_time'"),
     group_id: Optional[int] = Query(None, description="Filter by group ID"),
     limit: int = Query(50, le=100),
@@ -567,7 +567,7 @@ async def get_leaderboard(
 
 
 @router.get("/history", response_model=List[PointHistorySchema])
-async def get_point_history(
+def get_point_history(
     limit: int = Query(50, le=100),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)

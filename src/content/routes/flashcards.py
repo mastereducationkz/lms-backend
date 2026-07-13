@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 @router.post("/favorites", response_model=FavoriteFlashcardSchema, status_code=status.HTTP_201_CREATED)
-async def add_favorite_flashcard(
+def add_favorite_flashcard(
     favorite: FavoriteFlashcardCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -76,7 +76,7 @@ async def add_favorite_flashcard(
 
 
 @router.get("/favorites", response_model=List[FavoriteFlashcardSchema])
-async def get_favorite_flashcards(
+def get_favorite_flashcards(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -98,7 +98,7 @@ async def get_favorite_flashcards(
 
 
 @router.get("/favorites/{favorite_id}", response_model=FavoriteFlashcardSchema)
-async def get_favorite_flashcard(
+def get_favorite_flashcard(
     favorite_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -132,7 +132,7 @@ async def get_favorite_flashcard(
 
 
 @router.delete("/favorites/{favorite_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_favorite_flashcard(
+def remove_favorite_flashcard(
     favorite_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -166,7 +166,7 @@ async def remove_favorite_flashcard(
 
 
 @router.delete("/favorites/by-card/{step_id}/{flashcard_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_favorite_by_card_id(
+def remove_favorite_by_card_id(
     step_id: int,
     flashcard_id: str,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -204,7 +204,7 @@ async def remove_favorite_by_card_id(
 
 
 @router.get("/favorites/check/{step_id}/{flashcard_id}")
-async def check_is_favorite(
+def check_is_favorite(
     step_id: int,
     flashcard_id: str,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -248,7 +248,7 @@ class QuickCreateFlashcardRequest(BaseModel):
 
 
 @router.post("/quick_create", status_code=status.HTTP_201_CREATED)
-async def quick_create_flashcard(
+def quick_create_flashcard(
     request: QuickCreateFlashcardRequest,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -301,7 +301,7 @@ async def quick_create_flashcard(
 
 
 @router.get("/vocabulary")
-async def get_vocabulary_cards(
+def get_vocabulary_cards(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):

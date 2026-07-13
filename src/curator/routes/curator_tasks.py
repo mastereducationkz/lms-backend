@@ -181,7 +181,7 @@ def _apply_due_day_filter(q, week: Optional[str], due_day: Optional[int]):
         "program_week", "limit", "offset",
     ),
 )
-async def get_my_tasks(
+def get_my_tasks(
     status: Optional[str] = Query(None, description="Filter by status: pending, in_progress, completed, overdue"),
     task_type: Optional[str] = Query(None, description="Filter by type: onboarding, weekly, renewal, exam_results_collection"),
     student_id: Optional[int] = Query(None),
@@ -232,7 +232,7 @@ async def get_my_tasks(
 
 @router.get("/my-tasks/summary", summary="Get counts per status for current curator")
 @cached(namespace="curator-tasks:my-summary", ttl=30)
-async def get_my_tasks_summary(
+def get_my_tasks_summary(
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),
 ):
@@ -255,7 +255,7 @@ async def get_my_tasks_summary(
 
 @router.get("/my-groups", summary="Get groups for current curator with program week info")
 @cached(namespace="curator-tasks:my-groups", ttl=60)
-async def get_my_groups(
+def get_my_groups(
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),
 ):
@@ -294,7 +294,7 @@ class BulkTaskUpdateSchema(BaseModel):
 
 
 @router.patch("/my-tasks/bulk", summary="Bulk update task status (e.g. mark multiple as completed)")
-async def bulk_update_my_tasks(
+def bulk_update_my_tasks(
     data: BulkTaskUpdateSchema = Body(...),
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
     db: Session = Depends(get_db),
@@ -322,7 +322,7 @@ async def bulk_update_my_tasks(
 
 
 @router.patch("/my-tasks/{task_id}", summary="Update task status / result")
-async def update_my_task(
+def update_my_task(
     task_id: int,
     data: CuratorTaskInstanceUpdateSchema,
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
@@ -389,7 +389,7 @@ async def update_my_task(
         "program_week", "due_day", "limit", "offset",
     ),
 )
-async def get_all_tasks(
+def get_all_tasks(
     curator_id: Optional[int] = Query(None, description="Filter by specific curator"),
     status: Optional[str] = Query(None),
     task_type: Optional[str] = Query(None),
@@ -439,7 +439,7 @@ async def get_all_tasks(
     ttl=45,
     key_args=("curator_id", "status", "group_id", "week", "program_week"),
 )
-async def get_all_tasks_day_summary(
+def get_all_tasks_day_summary(
     curator_id: Optional[int] = Query(None),
     status: Optional[str] = Query(None),
     group_id: Optional[int] = Query(None),
@@ -491,7 +491,7 @@ async def get_all_tasks_day_summary(
 
 @router.get("/curators-summary", summary="[Head Curator / Admin] Stats per curator")
 @cached(namespace="curator-tasks:curators-summary", ttl=45, key_args=("week",))
-async def get_curators_summary(
+def get_curators_summary(
     week: Optional[str] = Query(None),
     current_user: UserInDB = Depends(require_role(["head_curator", "admin"])),
     db: Session = Depends(get_db),
@@ -559,7 +559,7 @@ def _ensure_custom_template(db: Session) -> None:
 
 @router.get("/templates", summary="List task templates")
 @cached(namespace="curator-tasks:templates", ttl=120, key_args=("task_type",))
-async def list_templates(
+def list_templates(
     task_type: Optional[str] = Query(None),
     current_user: UserInDB = Depends(require_role(["admin", "head_curator"])),
     db: Session = Depends(get_db),
@@ -573,7 +573,7 @@ async def list_templates(
 
 
 @router.post("/templates", summary="Create a task template")
-async def create_template(
+def create_template(
     data: CuratorTaskTemplateCreateSchema,
     current_user: UserInDB = Depends(require_role(["admin"])),
     db: Session = Depends(get_db),
@@ -594,7 +594,7 @@ async def create_template(
 
 
 @router.put("/templates/{template_id}", summary="Update a task template")
-async def update_template(
+def update_template(
     template_id: int,
     data: CuratorTaskTemplateCreateSchema,
     current_user: UserInDB = Depends(require_role(["admin"])),
@@ -617,7 +617,7 @@ async def update_template(
 
 
 @router.delete("/templates/{template_id}", summary="Delete a task template")
-async def delete_template(
+def delete_template(
     template_id: int,
     current_user: UserInDB = Depends(require_role(["admin"])),
     db: Session = Depends(get_db),
@@ -635,7 +635,7 @@ async def delete_template(
 # ============================================================================
 
 @router.post("/create-instance", summary="Manually create a task instance for a curator")
-async def create_task_instance(
+def create_task_instance(
     template_id: int = Query(...),
     curator_id: int = Query(...),
     student_id: Optional[int] = Query(None),
@@ -687,7 +687,7 @@ async def create_task_instance(
 
 
 @router.post("/create-instances-bulk", summary="Create task instances for multiple curators and/or groups")
-async def create_task_instances_bulk(
+def create_task_instances_bulk(
     data: CuratorTaskBulkCreateSchema,
     current_user: UserInDB = Depends(require_role(["admin", "head_curator"])),
     db: Session = Depends(get_db),
@@ -766,7 +766,7 @@ async def create_task_instances_bulk(
 # ============================================================================
 
 @router.post("/trigger-onboarding/{student_id}", summary="Create onboarding tasks for a new student")
-async def trigger_onboarding(
+def trigger_onboarding(
     student_id: int,
     current_user: UserInDB = Depends(require_role(["admin", "head_curator"])),
     db: Session = Depends(get_db),
@@ -825,7 +825,7 @@ async def trigger_onboarding(
 # ============================================================================
 
 @router.post("/seed-templates", summary="[Admin] Seed default task templates from specification")
-async def seed_templates(
+def seed_templates(
     current_user: UserInDB = Depends(require_role(["admin"])),
     db: Session = Depends(get_db),
 ):
@@ -1012,7 +1012,7 @@ async def seed_templates(
 # ============================================================================
 
 @router.post("/generate-weekly", summary="Generate weekly tasks for current curator's groups for a given week")
-async def generate_weekly_tasks(
+def generate_weekly_tasks(
     week: Optional[str] = Query(None, description="ISO week reference e.g. 2026-W08. Defaults to current week."),
     group_id: Optional[int] = Query(None, description="Generate for a specific group only"),
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),

@@ -343,7 +343,7 @@ def get_non_special_group_ids(db: Session, group_ids: List[int]) -> List[int]:
     return [group.id for group in existing_groups if not group.is_special]
 
 @router.post("/users/single", response_model=CreateUserResponse)
-async def create_single_user(
+def create_single_user(
     user_data: CreateUserRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -447,7 +447,7 @@ async def create_single_user(
         raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)}")
 
 @router.post("/users/bulk", response_model=BulkCreateResponse)
-async def create_bulk_users(
+def create_bulk_users(
     request: BulkCreateUsersRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -547,7 +547,7 @@ async def create_bulk_users(
     )
 
 @router.post("/users/bulk-text", response_model=BulkCreateResponse)
-async def create_bulk_users_from_text(
+def create_bulk_users_from_text(
     request: BulkCreateUsersFromTextRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -694,7 +694,7 @@ async def create_bulk_users_from_text(
     )
 
 @router.post("/create-admin", response_model=CreateAdminResponse)
-async def create_admin(
+def create_admin(
     admin_data: CreateAdminRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -743,7 +743,7 @@ async def create_admin(
 
 
 @router.delete("/users/{user_id}")
-async def delete_user(
+def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin_or_head_curator())
@@ -780,7 +780,7 @@ async def delete_user(
     return {"detail": f"User '{user.name}' deactivated successfully"}
 
 @router.get("/stats", response_model=AdminStatsResponse)
-async def get_admin_stats(
+def get_admin_stats(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
 ):
@@ -811,7 +811,7 @@ async def get_admin_stats(
     )
 
 @router.get("/students/progress", response_model=List[StudentProgressSummary])
-async def get_students_progress_summary(
+def get_students_progress_summary(
     skip: int = 0,
     limit: int = 50,
     group_id: Optional[int] = None,
@@ -885,7 +885,7 @@ async def get_students_progress_summary(
     return summaries
 
 @router.post("/reset-password/{user_id}")
-async def reset_user_password(
+def reset_user_password(
     user_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -921,7 +921,7 @@ async def reset_user_password(
     }
 
 @router.get("/groups", response_model=List[GroupSchema])
-async def get_all_groups(
+def get_all_groups(
     skip: int = 0,
     limit: int = 100,
     teacher_id: Optional[int] = None,
@@ -1051,7 +1051,7 @@ async def get_all_groups(
 # =============================================================================
 
 @router.post("/groups", response_model=GroupSchema)
-async def create_group(
+def create_group(
     group_data: CreateGroupRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -1162,7 +1162,7 @@ async def create_group(
     return group_response
 
 @router.put("/groups/{group_id}", response_model=GroupSchema)
-async def update_group(
+def update_group(
     group_id: int,
     group_data: UpdateGroupRequest,
     db: Session = Depends(get_db),
@@ -1325,7 +1325,7 @@ async def update_group(
     return group_response
 
 @router.delete("/groups/{group_id}")
-async def delete_group(
+def delete_group(
     group_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -1382,7 +1382,7 @@ def parse_shorthand_python(text: str) -> List[dict]:
     return [{"day_of_week": d, "time_of_day": time_str} for d in days]
 
 @router.post("/groups/bulk-schedule-upload", response_model=BulkGroupScheduleUploadResponse)
-async def bulk_schedule_upload(
+def bulk_schedule_upload(
     request: BulkGroupScheduleUploadRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -1723,7 +1723,7 @@ async def bulk_schedule_upload(
     return BulkGroupScheduleUploadResponse(created_groups=created_groups, failed_lines=failed_lines)
 
 @router.post("/groups/{group_id}/assign-teacher")
-async def assign_teacher_to_group(
+def assign_teacher_to_group(
     group_id: int,
     teacher_data: AssignTeacherRequest,
     db: Session = Depends(get_db),
@@ -1753,7 +1753,7 @@ async def assign_teacher_to_group(
 # =============================================================================
 
 @router.get("/users", response_model=UserListResponse)
-async def get_all_users(
+def get_all_users(
     skip: int = 0,
     limit: int = 50,
     role: Optional[str] = None,
@@ -1889,7 +1889,7 @@ async def get_all_users(
 
 
 @router.get("/students/teacher-groups", response_model=TeacherGroupListResponse)
-async def get_students_teacher_groups(
+def get_students_teacher_groups(
     skip: int = 0,
     limit: int = 10,
     group_id: Optional[int] = None,
@@ -1955,7 +1955,7 @@ async def get_students_teacher_groups(
 
 
 @router.get("/students/teacher-groups/{teacher_id}", response_model=TeacherGroupStudentsResponse)
-async def get_students_for_teacher_group(
+def get_students_for_teacher_group(
     teacher_id: int,
     skip: int = 0,
     limit: int = 20,
@@ -2062,7 +2062,7 @@ async def get_students_for_teacher_group(
     )
 
 @router.put("/users/{user_id}", response_model=UserSchema)
-async def update_user(
+def update_user(
     user_id: int,
     user_data: UpdateUserRequest,
     background_tasks: BackgroundTasks,
@@ -2156,7 +2156,7 @@ async def update_user(
     return user_response
 
 @router.post("/users/{user_id}/toggle-analytics-hidden", response_model=UserSchema)
-async def toggle_curator_analytics_hidden(
+def toggle_curator_analytics_hidden(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2175,7 +2175,7 @@ async def toggle_curator_analytics_hidden(
 
 
 @router.get("/users/{user_id}/groups")
-async def get_user_groups(
+def get_user_groups(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2192,7 +2192,7 @@ async def get_user_groups(
     return {"user_id": user_id, "group_ids": group_ids}
 
 @router.post("/users/{user_id}/assign-group")
-async def assign_user_to_group(
+def assign_user_to_group(
     user_id: int,
     group_data: AssignUserToGroupRequest,
     db: Session = Depends(get_db),
@@ -2226,7 +2226,7 @@ async def assign_user_to_group(
     return {"detail": f"User '{user.name}' assigned to group '{group.name}'"}
 
 @router.post("/users/bulk-assign-group")
-async def bulk_assign_users_to_group(
+def bulk_assign_users_to_group(
     bulk_data: BulkAssignUsersRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2263,7 +2263,7 @@ async def bulk_assign_users_to_group(
 
 @router.get("/dashboard", response_model=AdminDashboardResponse)
 @cached(namespace="admin:dashboard", ttl=60)
-async def get_admin_dashboard(
+def get_admin_dashboard(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
 ):
@@ -2396,7 +2396,7 @@ async def get_admin_dashboard(
 
 @router.get("/dashboard/charts", response_model=AdminDashboardChartsResponse)
 @cached(namespace="admin:dashboard-charts", ttl=120)
-async def get_admin_dashboard_charts(
+def get_admin_dashboard_charts(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin()),
 ):
@@ -2440,7 +2440,7 @@ async def get_admin_dashboard_charts(
 # =============================================================================
 
 @router.get("/groups/{group_id}/students", response_model=GroupStudentsResponse)
-async def get_group_students(
+def get_group_students(
     group_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_teacher_curator_or_admin())
@@ -2478,7 +2478,7 @@ async def get_group_students(
     )
 
 @router.post("/groups/{group_id}/students", response_model=dict)
-async def add_student_to_group(
+def add_student_to_group(
     group_id: int,
     student_data: AddStudentToGroupRequest,
     db: Session = Depends(get_db),
@@ -2524,7 +2524,7 @@ async def add_student_to_group(
     return {"detail": f"Student '{student.name}' added to group '{group.name}'"}
 
 @router.delete("/groups/{group_id}/students/{student_id}", response_model=dict)
-async def remove_student_from_group(
+def remove_student_from_group(
     group_id: int,
     student_id: int,
     db: Session = Depends(get_db),
@@ -2565,7 +2565,7 @@ async def remove_student_from_group(
     return {"detail": f"Student '{student.name}' removed from group '{group.name}'"}
 
 @router.post("/groups/{group_id}/students/bulk", response_model=dict)
-async def bulk_add_students_to_group(
+def bulk_add_students_to_group(
     group_id: int,
     student_ids: List[int],
     db: Session = Depends(get_db),
@@ -2616,7 +2616,7 @@ async def bulk_add_students_to_group(
 # =============================================================================
 
 @router.get("/events", response_model=List[EventSchema])
-async def get_all_events(
+def get_all_events(
     skip: int = 0,
     limit: int = 100,
     event_type: Optional[str] = None,
@@ -2678,7 +2678,7 @@ async def get_all_events(
     return result
 
 @router.post("/events", response_model=EventSchema)
-async def create_event(
+def create_event(
     event_data: CreateEventRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2767,7 +2767,7 @@ async def create_event(
     return result
 
 @router.put("/events/{event_id}", response_model=EventSchema)
-async def update_event(
+def update_event(
     event_id: int,
     event_data: UpdateEventRequest,
     db: Session = Depends(get_db),
@@ -2852,7 +2852,7 @@ async def update_event(
     return result
 
 @router.delete("/events/{event_id}")
-async def delete_event(
+def delete_event(
     event_id: int,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2872,7 +2872,7 @@ async def delete_event(
     return {"detail": "Event deleted successfully"}
 
 @router.post("/events/bulk-delete")
-async def bulk_delete_events(
+def bulk_delete_events(
     event_ids: List[int],
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2894,7 +2894,7 @@ async def bulk_delete_events(
     return {"detail": f"Successfully deleted {len(event_ids)} events"}
 
 @router.post("/events/bulk", response_model=List[EventSchema])
-async def create_bulk_events(
+def create_bulk_events(
     events_data: List[CreateEventRequest],
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin())
@@ -2960,7 +2960,7 @@ async def create_bulk_events(
     
     return result
 
-async def create_recurring_events(db: Session, base_event: Event, event_data: CreateEventRequest):
+def create_recurring_events(db: Session, base_event: Event, event_data: CreateEventRequest):
     """Helper function to create recurring events"""
     from datetime import timedelta
     import calendar
@@ -3097,7 +3097,7 @@ class TeacherLessonsCountSchema(BaseModel):
     tags=["CRM"],
     summary="Count lessons conducted by a teacher in a given month",
 )
-async def get_teacher_lessons_count(
+def get_teacher_lessons_count(
     teacher_id: int,
     year: int = Query(..., ge=2020, le=2030, description="Year (Kazakhstan GMT+5)"),
     month: int = Query(..., ge=1, le=12, description="Month (1–12)"),
@@ -3173,7 +3173,7 @@ class TeacherLessonsDetailSchema(BaseModel):
     tags=["CRM"],
     summary="List lessons conducted by a teacher in a given month (for audit/reconciliation)",
 )
-async def get_teacher_lessons_detail(
+def get_teacher_lessons_detail(
     teacher_id: int,
     year: int = Query(..., ge=2020, le=2030, description="Year (Kazakhstan GMT+5)"),
     month: int = Query(..., ge=1, le=12, description="Month (1–12)"),
@@ -3238,7 +3238,7 @@ async def get_teacher_lessons_detail(
     tags=["CRM"],
     summary="Export all teachers' lessons count for a month as CSV",
 )
-async def export_teachers_lessons_count_csv(
+def export_teachers_lessons_count_csv(
     year: int = Query(..., ge=2020, le=2030, description="Year (Kazakhstan GMT+5)"),
     month: int = Query(..., ge=1, le=12, description="Month (1–12)"),
     db: Session = Depends(get_db),

@@ -298,7 +298,7 @@ def create_progress_snapshot(user_id: int, course_id: int, db: Session):
     ttl=45,
     key_args=("course_id", "lesson_id", "skip", "limit"),
 )
-async def get_my_progress(
+def get_my_progress(
     course_id: Optional[int] = None,
     lesson_id: Optional[int] = None,
     skip: int = Query(0, ge=0),
@@ -322,7 +322,7 @@ async def get_my_progress(
 
 @router.get("/course/{course_id}")
 @cached(namespace="progress:course", ttl=60, key_args=("course_id", "student_id"))
-async def get_course_progress(
+def get_course_progress(
     course_id: int,
     student_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -440,7 +440,7 @@ async def get_course_progress(
     return course_progress
 
 @router.post("/lesson/{lesson_id}/complete")
-async def mark_lesson_complete(
+def mark_lesson_complete(
     lesson_id: int,
     time_spent: int = 0,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -500,7 +500,7 @@ async def mark_lesson_complete(
     return {"detail": "Lesson marked as complete", "time_spent": time_spent}
 
 @router.post("/lesson/{lesson_id}/start")
-async def start_lesson(
+def start_lesson(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -547,7 +547,7 @@ async def start_lesson(
     return {"detail": "Lesson started"}
 
 @router.get("/students", response_model=List[Dict[str, Any]])
-async def get_students_progress(
+def get_students_progress(
     course_id: Optional[int] = None,
     group_id: Optional[int] = None,
     skip: int = Query(0, ge=0),
@@ -671,7 +671,7 @@ async def get_students_progress(
 
 @router.get("/analytics")
 @cached(namespace="progress:analytics", ttl=45, key_args=("course_id", "time_range"))
-async def get_progress_analytics(
+def get_progress_analytics(
     course_id: Optional[int] = None,
     time_range: int = Query(30, description="Days to analyze"),
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -792,7 +792,7 @@ async def get_progress_analytics(
 
 @router.get("/student/overview")
 @cached(namespace="progress:overview", ttl=45)
-async def get_student_progress_overview(
+def get_student_progress_overview(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -961,7 +961,7 @@ def get_student_group_teachers(student_id: int, db: Session) -> List[Dict[str, A
 
 @router.get("/student/{student_id}/overview")
 @cached(namespace="progress:overview-by-id", ttl=45, key_args=("student_id",))
-async def get_student_progress_overview_by_id(
+def get_student_progress_overview_by_id(
     student_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1125,7 +1125,7 @@ async def get_student_progress_overview_by_id(
 # =============================================================================
 
 @router.post("/step/{step_id}/start", response_model=StepProgressSchema)
-async def mark_step_started(
+def mark_step_started(
     step_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1187,7 +1187,7 @@ async def mark_step_started(
     return StepProgressSchema.from_orm(step_progress)
 
 @router.post("/step/{step_id}/visit", response_model=StepProgressSchema)
-async def mark_step_visited(
+def mark_step_visited(
     step_id: int,
     step_data: StepProgressCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1284,7 +1284,7 @@ async def mark_step_visited(
     return StepProgressSchema.from_orm(step_progress)
 
 @router.get("/step/{step_id}", response_model=StepProgressSchema)
-async def get_step_progress(
+def get_step_progress(
     step_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1334,7 +1334,7 @@ async def get_step_progress(
     return StepProgressSchema.from_orm(step_progress)
 
 @router.get("/lesson/{lesson_id}/steps", response_model=List[StepProgressSchema])
-async def get_lesson_steps_progress(
+def get_lesson_steps_progress(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1409,7 +1409,7 @@ async def get_lesson_steps_progress(
 
 @router.get("/course/{course_id}/students/steps")
 @cached(namespace="progress:course-students-steps", ttl=60, key_args=("course_id",))
-async def get_course_students_steps_progress(
+def get_course_students_steps_progress(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1529,7 +1529,7 @@ def calculate_streak_multiplier(streak: int) -> float:
 
 
 @router.get("/my-streak")
-async def get_my_daily_streak(
+def get_my_daily_streak(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -1590,7 +1590,7 @@ async def get_my_daily_streak(
 # =============================================================================
 
 @router.post("/initialize-progress")
-async def initialize_progress(
+def initialize_progress(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -1642,7 +1642,7 @@ async def initialize_progress(
         raise HTTPException(status_code=500, detail=f"Failed to initialize progress: {str(e)}")
 
 @router.post("/recalculate-progress/{course_id}")
-async def recalculate_course_progress(
+def recalculate_course_progress(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1739,7 +1739,7 @@ def _forbid_special_group_manual_quiz(step_id: int, raw_answers: str | None, cur
     return
 
 @router.post("/quiz-attempt", response_model=QuizAttemptSchema)
-async def create_quiz_attempt(
+def create_quiz_attempt(
     attempt_data: QuizAttemptCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1848,7 +1848,7 @@ async def create_quiz_attempt(
 
 
 @router.patch("/quiz-attempts/{attempt_id}", response_model=QuizAttemptSchema)
-async def update_quiz_attempt(
+def update_quiz_attempt(
     attempt_id: int,
     update_data: QuizAttemptUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1914,7 +1914,7 @@ async def update_quiz_attempt(
 
 
 @router.put("/quiz-attempts/{attempt_id}/grade", response_model=QuizAttemptSchema)
-async def grade_quiz_attempt(
+def grade_quiz_attempt(
     attempt_id: int,
     grade_data: QuizAttemptGradeSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1959,7 +1959,7 @@ async def grade_quiz_attempt(
 
 
 @router.delete("/quiz-attempts/{attempt_id}")
-async def delete_quiz_attempt(
+def delete_quiz_attempt(
     attempt_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1987,7 +1987,7 @@ async def delete_quiz_attempt(
 
 
 @router.get("/quiz-attempts/step/{step_id}", response_model=List[QuizAttemptSchema])
-async def get_step_quiz_attempts(
+def get_step_quiz_attempts(
     step_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2002,7 +2002,7 @@ async def get_step_quiz_attempts(
 
 
 @router.get("/quiz-attempts/course/{course_id}", response_model=List[QuizAttemptSchema])
-async def get_course_quiz_attempts(
+def get_course_quiz_attempts(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2020,7 +2020,7 @@ async def get_course_quiz_attempts(
 
 
 @router.get("/quiz-attempts/analytics/course/{course_id}")
-async def get_course_quiz_analytics(
+def get_course_quiz_analytics(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2092,7 +2092,7 @@ async def get_course_quiz_analytics(
 
 
 @router.get("/quiz-attempts/analytics/student/{student_id}")
-async def get_student_quiz_analytics(
+def get_student_quiz_analytics(
     student_id: int,
     course_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2158,7 +2158,7 @@ async def get_student_quiz_analytics(
 
 
 @router.get("/lessons/{lesson_id}/quiz-summary")
-async def get_lesson_quiz_summary(
+def get_lesson_quiz_summary(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -2256,7 +2256,7 @@ async def get_lesson_quiz_summary(
 
 
 @router.get("/quiz-attempts/ungraded")
-async def get_ungraded_attempts(
+def get_ungraded_attempts(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
     graded: Optional[bool] = None  # None = ungraded only (default), True = graded only, False = ungraded only
@@ -2482,7 +2482,7 @@ async def get_ungraded_attempts(
     return results
 
 @router.post("/manual-unlock", response_model=List[ManualLessonUnlockSchema])
-async def manual_unlock_lesson(
+def manual_unlock_lesson(
     unlock_data: ManualLessonUnlockCreateSchema,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -2568,7 +2568,7 @@ async def manual_unlock_lesson(
     return results
 
 @router.post("/manual-lock")
-async def manual_lock_lesson(
+def manual_lock_lesson(
     lock_data: ManualLessonUnlockCreateSchema, # Reuse schema, but ignoring unlock_all
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -2609,7 +2609,7 @@ async def manual_lock_lesson(
     return {"detail": "No manual unlock found"}
 
 @router.get("/manual-unlocks", response_model=List[ManualLessonUnlockSchema])
-async def get_manual_unlocks(
+def get_manual_unlocks(
     lesson_id: Optional[int] = None,
     user_id: Optional[int] = None,
     group_id: Optional[int] = None,
@@ -2647,7 +2647,7 @@ class CompleteLessonsRequest(BaseModel):
 
 
 @router.post("/complete-lessons", status_code=200)
-async def complete_lessons_for_target(
+def complete_lessons_for_target(
     request: CompleteLessonsRequest,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db),
@@ -2710,7 +2710,7 @@ async def complete_lessons_for_target(
 
 
 @router.post("/reset-lessons", status_code=200)
-async def reset_lessons_for_target(
+def reset_lessons_for_target(
     request: CompleteLessonsRequest,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db),
@@ -2773,7 +2773,7 @@ async def reset_lessons_for_target(
 
 
 @router.get("/lesson-progress-summary")
-async def get_lesson_progress_summary(
+def get_lesson_progress_summary(
     course_id: int,
     user_id: Optional[int] = None,
     group_id: Optional[int] = None,

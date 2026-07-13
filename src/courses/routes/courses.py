@@ -45,7 +45,7 @@ router = APIRouter()
     ttl=120,
     key_args=("skip", "limit", "teacher_id", "is_active"),
 )
-async def get_courses(
+def get_courses(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=1000),
     teacher_id: Optional[int] = None,
@@ -181,7 +181,7 @@ async def get_courses(
 
 @router.get("/my-courses", response_model=List[CourseSchema])
 @cached(namespace="courses:my", ttl=120)
-async def get_my_courses(
+def get_my_courses(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -251,7 +251,7 @@ async def get_my_courses(
     return courses_data
 
 @router.post("/", response_model=CourseSchema)
-async def create_course(
+def create_course(
     course_data: CourseCreateSchema,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -287,7 +287,7 @@ async def create_course(
 
 @router.get("/{course_id}", response_model=CourseSchema)
 @cached(namespace="courses:detail", ttl=300, key_args=("course_id",))
-async def get_course(
+def get_course(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -318,7 +318,7 @@ async def get_course(
     return course_response
 
 @router.put("/{course_id}", response_model=CourseSchema)
-async def update_course(
+def update_course(
     course_id: int,
     course_data: CourseCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -357,7 +357,7 @@ async def update_course(
     return course_response
 
 @router.post("/{course_id}/recalculate-duration")
-async def recalculate_course_duration(
+def recalculate_course_duration(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -381,7 +381,7 @@ async def recalculate_course_duration(
     }
 
 @router.post("/{course_id}/publish")
-async def publish_course(
+def publish_course(
     course_id: int,
     current_user: UserInDB = Depends(require_admin()),
     db: Session = Depends(get_db)
@@ -410,7 +410,7 @@ async def publish_course(
     }
 
 @router.post("/{course_id}/unpublish")
-async def unpublish_course(
+def unpublish_course(
     course_id: int,
     current_user: UserInDB = Depends(require_admin()),
     db: Session = Depends(get_db)
@@ -439,7 +439,7 @@ async def unpublish_course(
     }
 
 @router.delete("/{course_id}")
-async def delete_course(
+def delete_course(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -470,7 +470,7 @@ async def delete_course(
     ttl=60,
     key_args=("course_id", "include_lessons", "student_id"),
 )
-async def get_course_modules(
+def get_course_modules(
     course_id: int,
     include_lessons: bool = Query(False, description="Include lessons for each module"),
     student_id: Optional[int] = Query(None, description="Get progress for specific student (teacher/admin only)"),
@@ -803,7 +803,7 @@ async def get_course_modules(
     return modules_data
 
 @router.post("/{course_id}/modules", response_model=ModuleSchema)
-async def create_module(
+def create_module(
     course_id: int,
     module_data: ModuleCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -836,7 +836,7 @@ async def create_module(
     return module_response
 
 @router.put("/{course_id}/modules/{module_id}", response_model=ModuleSchema)
-async def update_module(
+def update_module(
     course_id: int,
     module_id: int,
     module_data: ModuleCreateSchema,
@@ -875,7 +875,7 @@ async def update_module(
     return module_response
 
 @router.delete("/{course_id}/modules/{module_id}")
-async def delete_module(
+def delete_module(
     course_id: int,
     module_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -949,7 +949,7 @@ async def delete_module(
 
 @router.get("/{course_id}/modules/{module_id}/lessons", response_model=List[LessonSchema])
 @cached(namespace="courses:module-lessons", ttl=120, key_args=("course_id", "module_id"))
-async def get_module_lessons(
+def get_module_lessons(
     course_id: int,
     module_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -987,7 +987,7 @@ async def get_module_lessons(
     ttl=120,
     key_args=("course_id", "lightweight"),
 )
-async def get_course_lessons(
+def get_course_lessons(
     course_id: int,
     lightweight: bool = False,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1031,7 +1031,7 @@ async def get_course_lessons(
 
 
 @router.post("/{course_id}/modules/{module_id}/lessons", response_model=LessonSchema)
-async def create_lesson(
+def create_lesson(
     course_id: int,
     module_id: int,
     lesson_data: LessonCreateSchema,
@@ -1087,7 +1087,7 @@ async def create_lesson(
 
 @router.get("/lessons/{lesson_id}", response_model=LessonSchema)
 @cached(namespace="courses:lesson", ttl=300, key_args=("lesson_id",))
-async def get_lesson(
+def get_lesson(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1122,7 +1122,7 @@ async def get_lesson(
 
 
 @router.get("/lessons/{lesson_id}/check-access")
-async def check_lesson_access(
+def check_lesson_access(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1359,7 +1359,7 @@ async def check_lesson_access(
 
 
 @router.put("/lessons/{lesson_id}", response_model=LessonSchema)
-async def update_lesson(
+def update_lesson(
     lesson_id: int,
     lesson_data: LessonCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1409,7 +1409,7 @@ async def update_lesson(
     return lesson_schema
 
 @router.delete("/lessons/{lesson_id}")
-async def delete_lesson(
+def delete_lesson(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1479,7 +1479,7 @@ async def delete_lesson(
 
 @router.get("/lessons/{lesson_id}/steps", response_model=List[StepSchema])
 @cached(namespace="courses:lesson-steps", ttl=300, key_args=("lesson_id", "include_content"))
-async def get_lesson_steps(
+def get_lesson_steps(
     lesson_id: int,
     include_content: bool = Query(True, description="Include full step content (text, video, attachments)"),
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1536,7 +1536,7 @@ async def get_lesson_steps(
         ]
 
 @router.post("/lessons/{lesson_id}/steps", response_model=StepSchema)
-async def create_step(
+def create_step(
     lesson_id: int,
     step_data: StepCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1601,7 +1601,7 @@ async def create_step(
     return StepSchema.from_orm(new_step)
 
 @router.get("/steps/{step_id}", response_model=StepSchema)
-async def get_step(
+def get_step(
     step_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1626,7 +1626,7 @@ async def get_step(
     return StepSchema.from_orm(step)
 
 @router.put("/steps/{step_id}", response_model=StepSchema)
-async def update_step(
+def update_step(
     step_id: int,
     step_data: StepCreateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1689,7 +1689,7 @@ async def update_step(
     return StepSchema.from_orm(step)
 
 @router.post("/lessons/{lesson_id}/reorder-steps")
-async def reorder_steps(
+def reorder_steps(
     lesson_id: int,
     step_orders: dict,  # Expected format: {"step_ids": [1, 3, 2, 4]}
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1736,7 +1736,7 @@ async def reorder_steps(
     return {"message": "Steps reordered successfully", "step_ids": step_ids}
 
 @router.post("/courses/{course_id}/lessons/{lesson_id}/split")
-async def split_lesson(
+def split_lesson(
     course_id: int,
     lesson_id: int,
     split_data: dict,  # Expected format: {"after_step_index": <int>}
@@ -1833,7 +1833,7 @@ async def split_lesson(
     }
 
 @router.delete("/steps/{step_id}")
-async def delete_step(
+def delete_step(
     step_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1875,7 +1875,7 @@ async def delete_step(
     return {"detail": "Step deleted successfully"}
 
 @router.post("/{course_id}/fix-lesson-order")
-async def fix_lesson_order(
+def fix_lesson_order(
     course_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1914,7 +1914,7 @@ async def fix_lesson_order(
 
 @router.get("/lessons/{lesson_id}/materials", response_model=List[LessonMaterialSchema])
 @cached(namespace="courses:lesson-materials", ttl=300, key_args=("lesson_id",))
-async def get_lesson_materials(
+def get_lesson_materials(
     lesson_id: int,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
@@ -1940,7 +1940,7 @@ async def get_lesson_materials(
 # =============================================================================
 
 @router.post("/{course_id}/enroll")
-async def enroll_student(
+def enroll_student(
     course_id: int,
     student_id: Optional[int] = None,  # For admin/teacher to enroll specific student
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -1982,7 +1982,7 @@ async def enroll_student(
     return {"detail": "Successfully enrolled in course"}
 
 @router.post("/{course_id}/auto-enroll-students")
-async def auto_enroll_students(
+def auto_enroll_students(
     course_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -2051,7 +2051,7 @@ async def auto_enroll_students(
     }
 
 @router.delete("/{course_id}/enroll")
-async def unenroll_student(
+def unenroll_student(
     course_id: int,
     student_id: Optional[int] = None,
     current_user: UserInDB = Depends(get_current_user_dependency),
@@ -2080,7 +2080,7 @@ async def unenroll_student(
 # =============================================================================
 
 @router.get("/{course_id}/groups", response_model=List[CourseGroupAccessSchema])
-async def get_course_groups(
+def get_course_groups(
     course_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -2121,7 +2121,7 @@ async def get_course_groups(
     return result
 
 @router.post("/{course_id}/grant-group-access/{group_id}")
-async def grant_course_access_to_group(
+def grant_course_access_to_group(
     course_id: int,
     group_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -2173,7 +2173,7 @@ async def grant_course_access_to_group(
     }
 
 @router.delete("/{course_id}/revoke-group-access/{group_id}")
-async def revoke_course_access_from_group(
+def revoke_course_access_from_group(
     course_id: int,
     group_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
@@ -2209,7 +2209,7 @@ async def revoke_course_access_from_group(
     return {"detail": f"Access revoked from group '{group_name}'"}
 
 @router.get("/{course_id}/group-access-status")
-async def get_course_group_access_status(
+def get_course_group_access_status(
     course_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -2243,7 +2243,7 @@ async def get_course_group_access_status(
 # =============================================================================
 
 @router.get("/{course_id}/teacher-access", response_model=List[CourseTeacherAccessSchema])
-async def get_course_teacher_access(
+def get_course_teacher_access(
     course_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)
@@ -2279,7 +2279,7 @@ async def get_course_teacher_access(
     return result
 
 @router.post("/{course_id}/grant-teacher-access/{teacher_id}")
-async def grant_course_access_to_teacher(
+def grant_course_access_to_teacher(
     course_id: int,
     teacher_id: int,
     current_user: UserInDB = Depends(require_admin()),
@@ -2338,7 +2338,7 @@ async def grant_course_access_to_teacher(
     }
 
 @router.delete("/{course_id}/revoke-teacher-access/{teacher_id}")
-async def revoke_course_access_from_teacher(
+def revoke_course_access_from_teacher(
     course_id: int,
     teacher_id: int,
     current_user: UserInDB = Depends(require_admin()),
@@ -2468,7 +2468,7 @@ async def analyze_sat_image(
         raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
 
 @router.post("/{course_id}/add-summary-steps")
-async def add_summary_steps_to_course(
+def add_summary_steps_to_course(
     course_id: int,
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db)

@@ -97,7 +97,7 @@ class WeeklyTopStudentsResponse(BaseModel):
     ttl=300,
     key_args=("week_start", "program_type", "group_id", "curator_id", "teacher_id", "limit"),
 )
-async def get_weekly_top_students(
+def get_weekly_top_students(
     week_start: Optional[date] = Query(
         None, description="Any date in the target week; snapped to Almaty Monday. Defaults to current week."
     ),
@@ -121,7 +121,7 @@ async def get_weekly_top_students(
 
 
 @router.get("/weekly-top-students/export")
-async def export_weekly_top_students(
+def export_weekly_top_students(
     week_start: Optional[date] = Query(None),
     program_type: Optional[str] = Query(None),
     group_id: Optional[int] = Query(None),

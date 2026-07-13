@@ -273,7 +273,7 @@ def get_teacher_missed_attendance_stats(db: Session, teacher_id: int, group_ids:
 
 @router.get("/courses", response_model=List[HeadTeacherCourseSchema])
 @cached(namespace="head-teacher:courses", ttl=60)
-async def get_managed_courses(
+def get_managed_courses(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -315,7 +315,7 @@ async def get_managed_courses(
     ttl=45,
     key_args=("course_id", "days", "start_date", "end_date"),
 )
-async def get_course_teacher_statistics(
+def get_course_teacher_statistics(
     course_id: int,
     days: int = Query(30, ge=0, le=365, description="Number of past days for statistics"),
     start_date: Optional[date] = None,
@@ -556,7 +556,7 @@ async def get_course_teacher_statistics(
 
 
 @router.get("/course/{course_id}/teacher/{teacher_id}/details", response_model=TeacherDetailsResponse)
-async def get_teacher_details(
+def get_teacher_details(
     course_id: int,
     teacher_id: int,
     days: int = Query(30, ge=1, le=365, description="Number of past days for activity history"),
@@ -725,7 +725,7 @@ async def get_teacher_details(
 
 
 @router.get("/course/{course_id}/teacher/{teacher_id}/feedbacks", response_model=TeacherFeedbacksResponse)
-async def get_teacher_feedbacks(
+def get_teacher_feedbacks(
     course_id: int,
     teacher_id: int,
     skip: int = Query(0, ge=0),
@@ -822,7 +822,7 @@ async def get_teacher_feedbacks(
 
 
 @router.get("/course/{course_id}/teacher/{teacher_id}/assignments", response_model=TeacherAssignmentsResponse)
-async def get_teacher_assignments(
+def get_teacher_assignments(
     course_id: int,
     teacher_id: int,
     skip: int = Query(0, ge=0),
