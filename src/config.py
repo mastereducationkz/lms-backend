@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 import os
 import logging
 from dotenv import load_dotenv
@@ -27,20 +28,17 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 
-# Database setup with connection pooling.
-# Sizing is deliberately bounded so the whole fleet stays under Postgres's default
-# max_connections=100: the app runs 4 uvicorn workers (see Dockerfile), and each worker opens up
-# to pool_size + max_overflow connections. 4 * (10 + 10) = 80 leaves headroom for the scheduler
-# container, migrations and admin sessions. (The previous 10 + 20 allowed 4 * 30 = 120, which can
-# exhaust the server's connection slots under load and surface as "too many connections" errors.)
-# pool_timeout makes a brief pool shortage wait instead of erroring immediately.
+# Database connections go through pgbouncer (see docker-compose.yml), which does the real
+# connection pooling and multiplexes onto a small, bounded set of Postgres connections. So the app
+# itself must NOT keep its own QueuePool: a per-worker QueuePool was what exhausted under bursts
+# ("QueuePool limit ... connection timed out, timeout 30.00") while the server had spare capacity,
+# because each worker's pool was capped independently. With NullPool each request opens a fresh
+# (cheap, local) connection to pgbouncer and returns it immediately, letting pgbouncer share the
+# real Postgres connections across all workers. In local/dev without pgbouncer this just means a
+# connection per request, which is fine at dev scale.
 engine = create_engine(
     POSTGRES_URL,
-    pool_size=10,
-    max_overflow=10,
-    pool_timeout=30,
-    pool_pre_ping=True,
-    pool_recycle=3600
+    poolclass=NullPool,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

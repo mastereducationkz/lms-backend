@@ -10,7 +10,40 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
-    networks: 
+    networks:
+      - proxy
+
+  # Connection pooler between the app and Postgres. The app opens cheap connections to pgbouncer
+  # (NullPool — a fresh one per request, see src/config.py) and pgbouncer multiplexes them onto a
+  # small, bounded set of real Postgres connections. This removes the per-worker SQLAlchemy pool
+  # exhaustion ("QueuePool limit ... connection timed out") that was timing requests out at 30s
+  # while the server still had spare connections, and keeps total real connections under Postgres's
+  # max_connections=100. Transaction pooling is safe here: the app uses psycopg2 (no server-side
+  # prepared statements) and no advisory locks / LISTEN-NOTIFY.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: lms-pgbouncer
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: myuser
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: lms_db
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "1000"
+      DEFAULT_POOL_SIZE: "80"
+      MIN_POOL_SIZE: "10"
+      RESERVE_POOL_SIZE: "15"
+      RESERVE_POOL_TIMEOUT: "3"
+      AUTH_TYPE: scram-sha-256
+      ADMIN_USERS: myuser
+      STATS_USERS: myuser
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+      LISTEN_PORT: "6432"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
       - proxy
 
   redis:
