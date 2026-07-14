@@ -97,29 +97,51 @@ def child_contacts(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
-    """Teachers and curators the child studies with (from their groups + courses)."""
+    """Teachers and curators the child studies with, each tagged with the course/group
+    it relates to so the parent sees who teaches what. Curators keep the curator role even
+    if they also teach a course. Shape: [{id, name, role, subjects: [str]}]."""
     require_child(student_id, current_user, db)
-    role_by_id: dict = {}
+    # id -> {"role": str, "subjects": set[str]}
+    info_by_id: dict = {}
+
+    def _add(uid, role, subject):
+        if not uid:
+            return
+        entry = info_by_id.setdefault(uid, {"role": role, "subjects": set()})
+        # curator is the more "sticky" role — never downgrade it to teacher.
+        if role == "curator":
+            entry["role"] = "curator"
+        if subject:
+            entry["subjects"].add(subject)
 
     group_ids = [gs.group_id for gs in db.query(GroupStudent.group_id).filter(
         GroupStudent.student_id == student_id).all()]
     if group_ids:
         for g in db.query(Group).filter(Group.id.in_(group_ids)).all():
-            if g.teacher_id and g.teacher_id not in role_by_id:
-                role_by_id[g.teacher_id] = "teacher"
-            if g.curator_id and g.curator_id not in role_by_id:
-                role_by_id[g.curator_id] = "curator"
+            _add(g.teacher_id, "teacher", g.name)
+            _add(g.curator_id, "curator", g.name)
 
     # Course teachers (courses the student can access).
     from src.utils.course_access import get_user_courses
     for course in get_user_courses(student_id, db):
-        if course.teacher_id and course.teacher_id not in role_by_id:
-            role_by_id[course.teacher_id] = "teacher"
+        _add(course.teacher_id, "teacher", course.title)
 
     contacts = []
-    if role_by_id:
-        for u in db.query(UserInDB).filter(UserInDB.id.in_(list(role_by_id.keys()))).all():
-            contacts.append({"id": u.id, "name": u.name, "role": role_by_id.get(u.id)})
+    if info_by_id:
+        users = {u.id: u for u in db.query(UserInDB).filter(
+            UserInDB.id.in_(list(info_by_id.keys()))).all()}
+        for uid, info in info_by_id.items():
+            u = users.get(uid)
+            if not u:
+                continue
+            contacts.append({
+                "id": u.id,
+                "name": u.name,
+                "role": info["role"],
+                "subjects": sorted(info["subjects"]),
+            })
+    # Teachers first, then curators; alphabetical within each.
+    contacts.sort(key=lambda c: (0 if c["role"] == "teacher" else 1, c["name"]))
     return contacts
 
 
