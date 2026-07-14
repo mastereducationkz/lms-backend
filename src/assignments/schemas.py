@@ -400,3 +400,22 @@ class AssignmentZeroExamResultUpdateSchema(BaseModel):
     exam_type: str
     result_score: str
     result_test_date: date
+
+
+class HomeworkUpdateSchema(BaseModel):
+    """One item in the dashboard "homework updates" feed."""
+    kind: str  # graded | assigned | due_soon
+    assignment_id: int
+    submission_id: Optional[int] = None
+    title: str
+    score: Optional[int] = None
+    max_score: Optional[int] = None
+    due_date: Optional[datetime] = None
+    timestamp: datetime  # the kind's relevant date; primary sort key + relative label
+    student_id: int
+    student_name: Optional[str] = None
+
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat() + "Z" if v else None
+        }

@@ -20,6 +20,8 @@ from src.utils.permissions import require_teacher_or_admin, check_course_access
 from src.utils.assignment_checker import check_assignment_answers
 from src.services.email_service import send_homework_notification
 from src.schemas.models import GroupStudent
+from src.assignments.schemas import HomeworkUpdateSchema
+from src.parents.models import ParentStudent
 from src.services.event_service import EventService
 from src.routes.gamification import award_points
 from src.utils.course_access import student_can_see_homework_for_course
@@ -711,6 +713,158 @@ def create_assignment(
         print(f"Failed to send email notifications: {e}")
 
     return result_assignment
+
+def _student_assignments(db: Session, student_id: int):
+    """Assignments visible to a given student — mirrors the `student` branch of
+    get_assignments() so the updates feed matches what the student sees."""
+    enrolled_course_ids = db.query(Course.id).join(Enrollment).filter(
+        Enrollment.user_id == student_id,
+        Enrollment.is_active == True,
+    ).subquery()
+    lesson_ids = db.query(Lesson.id).join(Module).filter(
+        Module.course_id.in_(select(enrolled_course_ids))
+    ).subquery()
+    group_ids = db.query(GroupStudent.group_id).filter(
+        GroupStudent.student_id == student_id
+    ).subquery()
+    return db.query(Assignment).filter(
+        Assignment.is_active == True,
+        (Assignment.is_hidden == False) | (Assignment.is_hidden == None),
+        (Assignment.lesson_id.in_(select(lesson_ids)))
+        | (Assignment.group_id.in_(select(group_ids))),
+    ).options(joinedload(Assignment.group))
+
+
+def _naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """DB datetimes are naive UTC; strip any tzinfo before comparing."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
+@router.get("/updates", response_model=List[HomeworkUpdateSchema])
+def get_homework_updates(
+    student_id: Optional[int] = None,
+    days: int = Query(7, ge=1, le=60),
+    limit: int = Query(10, ge=1, le=50),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Aggregated homework updates for the dashboard widget.
+
+    Kinds: `graded` (graded but not yet seen), `due_soon` (due within `days`, not
+    submitted), `assigned` (created within `days`, not submitted). Returns an empty
+    list when there is nothing — the client hides the widget in that case.
+    """
+    # 1. Resolve the target student and enforce access.
+    if current_user.role == "student":
+        target_id = current_user.id
+    elif current_user.role == "parent":
+        if not student_id:
+            raise HTTPException(status_code=400, detail="student_id is required for parents")
+        link = db.query(ParentStudent).filter(
+            ParentStudent.parent_id == current_user.id,
+            ParentStudent.student_id == student_id,
+        ).first()
+        if not link:
+            raise HTTPException(status_code=403, detail="Not your child")
+        target_id = student_id
+    else:
+        raise HTTPException(status_code=403, detail="Only students and parents can view homework updates")
+
+    student = db.query(UserInDB).filter(UserInDB.id == target_id).first()
+    student_name = student.name if student else None
+
+    now = _naive(datetime.now(timezone.utc))
+    window_start = now - timedelta(days=days)
+    window_end = now + timedelta(days=days)
+
+    items: List[dict] = []
+
+    # 2. graded but not yet seen.
+    graded = db.query(AssignmentSubmission).join(
+        Assignment, Assignment.id == AssignmentSubmission.assignment_id
+    ).filter(
+        AssignmentSubmission.user_id == target_id,
+        AssignmentSubmission.is_graded == True,
+        AssignmentSubmission.seen_by_student == False,
+        AssignmentSubmission.is_hidden == False,
+        Assignment.is_active == True,
+    ).options(joinedload(AssignmentSubmission.assignment)).all()
+    for sub in graded:
+        a = sub.assignment
+        if not a:
+            continue
+        items.append({
+            "kind": "graded",
+            "assignment_id": a.id,
+            "submission_id": sub.id,
+            "title": a.title,
+            "score": sub.score,
+            "max_score": sub.max_score,
+            "due_date": a.due_date,
+            "timestamp": sub.graded_at or sub.submitted_at,
+            "student_id": target_id,
+            "student_name": student_name,
+        })
+
+    # 3. Non-submitted assignments → due_soon / assigned.
+    submitted_ids = {
+        r[0] for r in db.query(AssignmentSubmission.assignment_id).filter(
+            AssignmentSubmission.user_id == target_id,
+            AssignmentSubmission.is_hidden == False,
+        ).all()
+    }
+    for a in _student_assignments(db, target_id).all():
+        if a.id in submitted_ids:
+            continue
+        if not assignment_visible_to_student(target_id, a, db):
+            continue
+        due = _naive(a.due_date)
+        created = _naive(a.created_at)
+        if due is not None and now <= due <= window_end:
+            items.append({
+                "kind": "due_soon",
+                "assignment_id": a.id,
+                "submission_id": None,
+                "title": a.title,
+                "score": None,
+                "max_score": a.max_score,
+                "due_date": a.due_date,
+                "timestamp": a.due_date,
+                "student_id": target_id,
+                "student_name": student_name,
+            })
+            continue
+        if due is not None and due < now:
+            continue  # overdue & not submitted — not an "update"
+        if created is not None and created >= window_start:
+            items.append({
+                "kind": "assigned",
+                "assignment_id": a.id,
+                "submission_id": None,
+                "title": a.title,
+                "score": None,
+                "max_score": a.max_score,
+                "due_date": a.due_date,
+                "timestamp": a.created_at,
+                "student_id": target_id,
+                "student_name": student_name,
+            })
+
+    # 4. Order: due_soon (soonest first), graded (newest first), assigned (newest first).
+    kind_rank = {"due_soon": 0, "graded": 1, "assigned": 2}
+
+    def sort_key(it):
+        ts = _naive(it["timestamp"])
+        epoch = ts.timestamp() if ts else 0.0
+        # due_soon ascending (nearest deadline first); others descending (most recent first)
+        secondary = epoch if it["kind"] == "due_soon" else -epoch
+        return (kind_rank[it["kind"]], secondary)
+
+    items.sort(key=sort_key)
+    return items[:limit]
+
 
 @router.get("/{assignment_id}", response_model=AssignmentSchema)
 def get_assignment(

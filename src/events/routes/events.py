@@ -986,6 +986,179 @@ def get_group_class_events(
     
     return events
 
+
+# ---------------------------------------------------------------------------
+# Virtual event reconstruction
+#
+# GET /events/calendar returns *virtual* instances that have no row in `events`:
+#   recurring event/webinar : int(f"{parent.id}{int(start.timestamp())}") % 2**31-1
+#   planned class           : VIRTUAL_CLASS_OFFSET      + lesson_schedule.id
+#   assignment deadline     : VIRTUAL_ASSIGNMENT_OFFSET + assignment.id
+# A plain GET /events/{id} would 404 on those synthetic ids. We rebuild the
+# instance's data on the fly (no DB writes) so the detail screen and deep links
+# resolve. Registration materializes lazily instead — see resolve_event_id.
+# ---------------------------------------------------------------------------
+
+VIRTUAL_CLASS_OFFSET = 2_000_000_000
+VIRTUAL_ASSIGNMENT_OFFSET = 1_000_000_000
+
+
+def _user_event_scope(db: Session, current_user: UserInDB):
+    """Group and course ids the user may see events through. Admin sees all."""
+    if current_user.role == "admin":
+        group_ids = [gid for (gid,) in db.query(Group.id).all()]
+        course_ids = [cid for (cid,) in db.query(Course.id).all()]
+        return group_ids, course_ids
+
+    group_ids: List[int] = []
+    course_ids: List[int] = []
+    if current_user.role == "student":
+        group_ids = [ug.group_id for ug in db.query(GroupStudent).filter(
+            GroupStudent.student_id == current_user.id).all()]
+        course_ids = [e.course_id for e in db.query(Enrollment).filter(
+            Enrollment.user_id == current_user.id, Enrollment.is_active == True).all()]
+        if group_ids:
+            accesses = db.query(CourseGroupAccess).filter(
+                CourseGroupAccess.group_id.in_(group_ids),
+                CourseGroupAccess.is_active == True).all()
+            course_ids = list(set(course_ids + [a.course_id for a in accesses]))
+    elif current_user.role in ("teacher", "curator"):
+        groups = db.query(Group).filter(
+            or_(Group.teacher_id == current_user.id, Group.curator_id == current_user.id)).all()
+        group_ids = list({g.id for g in groups})
+        course_ids = [c.id for c in db.query(Course).filter(
+            Course.teacher_id == current_user.id).all()]
+    return group_ids, course_ids
+
+
+def _lesson_number_for_schedule(db: Session, sched: LessonSchedule) -> int:
+    """1-based index of this schedule within its group's active schedule order —
+    matches the "Lesson N" numbering the calendar endpoint builds."""
+    rows = db.query(LessonSchedule.id).filter(
+        LessonSchedule.group_id == sched.group_id,
+        LessonSchedule.is_active == True,
+    ).order_by(LessonSchedule.scheduled_at).all()
+    for idx, (sid,) in enumerate(rows, start=1):
+        if sid == sched.id:
+            return idx
+    return sched.week_number
+
+
+def _reconstruct_virtual_event(db: Session, event_id: int, current_user: UserInDB):
+    """Rebuild a virtual calendar instance read-only, or return None if the id
+    matches no known virtual event. Raises 403 if the user lacks access.
+
+    Note on id ranges: recurring pseudo ids are `... % 2147483647`, so they can
+    land inside the assignment (>=1e9) and class (>=2e9) offset ranges. We can't
+    disambiguate by range alone — so the offset branches only claim the id when
+    the referenced row actually exists, otherwise we fall through to the
+    recurring scan (which reuses the exact expansion that minted the id)."""
+    is_admin = current_user.role == "admin"
+    group_ids, course_ids = _user_event_scope(db, current_user)
+
+    def deny():
+        raise HTTPException(status_code=403, detail="Access denied to this event")
+
+    def try_recurring():
+        # Reuse the exact expansion that produced the pseudo id so the ids line
+        # up; expansion is already scoped to the user's groups/courses, so a
+        # match implies access.
+        if not group_ids and not course_ids:
+            return None
+        from src.services.event_service import EventService
+        now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        generated = EventService.expand_recurring_events(
+            db=db,
+            start_date=now_naive - timedelta(days=400),
+            end_date=now_naive + timedelta(days=400),
+            group_ids=group_ids,
+            course_ids=course_ids,
+        )
+        match = next((e for e in generated if e.id == event_id), None)
+        if match is None:
+            return None
+        event_data = EventSchema.from_orm(match)
+        event_data.creator_name = match.creator.name if match.creator else "Unknown"
+        v_group_ids = getattr(match, "_group_ids", None) or [eg.group_id for eg in match.event_groups]
+        group_names = []
+        if v_group_ids:
+            group_names = [g.name for g in db.query(Group).filter(Group.id.in_(v_group_ids)).all()]
+        event_data.group_ids = v_group_ids
+        event_data.groups = group_names
+        if match.teacher_id:
+            t = db.query(UserInDB).filter(UserInDB.id == match.teacher_id).first()
+            event_data.teacher_name = t.name if t else None
+        if group_names and not match.title.startswith(group_names[0]):
+            event_data.title = f"{group_names[0]}: {match.title}"
+        event_data.participant_count = 0
+        return event_data
+
+    # Planned class (from LessonSchedule). May really be a recurring instance
+    # whose pseudo id landed in this range — only claim it if the schedule exists.
+    if event_id >= VIRTUAL_CLASS_OFFSET:
+        sched = db.query(LessonSchedule).filter(
+            LessonSchedule.id == event_id - VIRTUAL_CLASS_OFFSET,
+            LessonSchedule.is_active == True,
+        ).options(joinedload(LessonSchedule.group)).first()
+        if sched:
+            if not is_admin and sched.group_id not in group_ids:
+                deny()
+            group = sched.group
+            group_name = group.name if group else "Group"
+            teacher_name = None
+            if group and group.teacher_id:
+                t = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
+                teacher_name = t.name if t else None
+            now = datetime.now(timezone.utc)
+            return EventSchema(
+                id=event_id,
+                title=f"{group_name}: Lesson {_lesson_number_for_schedule(db, sched)}",
+                description=f"Scheduled class for {group_name}",
+                event_type="class",
+                start_datetime=sched.scheduled_at,
+                end_datetime=sched.scheduled_at + timedelta(minutes=60),
+                location="Planned", is_online=True, created_by=0, creator_name="System",
+                is_active=True, is_recurring=False, participant_count=0,
+                created_at=now, updated_at=now,
+                groups=[group_name] if group else [], group_ids=[sched.group_id], courses=[],
+                teacher_id=group.teacher_id if group else None, teacher_name=teacher_name,
+            )
+        return try_recurring()
+
+    # Assignment deadline. Same ambiguity — only claim it if the assignment exists.
+    if event_id >= VIRTUAL_ASSIGNMENT_OFFSET:
+        assignment = db.query(Assignment).filter(
+            Assignment.id == event_id - VIRTUAL_ASSIGNMENT_OFFSET,
+            Assignment.is_active == True,
+        ).first()
+        if assignment and assignment.due_date:
+            a_group_ids = [assignment.group_id] if assignment.group_id else []
+            a_course_ids: List[int] = []
+            if assignment.lesson_id:
+                row = db.query(Module.course_id).join(
+                    Lesson, Lesson.module_id == Module.id
+                ).filter(Lesson.id == assignment.lesson_id).first()
+                if row:
+                    a_course_ids = [row[0]]
+            if not is_admin and not (set(a_group_ids) & set(group_ids)
+                                     or set(a_course_ids) & set(course_ids)):
+                deny()
+            end_dt = assignment.due_date
+            return EventSchema(
+                id=event_id, title=f"Deadline: {assignment.title}",
+                description=assignment.description, event_type="assignment",
+                start_datetime=end_dt - timedelta(hours=1), end_datetime=end_dt,
+                location="LMS", is_online=True, created_by=0, creator_name="System",
+                is_active=True, is_recurring=False, participant_count=0,
+                created_at=assignment.created_at, updated_at=assignment.created_at,
+                groups=[], group_ids=a_group_ids, courses=[],
+            )
+        return try_recurring()
+
+    # Below both offsets — can only be a recurring instance.
+    return try_recurring()
+
+
 @router.get("/{event_id}", response_model=EventSchema)
 def get_event_details(
     event_id: int,
@@ -993,9 +1166,15 @@ def get_event_details(
     current_user: UserInDB = Depends(get_current_user_dependency)
 ):
     """Get detailed information about a specific event"""
-    
+
     event = db.query(Event).filter(Event.id == event_id, Event.is_active == True).first()
     if not event:
+        # No real row — this may be a virtual instance the calendar handed out
+        # (recurring webinar, planned class or assignment deadline). Rebuild it
+        # read-only; 404 only if it matches no known virtual id.
+        virtual = _reconstruct_virtual_event(db, event_id, current_user)
+        if virtual is not None:
+            return virtual
         raise HTTPException(status_code=404, detail="Event not found")
     
     # Check if user has access to this event
@@ -1080,11 +1259,20 @@ def register_for_event(
     current_user: UserInDB = Depends(get_current_user_dependency)
 ):
     """Register current user for an event (for webinars mainly)"""
-    
+
     event = db.query(Event).filter(Event.id == event_id, Event.is_active == True).first()
     if not event:
+        # Virtual (recurring/planned) instance — materialize a real row to hang
+        # the registration off, then continue with its real id. Idempotent: a
+        # second registration attempt reuses the already-materialized event.
+        from src.services.event_service import EventService
+        real_id = EventService.resolve_event_id(db, event_id, user_id=current_user.id)
+        if real_id and real_id != event_id:
+            event = db.query(Event).filter(Event.id == real_id, Event.is_active == True).first()
+            event_id = real_id
+    if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     # Check if user has access to this event
     user_group_ids = []
     if current_user.role == "student":
@@ -1127,8 +1315,10 @@ def register_for_event(
     
     db.add(registration)
     db.commit()
-    
-    return {"detail": "Successfully registered for event"}
+
+    # Return the resolved id so the client can swap a virtual/pseudo id for the
+    # real materialized one (needed for a later unregister to target the row).
+    return {"detail": "Successfully registered for event", "event_id": event_id}
 
 @router.delete("/{event_id}/register")
 def unregister_from_event(

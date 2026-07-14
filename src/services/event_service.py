@@ -194,7 +194,19 @@ class EventService:
                 
         if not target_instance:
             return None
-            
+
+        # Idempotency: if this instance was already materialized (e.g. a prior
+        # registration), reuse that real row instead of creating a duplicate.
+        existing = db.query(Event).filter(
+            Event.title == target_parent.title,
+            Event.start_datetime == target_instance,
+            Event.event_type == target_parent.event_type,
+            Event.is_recurring == False,
+            Event.is_active == True,
+        ).first()
+        if existing:
+            return existing.id
+
         # 3. Create real one-off event
         new_event = Event(
             title=target_parent.title,
@@ -305,10 +317,14 @@ class EventService:
         if exists:
             return event_id
             
-        # 2. Check if it's a virtual LessonSchedule ID
+        # 2. Check if it's a virtual LessonSchedule ID. A recurring pseudo id can
+        # also land in this range (pseudo = ... % 2147483647), so if no such
+        # schedule exists, fall through to the recurring materializer.
         if event_id >= 2000000000:
             schedule_id = event_id - 2000000000
-            return EventService.materialize_lesson_schedule(db, schedule_id, user_id=user_id)
+            real = EventService.materialize_lesson_schedule(db, schedule_id, user_id=user_id)
+            if real:
+                return real
 
         # 3. Try to materialize from recurring
         return EventService.materialize_virtual_event(db, event_id)
