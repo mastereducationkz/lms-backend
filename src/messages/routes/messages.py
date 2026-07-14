@@ -273,6 +273,33 @@ def get_unread_message_count(
     
     return {"unread_count": unread_count}
 
+def _parent_staff_ids(db: Session, parent_id: int) -> set:
+    """Teacher + curator user ids across all of a parent's children (their groups'
+    teacher/curator + enrolled-course teachers)."""
+    from src.schemas.models import Group, GroupStudent, ParentStudent, Enrollment, Course
+    child_ids = [ps.student_id for ps in db.query(ParentStudent).filter(
+        ParentStudent.parent_id == parent_id).all()]
+    if not child_ids:
+        return set()
+    staff: set = set()
+    group_ids = [gs.group_id for gs in db.query(GroupStudent).filter(
+        GroupStudent.student_id.in_(child_ids)).all()]
+    if group_ids:
+        for g in db.query(Group).filter(Group.id.in_(group_ids)).all():
+            if g.teacher_id:
+                staff.add(g.teacher_id)
+            if g.curator_id:
+                staff.add(g.curator_id)
+    for (tid,) in db.query(Course.teacher_id).join(Enrollment).filter(
+        Enrollment.user_id.in_(child_ids),
+        Enrollment.is_active == True,
+        Course.teacher_id.isnot(None),
+    ).distinct().all():
+        if tid:
+            staff.add(tid)
+    return staff
+
+
 @router.get("/available-contacts")
 def get_available_contacts(
     role_filter: Optional[str] = None,
@@ -490,7 +517,25 @@ def get_available_contacts(
                 "avatar_url": user.avatar_url,
                 "student_id": user.student_id if user.role == "student" else None
             })
-    
+
+    elif current_user.role == "parent":
+        # Родители могут писать учителям/кураторам своих детей и администраторам.
+        staff_ids = _parent_staff_ids(db, current_user.id)
+        if staff_ids:
+            for u in db.query(UserInDB).filter(
+                UserInDB.id.in_(staff_ids), UserInDB.is_active == True
+            ).all():
+                available_contacts.append({
+                    "user_id": u.id, "name": u.name, "role": u.role, "avatar_url": u.avatar_url
+                })
+        for admin in db.query(UserInDB).filter(
+            UserInDB.role == "admin", UserInDB.is_active == True
+        ).all():
+            if not any(c["user_id"] == admin.id for c in available_contacts):
+                available_contacts.append({
+                    "user_id": admin.id, "name": admin.name, "role": admin.role, "avatar_url": admin.avatar_url
+                })
+
     # Фильтрация по роли, если указана
     if role_filter:
         available_contacts = [
@@ -523,7 +568,13 @@ def can_communicate_with_user(current_user: UserInDB, target_user_id: int, db: S
     # Все пользователи могут общаться с администраторами
     if target_user.role == "admin":
         return True
-    
+
+    # Родитель ↔ учителя/кураторы его детей (в обе стороны).
+    if current_user.role == "parent":
+        return target_user_id in _parent_staff_ids(db, current_user.id)
+    if target_user.role == "parent":
+        return current_user.id in _parent_staff_ids(db, target_user_id)
+
     if current_user.role == "student":
         from src.schemas.models import Group, GroupStudent
 

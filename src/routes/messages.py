@@ -521,7 +521,15 @@ def can_communicate_with_user(current_user: UserInDB, target_user_id: int, db: S
     # Все пользователи могут общаться с администраторами
     if target_user.role == "admin":
         return True
-    
+
+    # Родитель ↔ учителя/кураторы его детей (в обе стороны). Использует общий
+    # хелпер из основного модуля сообщений, чтобы логика не расходилась.
+    if current_user.role == "parent" or target_user.role == "parent":
+        from src.messages.routes.messages import _parent_staff_ids
+        if current_user.role == "parent":
+            return target_user_id in _parent_staff_ids(db, current_user.id)
+        return current_user.id in _parent_staff_ids(db, target_user_id)
+
     if current_user.role == "student":
         from src.schemas.models import Group, GroupStudent
 
