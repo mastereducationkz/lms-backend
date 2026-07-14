@@ -959,35 +959,14 @@ def get_student_group_teachers(student_id: int, db: Session) -> List[Dict[str, A
     }
     return [{"id": tid, "name": names[tid]} for tid in ordered_ids if tid in names]
 
-@router.get("/student/{student_id}/overview")
-@cached(namespace="progress:overview-by-id", ttl=45, key_args=("student_id",))
-def get_student_progress_overview_by_id(
-    student_id: int,
-    current_user: UserInDB = Depends(get_current_user_dependency),
-    db: Session = Depends(get_db)
-):
-    """Получить общий обзор прогресса конкретного студента (для учителей/админов)"""
-    if current_user.role not in ["teacher", "admin"]:
-        raise HTTPException(status_code=403, detail="Only teachers and admins can access this endpoint")
-    
-    # Проверяем существование студента
+def build_student_progress_overview(db: Session, student_id: int) -> dict:
+    """Compute a student's cross-course progress overview. Shared by the
+    teacher/admin endpoint and the parent portal endpoint — each applies its own
+    access gate before calling this. Raises 404 if the student doesn't exist."""
     student = db.query(UserInDB).filter(UserInDB.id == student_id, UserInDB.role == "student").first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    
-    # Проверяем права доступа
-    if current_user.role == "teacher":
-        # Учителя могут видеть только студентов своих групп
-        from src.schemas.models import Group, GroupStudent
-        group_student = db.query(GroupStudent).filter(
-            GroupStudent.student_id == student_id,
-            GroupStudent.group_id.in_(
-                db.query(Group.id).filter(Group.teacher_id == current_user.id)
-            )
-        ).first()
-        if not group_student:
-            raise HTTPException(status_code=403, detail="Access denied to this student")
-    
+
     courses = get_user_courses(student_id, db)
 
     # ---- Batch every per-course/module/lesson/step query up front (was a nested course -> module
@@ -1119,6 +1098,36 @@ def get_student_progress_overview_by_id(
         "courses": course_progress,
         "group_teachers": get_student_group_teachers(student_id, db)
     }
+
+
+@router.get("/student/{student_id}/overview")
+@cached(namespace="progress:overview-by-id", ttl=45, key_args=("student_id",))
+def get_student_progress_overview_by_id(
+    student_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """Получить общий обзор прогресса конкретного студента (для учителей/админов)"""
+    if current_user.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Only teachers and admins can access this endpoint")
+
+    student = db.query(UserInDB).filter(UserInDB.id == student_id, UserInDB.role == "student").first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    # Teachers may only view students in their own groups.
+    if current_user.role == "teacher":
+        from src.schemas.models import Group, GroupStudent
+        group_student = db.query(GroupStudent).filter(
+            GroupStudent.student_id == student_id,
+            GroupStudent.group_id.in_(
+                db.query(Group.id).filter(Group.teacher_id == current_user.id)
+            )
+        ).first()
+        if not group_student:
+            raise HTTPException(status_code=403, detail="Access denied to this student")
+
+    return build_student_progress_overview(db, student_id)
 
 # =============================================================================
 # STEP PROGRESS TRACKING

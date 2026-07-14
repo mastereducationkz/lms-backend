@@ -12,7 +12,7 @@ from src.schemas.models import (
     StudentProgress, Assignment, AssignmentSubmission, AssignmentExtension, Event, EventGroup, EventParticipant,
     EventSchema, CreateEventRequest, UpdateEventRequest, EventGroupSchema, EventParticipantSchema,
     StepProgress, Step, Lesson, LessonSchedule, CourseGroupAccess, CourseHeadTeacher,
-    QuestionErrorReport, LessonRequest,
+    QuestionErrorReport, LessonRequest, ParentStudent,
 )
 from src.utils.auth_utils import hash_password
 from src.services.email_service import send_invite_email, send_password_changed_email
@@ -101,7 +101,11 @@ class CreateUserRequest(BaseModel):
     is_active: bool = True
     group_ids: Optional[List[int]] = None  # Multiple groups for students
     course_ids: Optional[List[int]] = None  # Courses for head teachers
+    child_ids: Optional[List[int]] = None  # Student user ids to link when role == "parent"
     send_invites: bool = True  # Email an invite (with credentials) to created students
+
+class LinkChildrenRequest(BaseModel):
+    child_ids: List[int]
 
 class BulkCreateUsersRequest(BaseModel):
     users: List[CreateUserRequest]
@@ -342,6 +346,25 @@ def get_non_special_group_ids(db: Session, group_ids: List[int]) -> List[int]:
 
     return [group.id for group in existing_groups if not group.is_special]
 
+def _link_children_to_parent(db: Session, parent_id: int, child_ids: List[int]) -> List[int]:
+    """Create ParentStudent links for the given student ids. Each child_id must be an
+    active student; already-linked ones are skipped (unique constraint). Returns the
+    ids newly linked. Does not commit."""
+    linked: List[int] = []
+    for child_id in child_ids or []:
+        child = db.query(UserInDB).filter(UserInDB.id == child_id).first()
+        if not child or child.role != "student":
+            raise HTTPException(status_code=400, detail=f"child_id {child_id} is not a valid student")
+        existing = db.query(ParentStudent).filter(
+            ParentStudent.parent_id == parent_id,
+            ParentStudent.student_id == child_id,
+        ).first()
+        if not existing:
+            db.add(ParentStudent(parent_id=parent_id, student_id=child_id))
+            linked.append(child_id)
+    return linked
+
+
 @router.post("/users/single", response_model=CreateUserResponse)
 def create_single_user(
     user_data: CreateUserRequest,
@@ -429,6 +452,11 @@ def create_single_user(
                         db.add(course_head_teacher)
             db.commit()
         
+        # Link children if creating a parent
+        if user_data.role == "parent" and user_data.child_ids:
+            _link_children_to_parent(db, new_user.id, user_data.child_ids)
+            db.commit()
+
         # Email an invite (link + credentials) to created students
         if user_data.send_invites and new_user.role == "student":
             background_tasks.add_task(
@@ -445,6 +473,71 @@ def create_single_user(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)}")
+
+
+def _child_summary(db: Session, student: UserInDB) -> dict:
+    """Small child descriptor (id, name, email, group_name) for admin parent-link views."""
+    group_name = None
+    gs = db.query(GroupStudent).filter(GroupStudent.student_id == student.id).first()
+    if gs:
+        g = db.query(Group).filter(Group.id == gs.group_id).first()
+        group_name = g.name if g else None
+    return {"id": student.id, "name": student.name, "email": student.email, "group_name": group_name}
+
+
+@router.get("/parents/{parent_id}/children")
+def list_parent_children(
+    parent_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin_or_head_curator()),
+):
+    """List the students linked to a parent (admin view)."""
+    parent = db.query(UserInDB).filter(UserInDB.id == parent_id, UserInDB.role == "parent").first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent not found")
+    links = db.query(ParentStudent).filter(ParentStudent.parent_id == parent_id).all()
+    children = []
+    for link in links:
+        student = db.query(UserInDB).filter(UserInDB.id == link.student_id).first()
+        if student:
+            children.append(_child_summary(db, student))
+    return children
+
+
+@router.post("/parents/{parent_id}/children")
+def link_parent_children(
+    parent_id: int,
+    body: LinkChildrenRequest,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin_or_head_curator()),
+):
+    """Link one or more students to a parent (idempotent)."""
+    parent = db.query(UserInDB).filter(UserInDB.id == parent_id, UserInDB.role == "parent").first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent not found")
+    linked = _link_children_to_parent(db, parent_id, body.child_ids)
+    db.commit()
+    return {"linked": linked}
+
+
+@router.delete("/parents/{parent_id}/children/{student_id}")
+def unlink_parent_child(
+    parent_id: int,
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin_or_head_curator()),
+):
+    """Remove a single parent↔child link."""
+    link = db.query(ParentStudent).filter(
+        ParentStudent.parent_id == parent_id,
+        ParentStudent.student_id == student_id,
+    ).first()
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    db.delete(link)
+    db.commit()
+    return {"detail": "unlinked"}
+
 
 @router.post("/users/bulk", response_model=BulkCreateResponse)
 def create_bulk_users(

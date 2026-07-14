@@ -14,6 +14,7 @@ def register_routes(app: FastAPI):
     from src.progress.routes import progress_router, admin_progress_router
     from src.events.routes import events_router
     from src.messages.routes import messages_router, notifications_router
+    from src.parents import parents_router
     from src.gamification.routes import (
         gamification_router, leaderboard_router, daily_questions_router,
     )
@@ -32,6 +33,7 @@ def register_routes(app: FastAPI):
     app.include_router(assignments_router, prefix="/assignments", tags=["Assignments"])
     app.include_router(messages_router, prefix="/messages", tags=["Messages"])
     app.include_router(notifications_router, prefix="/notifications", tags=["Notifications"])
+    app.include_router(parents_router, prefix="/parents", tags=["Parents"])
     app.include_router(progress_router, prefix="/progress", tags=["Progress"])
     app.include_router(media_router, prefix="/media", tags=["Media"])
     app.include_router(events_router, prefix="/events", tags=["Events"])
