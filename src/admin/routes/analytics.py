@@ -37,12 +37,12 @@ def get_detailed_student_analytics(
     """Get comprehensive analytics for a specific student"""
     
     # Check permissions
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher", "parent"]:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Verify student exists
     student = db.query(UserInDB).filter(
-        UserInDB.id == student_id, 
+        UserInDB.id == student_id,
         UserInDB.role == "student"
     ).first()
     if not student:
@@ -2761,13 +2761,13 @@ def get_student_detailed_progress(
     """
     
     # Check role-based access
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher", "parent"]:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Validate student access (now properly checks curator permissions)
     if current_user.role != "admin" and not check_student_access(student_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this student")
-    
+
     try:
         # Получаем информацию о студенте
         student = db.query(UserInDB).filter(UserInDB.id == student_id).first()
@@ -3099,13 +3099,13 @@ def get_student_learning_path(
     """
     
     # Check role-based access
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher", "parent"]:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Validate student access (now properly checks curator permissions)
     if current_user.role != "admin" and not check_student_access(student_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this student")
-    
+
     try:
         # Получаем хронологический путь обучения
         learning_path = db.query(
@@ -3659,12 +3659,12 @@ async def get_student_sat_scores(
     """Get SAT scores for a student from external platform"""
     
     # Check permissions
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher"]:
+    if current_user.role not in ["teacher", "curator", "admin", "head_curator", "head_teacher", "parent"]:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Verify student exists
     student = db.query(UserInDB).filter(
-        UserInDB.id == student_id, 
+        UserInDB.id == student_id,
         UserInDB.role == "student"
     ).first()
     if not student:

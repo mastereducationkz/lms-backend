@@ -3,8 +3,9 @@
 A parent may only read data about a student they are linked to via the
 `parent_students` table. Every child endpoint gates on `require_child`.
 """
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from typing import List, Optional
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from src.config import get_db
@@ -150,4 +151,63 @@ def child_assignments(
             "max_score": a.max_score,
             **status,
         })
+    return result
+
+
+@router.get("/children/{student_id}/attendance")
+def child_attendance(
+    student_id: int,
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """A child's class lessons for a month with attendance status (для мини-календаря
+    и журнала). status: attended | late | missed | registered | cancelled | null."""
+    require_child(student_id, current_user, db)
+    from src.schemas.models import Event, EventGroup, Attendance
+    from src.services.attendance_service import attendance_status_to_ui
+
+    now = datetime.now()
+    y = year or now.year
+    m = month or now.month
+    start = datetime(y, m, 1)
+    end = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
+
+    group_ids = [gs.group_id for gs in db.query(GroupStudent.group_id).filter(
+        GroupStudent.student_id == student_id).all()]
+    if not group_ids:
+        return []
+
+    events = db.query(Event).join(EventGroup, EventGroup.event_id == Event.id).filter(
+        EventGroup.group_id.in_(group_ids),
+        Event.event_type == "class",
+        Event.is_active == True,
+        Event.start_datetime >= start,
+        Event.start_datetime < end,
+    ).distinct().all()
+    if not events:
+        return []
+
+    event_ids = [e.id for e in events]
+    att_map = {
+        a.event_id: a
+        for a in db.query(Attendance).filter(
+            Attendance.user_id == student_id,
+            Attendance.event_id.in_(event_ids),
+        ).all()
+    }
+
+    result = []
+    for e in events:
+        a = att_map.get(e.id)
+        result.append({
+            "event_id": e.id,
+            "title": e.title,
+            "topic": getattr(e, "topic", None),
+            "start_datetime": e.start_datetime,
+            "status": attendance_status_to_ui(a.status) if a else None,
+            "activity_score": a.activity_score if a else None,
+        })
+    result.sort(key=lambda x: x["start_datetime"] or start)
     return result

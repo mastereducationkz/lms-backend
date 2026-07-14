@@ -186,7 +186,15 @@ def check_student_access(student_id: int, user: UserInDB, db: Session) -> bool:
     if user.role == "student":
         # Students can only access their own data
         return user.id == student_id
-    
+
+    if user.role == "parent":
+        # Parents can access data for students they are linked to.
+        from src.schemas.models import ParentStudent
+        return db.query(ParentStudent).filter(
+            ParentStudent.parent_id == user.id,
+            ParentStudent.student_id == student_id,
+        ).first() is not None
+
     student = db.query(UserInDB).filter(UserInDB.id == student_id).first()
     if not student or student.role != "student":
         return False

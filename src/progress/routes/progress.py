@@ -2107,10 +2107,15 @@ def get_student_quiz_analytics(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Получить аналитику по квизам для конкретного студента (для учителей/админов)"""
-    if current_user.role not in ["teacher", "admin", "curator", "head_curator"]:
-        raise HTTPException(status_code=403, detail="Only teachers, curators and admins can access student analytics")
-    
+    """Получить аналитику по квизам для конкретного студента (для учителей/админов/родителей)"""
+    if current_user.role not in ["teacher", "admin", "curator", "head_curator", "parent"]:
+        raise HTTPException(status_code=403, detail="Only teachers, curators, admins and parents can access student analytics")
+    # Parents may only see their linked children (this endpoint has no group scope otherwise).
+    if current_user.role == "parent":
+        from src.utils.permissions import check_student_access
+        if not check_student_access(student_id, current_user, db):
+            raise HTTPException(status_code=403, detail="Access denied to this student")
+
     # Build query
     query = db.query(QuizAttempt).filter(QuizAttempt.user_id == student_id)
     
