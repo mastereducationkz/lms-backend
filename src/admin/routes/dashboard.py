@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, and_, or_
+from sqlalchemy import func, desc, and_, or_, case
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, date
 import math
@@ -20,6 +20,98 @@ from src.services.cache_service import cached
 from src.utils.course_access import get_user_courses
 
 router = APIRouter()
+
+# Events before this date predate the production launch and are never checked
+# for missing attendance.
+_ATTENDANCE_CUTOFF = datetime(2026, 2, 16, 0, 0, 0)
+
+
+def _missing_attendance_reminders(
+    db: Session,
+    group_ids: Optional[List[int]] = None,
+    expected_within_groups: bool = False,
+) -> List[dict]:
+    """Past class events where fewer attendance records exist than expected students.
+
+    Set-based replacement for the old per-event loop (3-4 queries per event —
+    measured 17s platform-wide for admins). ``group_ids=None`` checks all events;
+    otherwise only events touching those groups. ``expected_within_groups`` counts
+    expected students only inside ``group_ids`` (curator semantics) instead of
+    across all of an event's groups (admin/teacher semantics).
+    """
+    from src.schemas.models import Event, EventGroup, Group
+    from src.events.models import Attendance
+
+    if group_ids is not None and not group_ids:
+        return []
+
+    events_q = (
+        db.query(Event.id)
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .filter(
+            Event.event_type == "class",
+            Event.end_datetime <= datetime.utcnow(),
+            Event.end_datetime >= _ATTENDANCE_CUTOFF,
+            Event.is_active == True,
+        )
+    )
+    if group_ids is not None:
+        events_q = events_q.filter(EventGroup.group_id.in_(group_ids))
+    past_event_ids_sq = events_q.distinct().subquery()
+
+    expected_q = (
+        db.query(EventGroup.event_id, func.count(GroupStudent.student_id))
+        .join(GroupStudent, GroupStudent.group_id == EventGroup.group_id)
+        .filter(EventGroup.event_id.in_(past_event_ids_sq))
+    )
+    if expected_within_groups and group_ids is not None:
+        expected_q = expected_q.filter(EventGroup.group_id.in_(group_ids))
+    expected_by_event = dict(expected_q.group_by(EventGroup.event_id).all())
+
+    attendance_by_event = dict(
+        db.query(Attendance.event_id, func.count(Attendance.id))
+        .filter(
+            Attendance.event_id.in_(past_event_ids_sq),
+            Attendance.status.in_(["present", "late", "absent"]),
+        )
+        .group_by(Attendance.event_id)
+        .all()
+    )
+
+    flagged_ids = [
+        event_id
+        for event_id, expected_count in expected_by_event.items()
+        if attendance_by_event.get(event_id, 0) < expected_count
+    ]
+    if not flagged_ids:
+        return []
+
+    labels_q = (
+        db.query(Event.id, Event.title, Event.start_datetime, Group.id, Group.name)
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .join(Group, Group.id == EventGroup.group_id)
+        .filter(Event.id.in_(flagged_ids))
+    )
+    if expected_within_groups and group_ids is not None:
+        labels_q = labels_q.filter(EventGroup.group_id.in_(group_ids))
+    flagged_rows = labels_q.order_by(Event.id, Group.id).all()
+
+    reminders = []
+    seen_event_ids = set()
+    for event_id, title, start_dt, g_id, g_name in flagged_rows:
+        if event_id in seen_event_ids:
+            continue
+        seen_event_ids.add(event_id)
+        reminders.append({
+            "event_id": event_id,
+            "title": title,
+            "group_name": g_name or "",
+            "group_id": g_id,
+            "event_date": start_dt.isoformat(),
+            "expected_students": expected_by_event.get(event_id, 0),
+            "recorded_students": attendance_by_event.get(event_id, 0)
+        })
+    return reminders
 
 
 def _compute_group_program_end(group) -> Optional[date]:
@@ -220,23 +312,21 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
     # Calculate average student progress across all students
     avg_student_progress = 0
     if teacher_courses and student_ids_set:
-        progress_records = db.query(StudentProgress).filter(
+        avg_val = db.query(func.avg(StudentProgress.completion_percentage)).filter(
             StudentProgress.course_id.in_([c.id for c in teacher_courses]),
             StudentProgress.user_id.in_(student_ids_set)
-        ).all()
-        
-        if progress_records:
-            total_progress = sum(p.completion_percentage for p in progress_records)
-            avg_student_progress = round(total_progress / len(progress_records))
-    
+        ).scalar()
+        if avg_val is not None:
+            avg_student_progress = round(avg_val)
+
     # Get pending submissions (ungraded)
     pending_submissions = 0
     total_submissions = 0
-    graded_submissions_list = []
+    graded_submissions_count = 0
     avg_student_score = 0
-    
+
     if teacher_courses:
-        teacher_assignments = db.query(Assignment).filter(
+        teacher_assignment_ids_sq = db.query(Assignment.id).filter(
             Assignment.lesson_id.in_(
                 db.query(Lesson.id).filter(
                     Lesson.module_id.in_(
@@ -247,28 +337,28 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
                 )
             ),
             Assignment.is_active == True
-        ).all()
-        
-        if teacher_assignments:
-            pending_submissions = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id.in_([a.id for a in teacher_assignments]),
-                AssignmentSubmission.is_graded == False
-            ).count()
-            
-            total_submissions = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id.in_([a.id for a in teacher_assignments])
-            ).count()
-            
-            graded_submissions_list = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.assignment_id.in_([a.id for a in teacher_assignments]),
-                AssignmentSubmission.is_graded == True,
-                AssignmentSubmission.score.isnot(None)
-            ).all()
-            
-            # Calculate average student score
-            if graded_submissions_list:
-                total_score = sum(sub.score for sub in graded_submissions_list if sub.score is not None)
-                avg_student_score = round(total_score / len(graded_submissions_list))
+        ).subquery()
+
+        pending_submissions = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id.in_(teacher_assignment_ids_sq),
+            AssignmentSubmission.is_graded == False
+        ).count()
+
+        total_submissions = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id.in_(teacher_assignment_ids_sq)
+        ).count()
+
+        graded_submissions_count, avg_score_val = db.query(
+            func.count(AssignmentSubmission.id),
+            func.avg(AssignmentSubmission.score),
+        ).filter(
+            AssignmentSubmission.assignment_id.in_(teacher_assignment_ids_sq),
+            AssignmentSubmission.is_graded == True,
+            AssignmentSubmission.score.isnot(None)
+        ).one()
+        graded_submissions_count = graded_submissions_count or 0
+        if graded_submissions_count and avg_score_val is not None:
+            avg_student_score = round(avg_score_val)
     
     # Get recent enrollments (last 7 days)
     recent_enrollments = 0
@@ -281,51 +371,67 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
     
     # Calculate average completion rate
     total_completion_rate = 0
-    
+
     course_stats = []
-    
+
+    course_ids = [c.id for c in teacher_courses]
+    enrolled_by_course = {}
+    group_students_by_course = {}
+    modules_by_course = {}
+    progress_by_course = {}
+    if course_ids:
+        enrolled_by_course = dict(
+            db.query(Enrollment.course_id, func.count(Enrollment.id))
+            .filter(Enrollment.course_id.in_(course_ids), Enrollment.is_active == True)
+            .group_by(Enrollment.course_id)
+            .all()
+        )
+        group_students_by_course = dict(
+            db.query(CourseGroupAccess.course_id, func.count(GroupStudent.student_id))
+            .join(GroupStudent, GroupStudent.group_id == CourseGroupAccess.group_id)
+            .filter(
+                CourseGroupAccess.course_id.in_(course_ids),
+                CourseGroupAccess.is_active == True,
+            )
+            .group_by(CourseGroupAccess.course_id)
+            .all()
+        )
+        modules_by_course = dict(
+            db.query(Module.course_id, func.count(Module.id))
+            .filter(Module.course_id.in_(course_ids))
+            .group_by(Module.course_id)
+            .all()
+        )
+        progress_by_course = {
+            cid: (cnt, avg_val or 0, completed or 0)
+            for cid, cnt, avg_val, completed in db.query(
+                StudentProgress.course_id,
+                func.count(StudentProgress.id),
+                func.avg(StudentProgress.completion_percentage),
+                func.sum(case((StudentProgress.completion_percentage >= 100, 1), else_=0)),
+            )
+            .filter(StudentProgress.course_id.in_(course_ids))
+            .group_by(StudentProgress.course_id)
+            .all()
+        }
+
     for course in teacher_courses:
-        # Count enrolled students for this course (for course_stats only, not total_students)
-        enrolled_students = db.query(Enrollment).filter(
-            Enrollment.course_id == course.id,
-            Enrollment.is_active == True
-        ).count()
-        
-        # Also add students from group access for this course
-        group_accesses = db.query(CourseGroupAccess).filter(
-            CourseGroupAccess.course_id == course.id,
-            CourseGroupAccess.is_active == True
-        ).all()
-        
-        course_group_students = 0
-        for access in group_accesses:
-            course_group_students += db.query(GroupStudent).filter(
-                GroupStudent.group_id == access.group_id
-            ).count()
-        
-        total_course_students = enrolled_students + course_group_students
-        
-        # Count modules
-        total_modules = db.query(Module).filter(Module.course_id == course.id).count()
-        
-        # Calculate average progress for this course
-        progress_records = db.query(StudentProgress).filter(
-            StudentProgress.course_id == course.id
-        ).all()
-        
-        if progress_records:
-            avg_progress = sum(p.completion_percentage for p in progress_records) / len(progress_records)
+        total_course_students = (
+            enrolled_by_course.get(course.id, 0) + group_students_by_course.get(course.id, 0)
+        )
+        total_modules = modules_by_course.get(course.id, 0)
+
+        p_count, p_avg, p_completed = progress_by_course.get(course.id, (0, 0, 0))
+        if p_count:
+            avg_progress = p_avg
             total_completion_rate += avg_progress
         else:
             avg_progress = 0
-        
-        # Get course completion rate
+
         course_completion_rate = 0
-        if total_course_students > 0 and progress_records:
-            # Calculate percentage of students who completed the course
-            completed_count = sum(1 for p in progress_records if p.completion_percentage >= 100)
-            course_completion_rate = round((completed_count / total_course_students) * 100)
-        
+        if total_course_students > 0 and p_count:
+            course_completion_rate = round((p_completed / total_course_students) * 100)
+
         course_stats.append({
             "id": course.id,
             "title": course.title,
@@ -338,58 +444,14 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
             "status": "active",
             "last_accessed": course.updated_at
         })
-    
+
     # Calculate average completion rate
     avg_completion_rate = round(total_completion_rate / total_courses) if total_courses > 0 else 0
-    
-    # Ensure all values are numeric
-    graded_submissions_count = len(graded_submissions_list) if graded_submissions_list else 0
+
     grading_progress = round((graded_submissions_count / total_submissions) * 100) if total_submissions > 0 else 0
-    
+
     # Find past events with missing attendance (for reminders)
-    from src.schemas.models import Event, EventGroup
-
-    missing_attendance_reminders = []
-
-    cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
-
-    if teacher_group_ids:
-        past_events = db.query(Event).join(EventGroup).filter(
-            EventGroup.group_id.in_(teacher_group_ids),
-            Event.event_type == "class",
-            Event.end_datetime <= datetime.utcnow(),
-            Event.end_datetime >= cutoff_date,
-            Event.is_active == True
-        ).all()
-
-        for event in past_events:
-            event_group_ids = [eg.group_id for eg in event.event_groups]
-            expected_students = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id.in_(event_group_ids)
-            ).all()
-            expected_count = len(expected_students)
-
-            # Count via Attendance (single source of truth)
-            attendance_count = AttendanceService.count_for_event(
-                db, event.id, statuses=["present", "late", "absent"]
-            )
-
-            if attendance_count < expected_count:
-                group_name = ""
-                group_id = None
-                if event.event_groups:
-                    group_name = event.event_groups[0].group.name if event.event_groups[0].group else ""
-                    group_id = event.event_groups[0].group.id if event.event_groups[0].group else None
-                
-                missing_attendance_reminders.append({
-                    "event_id": event.id,
-                    "title": event.title,
-                    "group_name": group_name,
-                    "group_id": group_id,
-                    "event_date": event.start_datetime.isoformat(),
-                    "expected_students": expected_count,
-                    "recorded_students": attendance_count
-                })
+    missing_attendance_reminders = _missing_attendance_reminders(db, group_ids=teacher_group_ids)
     
     return DashboardStatsSchema(
         user={
@@ -551,22 +613,42 @@ def get_curator_dashboard_stats(
         ).count()
 
     # 3. Stats per Group (replacing Curator Performance)
+    # Bulk-load group membership and per-group average progress up front (was one
+    # membership query + a full StudentProgress load per group).
+    students_by_group: Dict[int, List[int]] = {}
+    avg_progress_by_group: Dict[int, float] = {}
+    if curator_group_ids:
+        for gid, sid in (
+            db.query(GroupStudent.group_id, GroupStudent.student_id)
+            .filter(GroupStudent.group_id.in_(curator_group_ids))
+            .all()
+        ):
+            students_by_group.setdefault(gid, []).append(sid)
+        avg_progress_by_group = {
+            gid: (avg_val or 0)
+            for gid, avg_val in db.query(
+                GroupStudent.group_id, func.avg(StudentProgress.completion_percentage)
+            )
+            .join(StudentProgress, StudentProgress.user_id == GroupStudent.student_id)
+            .filter(GroupStudent.group_id.in_(curator_group_ids))
+            .group_by(GroupStudent.group_id)
+            .all()
+        }
+
     group_performance = []
     for g in curator_groups:
-        g_student_ids = [gs.student_id for gs in db.query(GroupStudent).filter(GroupStudent.group_id == g.id).all()]
-        
+        g_student_ids = students_by_group.get(g.id, [])
+
         avg_progress = 0
         overdue_count = 0
         pending_grading = 0
         total_due = 0
         total_submissions = 0
-        
+
         if g_student_ids:
             # Avg Progress
-            progress_records = db.query(StudentProgress).filter(StudentProgress.user_id.in_(g_student_ids)).all()
-            if progress_records:
-                avg_progress = sum(p.completion_percentage for p in progress_records) / len(progress_records)
-            
+            avg_progress = avg_progress_by_group.get(g.id, 0)
+
             # Overdue calc for this group
             ug = db.query(GroupAssignment, GroupStudent).join(GroupStudent, GroupAssignment.group_id == GroupStudent.group_id).filter(
                 GroupAssignment.group_id == g.id, GroupAssignment.due_date < datetime.utcnow(), GroupAssignment.is_active == True,
@@ -616,19 +698,36 @@ def get_curator_dashboard_stats(
 
     # 4. Activity Trends
     activity_trends = []
-    
+
     # Calculate days between start and end
     delta = date_end - date_start
     num_days = delta.days + 1
     if num_days > 60: num_days = 60 # Cap to 60 days to prevent performance issues
-    
+
+    # One grouped query for the whole range (was one COUNT DISTINCT per day)
+    first_day = date_start.date()
+    last_day = first_day + timedelta(days=num_days - 1)
+    counts_by_day = {}
+    if current_student_ids:
+        counts_by_day = {
+            (d.date() if isinstance(d, datetime) else d if isinstance(d, date) else date.fromisoformat(str(d))): cnt
+            for d, cnt in db.query(
+                func.date(StepProgress.visited_at),
+                func.count(func.distinct(StepProgress.user_id)),
+            )
+            .filter(
+                StepProgress.user_id.in_(current_student_ids),
+                func.date(StepProgress.visited_at) >= first_day,
+                func.date(StepProgress.visited_at) <= last_day,
+            )
+            .group_by(func.date(StepProgress.visited_at))
+            .all()
+        }
+
     for i in range(num_days):
-        day = (date_start + timedelta(days=i)).date()
-        day_active_count = db.query(func.count(func.distinct(StepProgress.user_id))).filter(
-            func.date(StepProgress.visited_at) == day,
-            StepProgress.user_id.in_(current_student_ids) if current_student_ids else False
-        ).scalar() or 0
-        
+        day = first_day + timedelta(days=i)
+        day_active_count = counts_by_day.get(day, 0)
+
         activity_trends.append({
             "date": day.isoformat(),
             "count": day_active_count,
@@ -636,51 +735,9 @@ def get_curator_dashboard_stats(
         })
 
     # 5. Missing Attendance Reminders (similar to teacher)
-    from src.schemas.models import EventGroup, Event
-    missing_attendance_reminders = []
-
-    cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
-
-    if curator_group_ids:
-        past_events = db.query(Event).join(EventGroup).filter(
-            EventGroup.group_id.in_(curator_group_ids),
-            Event.event_type == "class",
-            Event.end_datetime <= datetime.utcnow(),
-            Event.end_datetime >= cutoff_date,
-            Event.is_active == True
-        ).all()
-
-        for event in past_events:
-            eg_ids = [eg.group_id for eg in event.event_groups if eg.group_id in curator_group_ids]
-            if not eg_ids:
-                continue
-
-            e_expected_students = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id.in_(eg_ids)
-            ).all()
-            e_expected_count = len(e_expected_students)
-
-            e_attendance_count = AttendanceService.count_for_event(
-                db, event.id, statuses=["present", "late", "absent"]
-            )
-
-            if e_attendance_count < e_expected_count:
-                g_name = ""
-                g_id = None
-                if event.event_groups:
-                    target_eg = next((eg for eg in event.event_groups if eg.group_id in curator_group_ids), event.event_groups[0])
-                    g_name = target_eg.group.name if target_eg.group else ""
-                    g_id = target_eg.group.id if target_eg.group else None
-                
-                missing_attendance_reminders.append({
-                    "event_id": event.id,
-                    "title": event.title,
-                    "group_name": g_name,
-                    "group_id": g_id,
-                    "event_date": event.start_datetime.isoformat(),
-                    "expected_students": e_expected_count,
-                    "recorded_students": e_attendance_count
-                })
+    missing_attendance_reminders = _missing_attendance_reminders(
+        db, group_ids=curator_group_ids, expected_within_groups=True
+    )
 
     return DashboardStatsSchema(
         user={
@@ -1312,74 +1369,7 @@ def get_admin_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSche
         })
     
     # Find past events with missing attendance (for reminders)
-    from src.schemas.models import Event, EventGroup, Group
-    from src.events.models import Attendance
-
-    missing_attendance_reminders = []
-
-    # Only check events from February 4, 2026 onwards (production launch date)
-    cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
-
-    past_event_ids_sq = (
-        db.query(Event.id)
-        .join(EventGroup, EventGroup.event_id == Event.id)
-        .filter(
-            Event.event_type == "class",
-            Event.end_datetime <= datetime.utcnow(),
-            Event.end_datetime >= cutoff_date,
-            Event.is_active == True,
-        )
-        .distinct()
-        .subquery()
-    )
-
-    expected_by_event = dict(
-        db.query(EventGroup.event_id, func.count(GroupStudent.student_id))
-        .join(GroupStudent, GroupStudent.group_id == EventGroup.group_id)
-        .filter(EventGroup.event_id.in_(past_event_ids_sq))
-        .group_by(EventGroup.event_id)
-        .all()
-    )
-
-    attendance_by_event = dict(
-        db.query(Attendance.event_id, func.count(Attendance.id))
-        .filter(
-            Attendance.event_id.in_(past_event_ids_sq),
-            Attendance.status.in_(["present", "late", "absent"]),
-        )
-        .group_by(Attendance.event_id)
-        .all()
-    )
-
-    flagged_ids = [
-        event_id
-        for event_id, expected_count in expected_by_event.items()
-        if attendance_by_event.get(event_id, 0) < expected_count
-    ]
-
-    if flagged_ids:
-        flagged_rows = (
-            db.query(Event.id, Event.title, Event.start_datetime, Group.id, Group.name)
-            .join(EventGroup, EventGroup.event_id == Event.id)
-            .join(Group, Group.id == EventGroup.group_id)
-            .filter(Event.id.in_(flagged_ids))
-            .order_by(Event.id, Group.id)
-            .all()
-        )
-        seen_event_ids = set()
-        for event_id, title, start_dt, group_id, group_name in flagged_rows:
-            if event_id in seen_event_ids:
-                continue
-            seen_event_ids.add(event_id)
-            missing_attendance_reminders.append({
-                "event_id": event_id,
-                "title": title,
-                "group_name": group_name or "",
-                "group_id": group_id,
-                "event_date": start_dt.isoformat(),
-                "expected_students": expected_by_event.get(event_id, 0),
-                "recorded_students": attendance_by_event.get(event_id, 0)
-            })
+    missing_attendance_reminders = _missing_attendance_reminders(db)
     
     return DashboardStatsSchema(
         user={
