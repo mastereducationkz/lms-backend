@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Load configuration from environment variables
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "noreply@mail.mastereducation.kz")
-EMAIL_SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "MasterED Platform")
+EMAIL_SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "Master Education")
 DEFAULT_LMS_BASE_URL = "https://lms.mastereducation.kz"
 
 
@@ -260,20 +260,31 @@ def send_invite_email(to_email: str, name: str, login_email: str, password: str)
     inner = (
         f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте, <strong>{greeting}</strong>!</p>'
         + _para(
-            "Вам открыт доступ к учебной платформе Master Education. Данные для входа:",
-            "You've been given access to Master Education. Your sign-in details:",
+            "Для вас создан единый аккаунт Master Education. С ним вы входите во все платформы "
+            "Master Education (LMS, SAT/NUET, IELTS и другие) — одним аккаунтом, через кнопку "
+            "«Продолжить с Master Education». Данные для входа:",
+            "Your single Master Education account is ready. Use it to sign in to every Master "
+            "Education platform (LMS, SAT/NUET, IELTS and more) with one account, via the "
+            "“Continue with Master Education” button. Your credentials:",
         )
         + _credentials_block(login_email, password)
         + f'<div style="margin-bottom:24px;">{_button(base_url, "Войти / Sign in")}</div>'
-        + '<p style="margin:0;font-size:14px;color:#666666;">Рекомендуем сменить пароль после первого входа.<br/>We recommend changing your password after first sign-in.</p>'
+        + _para(
+            "На странице входа нажмите «Продолжить с Master Education» и войдите с данными выше. "
+            "Рекомендуем сменить пароль после первого входа.",
+            "On the sign-in page, choose “Continue with Master Education” and log in with the "
+            "details above. We recommend changing your password after your first sign-in.",
+        )
     )
     return get_email_service().send_email(
         to_emails=[to_email],
-        subject="Добро пожаловать в Master Education / Welcome to Master Education",
+        subject="Ваш аккаунт Master Education готов / Your Master Education account is ready",
         html_content=_email_shell("🎓 Добро пожаловать / Welcome", inner),
         text_content=(
-            f"Здравствуйте, {greeting}! Доступ к платформе: {base_url}\n"
+            f"Здравствуйте, {greeting}! Для вас создан единый аккаунт Master Education — "
+            "он работает во всех платформах через «Продолжить с Master Education».\n"
             f"Логин/Login: {login_email}\nПароль/Password: {password}\n"
+            f"Войти / Sign in: {base_url}\n"
         ),
     )
 
@@ -286,14 +297,17 @@ def send_password_changed_email(to_email: str, name: str, new_password: Optional
         inner = (
             f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте{greeting}!</p>'
             + _para(
-                "Администратор изменил пароль вашего аккаунта. Новые данные для входа:",
-                "Your password was changed by an administrator. New sign-in details:",
+                "Администратор изменил пароль вашего аккаунта Master Education. Этот единый аккаунт "
+                "работает во всех платформах Master Education через кнопку «Продолжить с Master Education». "
+                "Новые данные для входа:",
+                "An administrator changed the password of your Master Education account. This single account "
+                "signs you in to every Master Education platform via “Continue with Master Education”. New credentials:",
             )
             + _credentials_block(to_email, new_password)
             + f'<div style="margin-bottom:24px;">{_button(base_url, "Войти / Sign in")}</div>'
             + '<p style="margin:0;font-size:14px;color:#666666;">Рекомендуем сменить пароль после входа.<br/>We recommend changing it after you sign in.</p>'
         )
-        text = f"Ваш пароль изменён администратором. Логин/Login: {to_email} Пароль/Password: {new_password} {base_url}"
+        text = f"Пароль вашего аккаунта Master Education изменён администратором (работает во всех платформах через «Продолжить с Master Education»). Логин/Login: {to_email} Пароль/Password: {new_password} {base_url}"
     else:
         reset_url = _build_lms_url("/forgot-password")
         inner = (
