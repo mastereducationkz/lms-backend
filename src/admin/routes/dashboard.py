@@ -403,7 +403,7 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
             .all()
         )
         progress_by_course = {
-            cid: (cnt, avg_val or 0, completed or 0)
+            cid: (cnt, float(avg_val or 0), int(completed or 0))
             for cid, cnt, avg_val, completed in db.query(
                 StudentProgress.course_id,
                 func.count(StudentProgress.id),
@@ -625,7 +625,7 @@ def get_curator_dashboard_stats(
         ):
             students_by_group.setdefault(gid, []).append(sid)
         avg_progress_by_group = {
-            gid: (avg_val or 0)
+            gid: float(avg_val or 0)
             for gid, avg_val in db.query(
                 GroupStudent.group_id, func.avg(StudentProgress.completion_percentage)
             )
