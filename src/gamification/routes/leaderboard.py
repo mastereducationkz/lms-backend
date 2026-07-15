@@ -93,77 +93,109 @@ def get_curator_groups(
         teachers = db.query(UserInDB).filter(UserInDB.id.in_(teacher_ids)).all()
         teacher_name_map = {t.id: (t.name or "") for t in teachers}
 
+    group_ids = [g.id for g in groups]
+
+    # Bulk-load first/last class event per group (one query instead of two per group)
+    event_bounds = {}
+    if group_ids:
+        rows = (
+            db.query(
+                EventGroup.group_id,
+                func.min(Event.start_datetime),
+                func.max(Event.start_datetime),
+            )
+            .join(Event, Event.id == EventGroup.event_id)
+            .filter(
+                EventGroup.group_id.in_(group_ids),
+                Event.event_type == 'class',
+                Event.is_active == True,
+            )
+            .group_by(EventGroup.group_id)
+            .all()
+        )
+        event_bounds = {gid: (first, last) for gid, first, last in rows}
+
+    # LessonSchedule fallback only for groups without any events
+    sched_bounds = {}
+    no_event_ids = [gid for gid in group_ids if gid not in event_bounds]
+    if no_event_ids:
+        rows = (
+            db.query(
+                LessonSchedule.group_id,
+                func.min(LessonSchedule.scheduled_at),
+                func.max(LessonSchedule.scheduled_at),
+            )
+            .filter(
+                LessonSchedule.group_id.in_(no_event_ids),
+                LessonSchedule.is_active == True,
+            )
+            .group_by(LessonSchedule.group_id)
+            .all()
+        )
+        sched_bounds = {gid: (first, last) for gid, first, last in rows}
+
+    # One course per group (first active access) and lesson counts per course
+    course_by_group = {}
+    if group_ids:
+        rows = (
+            db.query(CourseGroupAccess.group_id, func.min(CourseGroupAccess.course_id))
+            .filter(
+                CourseGroupAccess.group_id.in_(group_ids),
+                CourseGroupAccess.is_active == True,
+            )
+            .group_by(CourseGroupAccess.group_id)
+            .all()
+        )
+        course_by_group = dict(rows)
+
+    lesson_count_by_course = {}
+    course_ids = list(set(course_by_group.values()))
+    if course_ids:
+        rows = (
+            db.query(Module.course_id, func.count(Lesson.id))
+            .join(Lesson, Lesson.module_id == Module.id)
+            .filter(Module.course_id.in_(course_ids))
+            .group_by(Module.course_id)
+            .all()
+        )
+        lesson_count_by_course = dict(rows)
+
     result = []
     for group in groups:
-        # Determine Week 1 Start (same logic as get_weekly_lessons_with_hw_status)
-        first_event = db.query(Event).join(EventGroup).filter(
-            EventGroup.group_id == group.id,
-            Event.event_type == 'class',
-            Event.is_active == True
-        ).order_by(Event.start_datetime.asc()).first()
-        
-        start_of_week1 = None
-        if first_event:
-            start_of_week1 = first_event.start_datetime.date()
-        else:
-            first_sched = db.query(LessonSchedule).filter(
-                LessonSchedule.group_id == group.id,
-                LessonSchedule.is_active == True
-            ).order_by(LessonSchedule.scheduled_at.asc()).first()
-            if first_sched:
-                start_of_week1 = first_sched.scheduled_at.date()
-        
+        first_dt, last_dt = event_bounds.get(group.id) or sched_bounds.get(group.id) or (None, None)
+
+        start_of_week1 = first_dt.date() if first_dt else None
+
         current_week = 1
         max_week = 52
         if start_of_week1:
              # Align to Monday
             start_of_week1 = start_of_week1 - timedelta(days=start_of_week1.weekday())
             now_date = datetime.utcnow().date()
-            
+
             # Calculate calendar week difference
             days_diff = (now_date - start_of_week1).days
             calendar_week = (days_diff // 7) + 1
-            if calendar_week < 1: 
+            if calendar_week < 1:
                 calendar_week = 1
-                
-            # Calculate Max Content Week (Last scheduled event)
-            last_event = db.query(Event).join(EventGroup).filter(
-                EventGroup.group_id == group.id,
-                Event.event_type == 'class',
-                Event.is_active == True
-            ).order_by(Event.start_datetime.desc()).first()
-            
-            last_date = None
-            if last_event:
-                last_date = last_event.start_datetime.date()
-            else:
-                last_sched = db.query(LessonSchedule).filter(
-                    LessonSchedule.group_id == group.id,
-                    LessonSchedule.is_active == True
-                ).order_by(LessonSchedule.scheduled_at.desc()).first()
-                if last_sched:
-                    last_date = last_sched.scheduled_at.date()
-            
+
+            # Max Content Week (last scheduled event)
+            last_date = last_dt.date() if last_dt else None
+
             max_content_week = 1
             if last_date:
                  last_diff = (last_date - start_of_week1).days
                  max_content_week = (last_diff // 7) + 1
                  if max_content_week < 1: max_content_week = 1
-            
+
             # 3.5 Also consider Course Length (Total lessons / 5)
-            from src.schemas.models import CourseGroupAccess, Lesson, Module
             course_max_week = 1
-            course_access = db.query(CourseGroupAccess).filter(
-                CourseGroupAccess.group_id == group.id,
-                CourseGroupAccess.is_active == True
-            ).first()
-            if course_access:
-                lesson_count = db.query(func.count(Lesson.id)).join(Module).filter(
-                    Module.course_id == course_access.course_id
-                ).scalar()
+            course_id = course_by_group.get(group.id)
+            if course_id:
+                lesson_count = lesson_count_by_course.get(course_id)
                 if lesson_count:
                     course_max_week = (lesson_count + 4) // 5 # Round up
-            
+
             # Final max_week logic:
             # - Always show up to last scheduled event
             # - Always show up to course length
@@ -171,7 +203,7 @@ def get_curator_groups(
             potential_max = max(max_content_week, course_max_week)
             if group.is_active:
                 potential_max = max(potential_max, calendar_week)
-            
+
             current_week = min(calendar_week, potential_max)
             max_week = min(potential_max, 52) # Hard cap 52
 

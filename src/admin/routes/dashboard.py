@@ -1313,45 +1313,72 @@ def get_admin_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSche
     
     # Find past events with missing attendance (for reminders)
     from src.schemas.models import Event, EventGroup, Group
+    from src.events.models import Attendance
 
     missing_attendance_reminders = []
 
     # Only check events from February 4, 2026 onwards (production launch date)
     cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
 
-    past_events = db.query(Event).join(EventGroup).filter(
-        Event.event_type == "class",
-        Event.end_datetime <= datetime.utcnow(),
-        Event.end_datetime >= cutoff_date,
-        Event.is_active == True
-    ).all()
-
-    for event in past_events:
-        event_group_ids = [eg.group_id for eg in event.event_groups]
-        expected_students = db.query(GroupStudent.student_id).filter(
-            GroupStudent.group_id.in_(event_group_ids)
-        ).all()
-        expected_count = len(expected_students)
-
-        attendance_count = AttendanceService.count_for_event(
-            db, event.id, statuses=["present", "late", "absent"]
+    past_event_ids_sq = (
+        db.query(Event.id)
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .filter(
+            Event.event_type == "class",
+            Event.end_datetime <= datetime.utcnow(),
+            Event.end_datetime >= cutoff_date,
+            Event.is_active == True,
         )
+        .distinct()
+        .subquery()
+    )
 
-        if attendance_count < expected_count:
-            group_name = ""
-            group_id = None
-            if event.event_groups:
-                group_name = event.event_groups[0].group.name if event.event_groups[0].group else ""
-                group_id = event.event_groups[0].group.id if event.event_groups[0].group else None
-            
+    expected_by_event = dict(
+        db.query(EventGroup.event_id, func.count(GroupStudent.student_id))
+        .join(GroupStudent, GroupStudent.group_id == EventGroup.group_id)
+        .filter(EventGroup.event_id.in_(past_event_ids_sq))
+        .group_by(EventGroup.event_id)
+        .all()
+    )
+
+    attendance_by_event = dict(
+        db.query(Attendance.event_id, func.count(Attendance.id))
+        .filter(
+            Attendance.event_id.in_(past_event_ids_sq),
+            Attendance.status.in_(["present", "late", "absent"]),
+        )
+        .group_by(Attendance.event_id)
+        .all()
+    )
+
+    flagged_ids = [
+        event_id
+        for event_id, expected_count in expected_by_event.items()
+        if attendance_by_event.get(event_id, 0) < expected_count
+    ]
+
+    if flagged_ids:
+        flagged_rows = (
+            db.query(Event.id, Event.title, Event.start_datetime, Group.id, Group.name)
+            .join(EventGroup, EventGroup.event_id == Event.id)
+            .join(Group, Group.id == EventGroup.group_id)
+            .filter(Event.id.in_(flagged_ids))
+            .order_by(Event.id, Group.id)
+            .all()
+        )
+        seen_event_ids = set()
+        for event_id, title, start_dt, group_id, group_name in flagged_rows:
+            if event_id in seen_event_ids:
+                continue
+            seen_event_ids.add(event_id)
             missing_attendance_reminders.append({
-                "event_id": event.id,
-                "title": event.title,
-                "group_name": group_name,
+                "event_id": event_id,
+                "title": title,
+                "group_name": group_name or "",
                 "group_id": group_id,
-                "event_date": event.start_datetime.isoformat(),
-                "expected_students": expected_count,
-                "recorded_students": attendance_count
+                "event_date": start_dt.isoformat(),
+                "expected_students": expected_by_event.get(event_id, 0),
+                "recorded_students": attendance_by_event.get(event_id, 0)
             })
     
     return DashboardStatsSchema(

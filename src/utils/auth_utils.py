@@ -3,6 +3,8 @@ import hmac
 import os
 import hashlib
 import logging
+import threading
+import time
 import jwt
 from datetime import datetime, timedelta
 from typing import Optional
@@ -101,6 +103,49 @@ def verify_token(token: str):
         return None
 
 
+# Successfully verified OIDC tokens are cached per worker so repeat requests with the
+# same bearer token skip the RS256 verify AND the external userinfo HTTP round-trip
+# (Zitadel access tokens carry no email, so without this every request pays an
+# external call). Entries expire with the token's own exp, capped at 10 minutes.
+# Only positive results are cached — rejections are always re-checked.
+_OIDC_PAYLOAD_CACHE_MAX = 2048
+_OIDC_PAYLOAD_CACHE_TTL_CAP = 600  # seconds
+_oidc_payload_cache: "dict[str, tuple[float, dict]]" = {}
+_oidc_payload_cache_lock = threading.Lock()
+
+
+def _oidc_cache_get(token: str):
+    key = hashlib.sha256(token.encode()).hexdigest()
+    now = time.time()
+    with _oidc_payload_cache_lock:
+        entry = _oidc_payload_cache.get(key)
+        if entry and entry[0] > now:
+            return dict(entry[1])
+        if entry:
+            _oidc_payload_cache.pop(key, None)
+    return None
+
+
+def _oidc_cache_put(token: str, payload: dict, token_exp: Optional[int]) -> None:
+    now = time.time()
+    expires_at = now + _OIDC_PAYLOAD_CACHE_TTL_CAP
+    if token_exp:
+        expires_at = min(expires_at, float(token_exp))
+    if expires_at <= now:
+        return
+    key = hashlib.sha256(token.encode()).hexdigest()
+    with _oidc_payload_cache_lock:
+        if len(_oidc_payload_cache) >= _OIDC_PAYLOAD_CACHE_MAX:
+            # Drop expired entries first; if still full, drop the soonest-to-expire.
+            expired = [k for k, (exp, _) in _oidc_payload_cache.items() if exp <= now]
+            for k in expired:
+                _oidc_payload_cache.pop(k, None)
+            while len(_oidc_payload_cache) >= _OIDC_PAYLOAD_CACHE_MAX:
+                oldest = min(_oidc_payload_cache, key=lambda k: _oidc_payload_cache[k][0])
+                _oidc_payload_cache.pop(oldest, None)
+        _oidc_payload_cache[key] = (expires_at, dict(payload))
+
+
 def verify_bearer_token(token: str):
     """Verify a bearer access token, accepting legacy HS256 OR a central-IdP token.
 
@@ -126,6 +171,11 @@ def verify_bearer_token(token: str):
         return None
     if not oidc_accept_enabled():
         return None
+
+    cached_payload = _oidc_cache_get(token)
+    if cached_payload is not None:
+        return cached_payload
+
     try:
         claims = verify_oidc_token(token)
     except Exception as exc:  # OidcVerifyError / OidcConfigError / anything → reject
@@ -161,13 +211,15 @@ def verify_bearer_token(token: str):
     if not email:
         _logger.warning("OIDC token verified but no trusted email (token or userinfo); cannot map to an LMS user")
         return None
-    return {
+    payload = {
         "sub": email,
         "email": email,
         "oidc": True,
         "central_auth_user_id": claims.get("sub"),
         "email_verified": email_verified,
     }
+    _oidc_cache_put(token, payload, claims.get("exp"))
+    return payload
 
 
 # Password reset tokens are short-lived signed JWTs (no DB column needed). The `pv`
