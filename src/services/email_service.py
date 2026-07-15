@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Load configuration from environment variables
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "noreply@mail.mastereducation.kz")
-EMAIL_SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "MasterED Platform")
+EMAIL_SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "Master Education")
 DEFAULT_LMS_BASE_URL = "https://lms.mastereducation.kz"
 
 
