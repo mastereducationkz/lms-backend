@@ -1304,6 +1304,9 @@ def update_group(
     if group_data.description is not None:
         group.description = group_data.description
     if "teacher_id" in patch:
+        if group.teacher_id != patch["teacher_id"]:
+            from src.services.schedule_reconciliation import sync_future_lesson_teachers
+            sync_future_lesson_teachers(db, group.id, patch["teacher_id"])
         group.teacher_id = patch["teacher_id"]
     if "curator_id" in patch:
         group.curator_id = patch["curator_id"]
@@ -1834,9 +1837,13 @@ def assign_teacher_to_group(
     if not teacher:
         raise HTTPException(status_code=400, detail="Teacher not found")
     
+    teacher_changed = group.teacher_id != teacher_data.teacher_id
     group.teacher_id = teacher_data.teacher_id
+    if teacher_changed:
+        from src.services.schedule_reconciliation import sync_future_lesson_teachers
+        sync_future_lesson_teachers(db, group.id, teacher_data.teacher_id)
     db.commit()
-    
+
     return {"detail": f"Teacher '{teacher.name}' assigned to group '{group.name}'"}
 
 

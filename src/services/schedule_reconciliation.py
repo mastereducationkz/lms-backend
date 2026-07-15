@@ -19,6 +19,48 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
+def sync_future_lesson_teachers(db: Session, group_id: int, new_teacher_id: Optional[int]) -> int:
+    """Re-point FUTURE active class lessons of a group at its (new) teacher.
+
+    Group teacher reassignment historically updated only ``groups.teacher_id``,
+    leaving every already-generated event at the old teacher — the new teacher
+    then saw "Substituted by <old>" on all lessons and lost the group in their
+    salary breakdown. Past events are salary history and are never touched;
+    events with an APPROVED substitution request keep their substitute.
+
+    Returns the number of events updated.
+    """
+    from sqlalchemy import exists as sa_exists
+    from src.events.models import Event, EventGroup
+    from src.lesson_requests.models import LessonRequest
+
+    now_utc = datetime.utcnow()
+    approved_sub = sa_exists().where(
+        (LessonRequest.event_id == Event.id)
+        & (LessonRequest.request_type == "substitution")
+        & (LessonRequest.status == "approved")
+    )
+    updated = (
+        db.query(Event)
+        .filter(
+            Event.id.in_(
+                db.query(EventGroup.event_id).filter(EventGroup.group_id == group_id)
+            ),
+            Event.event_type == "class",
+            Event.is_active == True,
+            Event.start_datetime >= now_utc,
+            ~approved_sub,
+        )
+        .update({Event.teacher_id: new_teacher_id}, synchronize_session=False)
+    )
+    if updated:
+        logger.info(
+            "sync_future_lesson_teachers group_id=%s new_teacher_id=%s updated=%s",
+            group_id, new_teacher_id, updated,
+        )
+    return updated
+
+
 def reconcile_group_schedule(
     db: Session,
     group_id: int,
