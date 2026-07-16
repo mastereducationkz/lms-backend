@@ -4,8 +4,19 @@ Confirms the flag-off no-op guarantee (OIDC is never attempted unless OIDC_ACCEP
 is set, and a legacy HS256 token always wins) and the OIDC mapping (verified IdP
 token -> {sub: lower(email)}) so the existing email-based user lookup works."""
 
+import pytest
+
 from src.utils import auth_utils
 from src.utils import oidc
+
+
+@pytest.fixture(autouse=True)
+def _clear_oidc_payload_cache():
+    # Tests reuse the same token strings; the per-worker positive-result cache
+    # would otherwise leak an accepted payload into a rejection test.
+    auth_utils._oidc_payload_cache.clear()
+    yield
+    auth_utils._oidc_payload_cache.clear()
 
 
 def test_hs256_token_returned_unchanged(monkeypatch):

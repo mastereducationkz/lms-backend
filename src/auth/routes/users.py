@@ -7,7 +7,8 @@ from datetime import datetime
 from src.auth.user_schema import build_user_schema_response
 from src.schemas.models import UserInDB, UserSchema, Group, GroupStudent, GroupSchema
 from src.config import get_db
-from src.utils.auth_utils import verify_token
+from src.utils.auth_utils import verify_bearer_token
+from src.auth.user_resolve import resolve_user_by_payload
 from fastapi.security import OAuth2PasswordBearer
 
 router = APIRouter()
@@ -16,11 +17,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
-    payload = verify_token(token)
+    # verify_bearer_token (not verify_token): OIDC sessions carry Zitadel RS256
+    # tokens that the HS256-only check rejects with 401.
+    payload = verify_bearer_token(token)
     if payload is None or "sub" not in payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    user_email = payload["sub"]
-    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    user = resolve_user_by_payload(db, payload)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -33,11 +35,10 @@ class UserUpdate(BaseModel):
 
 @router.get("/users/{user_id}", response_model=UserSchema)
 def get_user_by_id(user_id: int, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
-    payload = verify_token(token)
+    payload = verify_bearer_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    user_email = payload["sub"]
-    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    user = resolve_user_by_payload(db, payload)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user.id != user_id:

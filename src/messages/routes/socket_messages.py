@@ -12,7 +12,7 @@ from src.schemas.models import (
     Message, UserInDB, Course, Enrollment,
     MessageSchema, SendMessageSchema
 )
-from src.routes.auth import verify_token
+from src.utils.auth_utils import verify_bearer_token
 from src.routes.messages import can_communicate_with_user, create_message_notification
 from src.schemas.models import GroupStudent
 from src.utils.push_notifications import send_message_push_to_user
@@ -44,20 +44,42 @@ sio = socketio.AsyncServer(
 
 USER_ROOM_PREFIX = "user:"
 
+def _user_id_from_token(token: str) -> int | None:
+    """Resolve the LMS user id from a bearer token (legacy HS256 or OIDC).
+
+    HS256 login tokens carry ``user_id`` directly; OIDC-normalized payloads only
+    carry ``sub`` (the email), so those fall back to a DB lookup.
+    """
+    payload = verify_bearer_token(token)
+    if not payload:
+        return None
+    uid = payload.get('user_id')
+    if uid:
+        try:
+            return int(uid)
+        except (TypeError, ValueError):
+            pass
+    email = (payload.get('sub') or '').strip()
+    if not email:
+        return None
+    from sqlalchemy import func
+    from src.config import SessionLocal
+    db = SessionLocal()
+    try:
+        user = db.query(UserInDB.id).filter(func.lower(UserInDB.email) == email.lower()).first()
+        return user[0] if user else None
+    finally:
+        db.close()
+
 def _get_user_id_from_environ(environ, auth=None) -> int | None:
     # Try Socket.IO auth payload first
     if auth and isinstance(auth, dict):
         token = auth.get('token')
         if token:
-            payload = verify_token(token)
-            if payload:
-                uid = payload.get('user_id')
-                if uid:
-                    try:
-                        return int(uid)
-                    except (TypeError, ValueError):
-                        pass
-    
+            uid = _user_id_from_token(token)
+            if uid:
+                return uid
+
     # Try Authorization header
     headers = environ.get('asgi.scope', {}).get('headers') or []
     token = None
@@ -82,16 +104,7 @@ def _get_user_id_from_environ(environ, auth=None) -> int | None:
                     break
     if not token:
         return None
-    payload = verify_token(token)
-    if not payload:
-        return None
-    uid = payload.get('user_id')
-    if not uid:
-        return None
-    try:
-        return int(uid)
-    except (TypeError, ValueError):
-        return None
+    return _user_id_from_token(token)
 
 def _resolve_user_id(session_data, db: Session) -> int | None:
     raw = session_data.get('user_id') if session_data else None
