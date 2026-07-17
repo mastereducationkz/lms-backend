@@ -773,7 +773,8 @@ async def get_weekly_lessons_with_hw_status(
             "lesson_number": lesson_num,
             "event_id": event.id,
             "title": event.title,
-            "start_datetime": event.start_datetime,
+            # Stored naive-UTC; the "Z" tells browsers to convert to local tz
+            "start_datetime": event.start_datetime.isoformat() + "Z",
             "homework": {
                 "id": hw.id,
                 "title": hw.title,
@@ -1104,8 +1105,8 @@ async def get_weekly_lessons_with_hw_status(
                         "is_graded": sub.is_graded,
                         "submission_id": sub.id,
                         "feedback": sub.feedback,
-                        "submitted_at": sub.submitted_at.isoformat() if sub.submitted_at else None,
-                        "graded_at": sub.graded_at.isoformat() if sub.graded_at else None,
+                        "submitted_at": sub.submitted_at.isoformat() + "Z" if sub.submitted_at else None,
+                        "graded_at": sub.graded_at.isoformat() + "Z" if sub.graded_at else None,
                     }
                 else:
                     hw_status = {"submitted": False, "score": None}
@@ -1239,7 +1240,8 @@ def get_group_full_attendance_matrix(
             "event_id": event.id,
             "title": event.title,
             "topic": getattr(event, "topic", None),
-            "start_datetime": event.start_datetime
+            # Stored naive-UTC; the "Z" tells browsers to convert to local tz
+            "start_datetime": event.start_datetime.isoformat() + "Z"
         })
 
     if not all_events:
@@ -1435,7 +1437,7 @@ async def get_weekly_lessons_with_hw_status(
                 "lesson_number": idx + 1,
                 "event_id": event.id,
                 "title": event.title,
-                "start_datetime": event.start_datetime.isoformat(),
+                "start_datetime": event.start_datetime.isoformat() + "Z",
                 "homework": {
                     "id": assignment.id,
                     "title": assignment.title
