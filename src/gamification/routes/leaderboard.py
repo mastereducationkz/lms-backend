@@ -776,7 +776,8 @@ async def get_weekly_lessons_with_hw_status(
             "start_datetime": event.start_datetime,
             "homework": {
                 "id": hw.id,
-                "title": hw.title
+                "title": hw.title,
+                "max_score": hw.max_score
             } if hw else None
         })
         
