@@ -35,9 +35,12 @@ jobs:
           mkdir -p backups logs
           
           echo "🐳 Building and starting Docker containers..."
-          docker compose pull || true
+          # No `compose pull`: it fetches new upstream digests for postgres/redis
+          # and `up -d` then RECREATES the database mid-deploy (2026-07-17 this
+          # caused a ~2 min full outage). Infra containers are updated manually;
+          # a deploy only rebuilds and restarts the app services.
           docker compose build
-          docker compose up -d
+          docker compose up -d backend scheduler
           
           echo "✅ Backend deployment completed!"
 
