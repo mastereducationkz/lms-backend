@@ -17,7 +17,8 @@ is revoked automatically.
 - Sales sets a **custom deadline** (form pre-fills now + 24h) and can edit it any time — extend, shorten, or set to the past (which is an immediate revoke).
 - After expiry, **login keeps working but content locks**; the prospect sees a "trial ended — contact us" screen. This preserves an upsell surface.
 - Trial users must be **distinguishable from real students** everywhere (lists, analytics, sync, curator workflows).
-- Prospects get the **full student experience** while the trial is active (normal dashboard and sidebar; empty states where they have no data) — not a stripped-down shell.
+- Prospects get the **full student experience** while the trial is active (normal dashboard and sidebar) — not a stripped-down shell. Dashboard widgets that would be empty for a prospect show **clearly-labeled placeholder/sample content** instead of empty states, so the platform demos well.
+- Trial users never enter the Assignment-Zero funnel.
 
 **Non-goals:** public/unauthenticated preview, self-serve signup, CRM UI, payment/conversion
 automation, notifying sales on expiry (future).
@@ -118,7 +119,7 @@ it survives conversion.
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /trials` | One-shot grant. Body: `email`, `name`, `course_id`, `lesson_ids`, `expires_at`, `prospect_note?`, `send_invite=true`. Creates the user (`role="student"`, `is_trial=true`, generated password via existing `generate_password()`, generated `student_id`, Assignment-Zero bypass per §6.2) **or** reuses an existing **trial** user with the same email (new course grant). Email belongs to a real (non-trial) user → **409**, never converts a real account. Existing trial user already has an active grant on that course → **409** with "edit the existing grant" hint. Sends credentials + deadline via the existing invite-email machinery (`send_invite_email`), with the deadline stated. Response includes `generated_password` when a user was created (mirrors `POST /admin/users/single`). |
+| `POST /trials` | One-shot grant. Body: `email`, `name`, `course_id`, `lesson_ids`, `expires_at`, `prospect_note?`, `send_invite=true`. Creates the user (`role="student"`, `is_trial=true`, generated password via existing `generate_password()`, generated `student_id`, and `assignment_zero_completed=true` so the Assignment-Zero funnel never triggers — no frontend gate change needed) **or** reuses an existing **trial** user with the same email (new course grant). Email belongs to a real (non-trial) user → **409**, never converts a real account. Existing trial user already has an active grant on that course → **409** with "edit the existing grant" hint. Sends credentials + deadline via the existing invite-email machinery (`send_invite_email`), with the deadline stated. Response includes `generated_password` when a user was created (mirrors `POST /admin/users/single`). |
 | `GET /trials` | Paginated list with computed status, filters (`status`, `course_id`), search by email/name. |
 | `PATCH /trials/{id}` | Edit `expires_at`, `lesson_ids` (validated against course), `prospect_note`. Takes effect on the prospect's next request. |
 | `POST /trials/{id}/revoke` | `status="revoked"`, `revoked_at=now()`. Immediate. |
@@ -149,10 +150,15 @@ lesson tree picker):
   unchanged.
 - `/auth/me` payload gains `is_trial` and, when an active grant exists, `trial_expires_at`
   (earliest active deadline).
-- **Full student experience**: normal dashboard, sidebar, and student pages. Surfaces where the
-  prospect has no data show their existing empty states. Two trial-specific behaviors only:
-  - `ProtectedRoute.tsx`: `is_trial` users bypass the Assignment-Zero forced redirect (same
-    pattern as the existing `special_group_only_student` bypass).
+- **Full student experience**: normal dashboard, sidebar, and student pages. No Assignment-Zero
+  funnel (handled at creation time, §5 — no `ProtectedRoute` change needed). Trial-specific
+  behaviors:
+  - **Placeholder dashboard content**: when `user.is_trial`, `StudentDashboard` widgets that
+    would otherwise be empty (assignments, events, streak/points, leaderboard, etc.) render
+    curated static sample data instead, each clearly marked with a "Sample data" badge so the
+    prospect knows it's illustrative. Frontend-only static content — no backend fake data, no
+    effect on real students. The trial course and the prospect's real progress in it are shown
+    as-is (never placeholder).
   - A slim persistent banner while a grant is active: "Trial access — ends in 21h 14m"
     (countdown from `trial_expires_at`).
 - **After expiry/revoke** (`is_trial` and no active grant): protected pages render a full-screen
@@ -207,7 +213,8 @@ Backend pytest (existing savepoint-fixture setup, `lms_test` DB):
   behavior unchanged (regression guard); modules response marks only allowlisted lessons
   accessible.
 - **Grant API**: role gating (student/curator/teacher → 403); create-user vs reuse-trial-user
-  vs real-user 409; duplicate-active 409; PATCH deadline takes effect (before/after read);
+  vs real-user 409; duplicate-active 409; created user has `is_trial=true` and
+  `assignment_zero_completed=true`; PATCH deadline takes effect (before/after read);
   revoke immediate; convert clears `is_trial` and sets status.
 - **Job**: flips `active → expired` only past deadline.
 - Frontend: `npm run build` type-checks (`strict`); manual QA of the admin page + prospect flow.
