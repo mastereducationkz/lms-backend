@@ -30,7 +30,7 @@ def _as_utc_naive(dt: datetime) -> datetime:
 def grant_is_active(grant, now: Optional[datetime] = None) -> bool:
     if grant is None or grant.status != TRIAL_ACTIVE:
         return False
-    ref = now or utcnow()
+    ref = _as_utc_naive(now) if now is not None else utcnow()
     return _as_utc_naive(grant.expires_at) > ref
 
 

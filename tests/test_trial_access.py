@@ -53,6 +53,17 @@ def test_grant_is_active_handles_aware_expires_at():
     assert grant_is_active(g) is True
 
 
+def test_grant_is_active_accepts_aware_now():
+    from src.trials.services import grant_is_active
+    assert grant_is_active(_grant(), now=datetime.now(timezone.utc)) is True
+
+
+def test_grant_is_active_false_at_exact_expiry_instant():
+    from src.trials.services import grant_is_active
+    g = _grant()
+    assert grant_is_active(g, now=g.expires_at) is False
+
+
 def test_lesson_in_grant_coerces_types():
     from src.trials.services import lesson_in_grant
     g = _grant(lesson_ids=["3", 4])
