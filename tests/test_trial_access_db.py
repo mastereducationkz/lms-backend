@@ -171,7 +171,7 @@ def test_enforcement_matrix_db(db):
 # --- 2. route-level state machine (Task 4 review carry-forward) ----------------
 
 def test_create_trial_duplicate_active_returns_409(db):
-    from src.trials.routes.trials import create_trial
+    from src.trials.routes.trials import create_trial, _DUPLICATE_ACTIVE_DETAIL
     from src.trials.schemas import TrialCreateRequest
 
     admin = _admin(db)
@@ -185,6 +185,7 @@ def test_create_trial_duplicate_active_returns_409(db):
     with pytest.raises(HTTPException) as exc:
         create_trial(body, background_tasks=BackgroundTasks(), db=db, current_user=admin)
     assert exc.value.status_code == 409
+    assert exc.value.detail == _DUPLICATE_ACTIVE_DETAIL
 
 
 def test_create_trial_stale_active_window_flips_and_succeeds(db):
@@ -224,7 +225,7 @@ def test_update_trial_reactivation_conflict_returns_409(db):
     """Extending an expired grant's deadline while another active grant already
     covers the same (user, course) pair must be rejected, not silently allowed to
     collide with the partial unique index."""
-    from src.trials.routes.trials import update_trial
+    from src.trials.routes.trials import update_trial, _REACTIVATE_CONFLICT_DETAIL
     from src.trials.schemas import TrialUpdateRequest
     from src.trials.models import TRIAL_ACTIVE, TRIAL_EXPIRED
 
@@ -238,6 +239,7 @@ def test_update_trial_reactivation_conflict_returns_409(db):
     with pytest.raises(HTTPException) as exc:
         update_trial(expired.id, body, db=db, current_user=admin)
     assert exc.value.status_code == 409
+    assert exc.value.detail == _REACTIVATE_CONFLICT_DETAIL
 
     db.refresh(expired)
     assert expired.status == TRIAL_EXPIRED  # rejected before any status flip
@@ -280,6 +282,7 @@ def test_revoke_after_convert_returns_409(db):
     with pytest.raises(HTTPException) as exc:
         revoke_trial(g.id, db=db, current_user=admin)
     assert exc.value.status_code == 409
+    assert "converted" in exc.value.detail
 
 
 def test_convert_after_revoke_returns_409(db):
@@ -298,6 +301,7 @@ def test_convert_after_revoke_returns_409(db):
     with pytest.raises(HTTPException) as exc:
         convert_trial(g.id, db=db, current_user=admin)
     assert exc.value.status_code == 409
+    assert "revoked" in exc.value.detail
 
 
 def test_create_trial_keeps_password_when_another_active_grant_exists(db):
