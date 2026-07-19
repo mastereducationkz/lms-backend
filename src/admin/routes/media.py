@@ -13,9 +13,24 @@ from src.schemas.models import UserInDB, LessonMaterial, Lesson, Module, Course,
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_teacher_or_admin
 from src.services import storage_service
+from src.trials.services import trial_lesson_access
 from pydantic import BaseModel
 
 router = APIRouter()
+
+
+def _media_trial_gate(db, current_user, lesson_id):
+    """403 unless the lesson is in the trial user's active allowlist. No-op for non-trial users.
+
+    Mirrors src.courses.routes.courses._trial_hard_gate. If lesson_id can't be
+    resolved for a trial user, fail closed (403) rather than risk a leak.
+    """
+    if current_user.role == "student" and getattr(current_user, "is_trial", False):
+        if not lesson_id:
+            raise HTTPException(status_code=403, detail="Not included in your trial")
+        allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=reason or "Not included in your trial")
 
 # =============================================================================
 # MEDIA SCHEMAS
@@ -489,7 +504,9 @@ def get_material_info(
     from src.utils.permissions import check_course_access
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this material")
-    
+
+    _media_trial_gate(db, current_user, material.lesson_id)
+
     return {
         "material_id": material.id,
         "title": material.title,
@@ -869,11 +886,13 @@ def download_file(
         
         lesson = db.query(Lesson).filter(Lesson.id == material.lesson_id).first()
         module = db.query(Module).filter(Module.id == lesson.module_id).first()
-        
+
         from src.utils.permissions import check_course_access
         if not check_course_access(module.course_id, current_user, db):
             raise HTTPException(status_code=403, detail="Access denied")
-    
+
+        _media_trial_gate(db, current_user, material.lesson_id)
+
     if storage_service.use_s3():
         return RedirectResponse(storage_service.url_for(key), status_code=307)
     return FileResponse(f"uploads/{key}", filename=filename)

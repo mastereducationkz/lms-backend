@@ -138,6 +138,31 @@ def test_trial_hard_gate_blocks_and_passes(monkeypatch):
     courses_routes._trial_hard_gate(None, real_student, 1)  # no-op for real students
 
 
+def test_media_trial_gate_blocks_and_passes(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from src.admin.routes import media
+
+    trial_user = SimpleNamespace(id=7, role="student", is_trial=True)
+    monkeypatch.setattr(media, "trial_lesson_access", lambda db, uid, lid: (False, "Your trial has ended"))
+    with pytest.raises(HTTPException) as exc:
+        media._media_trial_gate(None, trial_user, 1)
+    assert exc.value.status_code == 403
+
+    monkeypatch.setattr(media, "trial_lesson_access", lambda db, uid, lid: (True, None))
+    media._media_trial_gate(None, trial_user, 1)  # no raise
+
+    real_student = SimpleNamespace(id=8, role="student", is_trial=False)
+    monkeypatch.setattr(media, "trial_lesson_access", lambda db, uid, lid: (False, "x"))
+    media._media_trial_gate(None, real_student, 1)  # no-op for real students
+
+    # Fails closed when a trial user's material can't be resolved to a lesson
+    monkeypatch.setattr(media, "trial_lesson_access", lambda db, uid, lid: (True, None))
+    with pytest.raises(HTTPException) as exc:
+        media._media_trial_gate(None, trial_user, None)
+    assert exc.value.status_code == 403
+
+
 def test_expire_stale_trials_for_targets_only_stale_active_pair():
     from unittest.mock import MagicMock
     from src.trials import services
