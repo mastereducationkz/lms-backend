@@ -82,3 +82,57 @@ def test_evaluate_trial_lesson_access_matrix():
     assert ok is False and reason == "Your trial has ended"
     ok, reason = evaluate_trial_lesson_access(None, 1)
     assert ok is False and reason == "You do not have access to this course"
+
+
+def test_cached_decorator_bypasses_trial_users():
+    from src.services import cache_service
+
+    calls = {"n": 0}
+
+    @cache_service.cached(namespace="t:x", ttl=60)
+    def handler(current_user=None):
+        calls["n"] += 1
+        return {"n": calls["n"]}
+
+    trial_user = SimpleNamespace(id=1, role="student", is_trial=True)
+    # Even with a client present, trial users must never be served from cache.
+    # _cache_key returning None guarantees the wrapped function runs every time.
+    key = handler.__wrapped__ is not None  # decorator applied
+    assert key
+    r1 = handler(current_user=trial_user)
+    r2 = handler(current_user=trial_user)
+    assert (r1["n"], r2["n"]) == (1, 2)
+
+
+def test_check_course_access_trial_student(monkeypatch):
+    from src.utils import permissions
+
+    trial_user = SimpleNamespace(id=7, role="student", is_trial=True)
+    monkeypatch.setattr(
+        "src.trials.services.get_active_trial", lambda db, uid, cid: _grant() if cid == 10 else None
+    )
+    # Course existence check happens before role branches:
+    fake_db = SimpleNamespace(query=lambda model: SimpleNamespace(
+        filter=lambda *a, **k: SimpleNamespace(first=lambda: object())
+    ))
+    assert permissions.check_course_access(10, trial_user, fake_db) is True
+    assert permissions.check_course_access(11, trial_user, fake_db) is False
+
+
+def test_trial_hard_gate_blocks_and_passes(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from src.courses.routes import courses as courses_routes
+
+    trial_user = SimpleNamespace(id=7, role="student", is_trial=True)
+    monkeypatch.setattr(courses_routes, "trial_lesson_access", lambda db, uid, lid: (False, "Your trial has ended"))
+    with pytest.raises(HTTPException) as exc:
+        courses_routes._trial_hard_gate(None, trial_user, 1)
+    assert exc.value.status_code == 403
+
+    monkeypatch.setattr(courses_routes, "trial_lesson_access", lambda db, uid, lid: (True, None))
+    courses_routes._trial_hard_gate(None, trial_user, 1)  # no raise
+
+    real_student = SimpleNamespace(id=8, role="student", is_trial=False)
+    monkeypatch.setattr(courses_routes, "trial_lesson_access", lambda db, uid, lid: (False, "x"))
+    courses_routes._trial_hard_gate(None, real_student, 1)  # no-op for real students

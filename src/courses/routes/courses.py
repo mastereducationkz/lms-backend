@@ -32,8 +32,17 @@ from src.services import storage_service
 from src.services import video_ingest
 from src.services.cache_service import cached
 from src.utils.duration_calculator import update_course_duration
+from src.trials.services import trial_lesson_access, get_active_trial as get_active_trial_grant
 
 router = APIRouter()
+
+
+def _trial_hard_gate(db, current_user, lesson_id: int):
+    """403 unless the lesson is in the trial user's active allowlist. No-op for non-trial users."""
+    if current_user.role == "student" and getattr(current_user, "is_trial", False):
+        allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=reason or "Not included in your trial")
 
 # =============================================================================
 # COURSE MANAGEMENT
@@ -57,9 +66,14 @@ def get_courses(
     # Base query – role-specific filters applied below
     query = db.query(Course)
     
-    if current_user.role == "student":
+    if current_user.role == "student" and getattr(current_user, "is_trial", False):
+        from src.trials.services import trial_course_ids
+        ids = trial_course_ids(db, current_user.id)
+        query = query.filter(Course.id.in_(ids)) if ids else query.filter(Course.id == -1)
+
+    elif current_user.role == "student":
         # Students see courses they are enrolled in OR courses their group has access to
-        
+
         # Get enrolled course IDs
         enrolled_course_ids = db.query(Enrollment.course_id).filter(
             Enrollment.user_id == current_user.id,
@@ -799,7 +813,14 @@ def get_course_modules(
                 module_dict["is_completed"] = False
         
         modules_data.append(module_dict)
-    
+
+    if current_user.role == "student" and getattr(current_user, "is_trial", False):
+        grant = get_active_trial_grant(db, current_user.id, course_id)
+        allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
+        for _mod in modules_data:
+            for _les in (_mod.get("lessons") or []):
+                _les["is_accessible"] = _les["id"] in allowed_ids
+
     return modules_data
 
 @router.post("/{course_id}/modules", response_model=ModuleSchema)
@@ -1108,7 +1129,8 @@ def get_lesson(
     # Check course access
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
-    
+    _trial_hard_gate(db, current_user, lesson_id)
+
     # Efficiently count steps without loading them
     total_steps = db.query(Step).filter(Step.lesson_id == lesson_id).count()
     
@@ -1151,6 +1173,12 @@ def check_lesson_access(
     # Teachers and admins can access any lesson
     if current_user.role != "student":
         return {"accessible": True}
+
+    if getattr(current_user, "is_trial", False):
+        allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
+        if allowed:
+            return {"accessible": True}
+        return {"accessible": False, "reason": reason}
 
     student_group_ids_list = [r[0] for r in db.query(GroupStudent.group_id).filter(
         GroupStudent.student_id == current_user.id
@@ -1497,7 +1525,8 @@ def get_lesson_steps(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
-    
+    _trial_hard_gate(db, current_user, lesson_id)
+
     if include_content:
         steps = db.query(Step).filter(
             Step.lesson_id == lesson_id
@@ -1622,7 +1651,8 @@ def get_step(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this step")
-    
+    _trial_hard_gate(db, current_user, step.lesson_id)
+
     return StepSchema.from_orm(step)
 
 @router.put("/steps/{step_id}", response_model=StepSchema)
@@ -1928,7 +1958,8 @@ def get_lesson_materials(
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied")
-    
+    _trial_hard_gate(db, current_user, lesson_id)
+
     materials = db.query(LessonMaterial).filter(
         LessonMaterial.lesson_id == lesson_id
     ).all()

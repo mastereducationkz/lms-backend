@@ -219,6 +219,8 @@ def cached(
             except TypeError:
                 return None
             user = bound.arguments.get(user_arg)
+            if user is not None and getattr(user, "is_trial", False):
+                return None  # trial users: never cache — expiry must be exact per-request
             user_id = getattr(user, "id", None) if user is not None else None
             user_role = getattr(user, "role", None) if user is not None else None
             key_parts = [
