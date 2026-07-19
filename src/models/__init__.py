@@ -27,6 +27,7 @@ from src.content.models import FavoriteFlashcard, QuestionErrorReport
 from src.curator.models import CuratorTaskTemplate, CuratorTaskInstance
 from src.lesson_requests.models import LessonRequest
 from src.parents.models import ParentStudent
+from src.trials.models import TrialAccess
 
 __all__ = [
     "Base",
@@ -47,4 +48,5 @@ __all__ = [
     "CuratorTaskTemplate", "CuratorTaskInstance",
     "LessonRequest",
     "ParentStudent",
+    "TrialAccess",
 ]

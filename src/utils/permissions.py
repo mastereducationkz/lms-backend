@@ -110,6 +110,10 @@ def check_course_access(course_id: int, user: UserInDB, db: Session) -> bool:
         return head_teacher_link is not None
 
     elif user.role == "student":
+        if getattr(user, "is_trial", False):
+            from src.trials.services import get_active_trial
+            return get_active_trial(db, user.id, course_id) is not None
+
         # Students can access if their group has access to the course
         from src.schemas.models import GroupStudent, CourseGroupAccess
         

@@ -1286,7 +1286,7 @@ def get_all_students_analytics(
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Базовый запрос студентов
-    students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True)
+    students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True, UserInDB.is_trial == False)
     
     # Фильтрация по ролям
     if current_user.role == "teacher":
@@ -2441,7 +2441,7 @@ def export_all_students_report(
     
     try:
         # Получаем данные всех студентов (дублируем логику из get_all_students_analytics)
-        students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True)
+        students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True, UserInDB.is_trial == False)
         
         # Фильтрация по ролям
         if current_user.role == "teacher":
@@ -3213,18 +3213,20 @@ def export_analytics_to_excel(
             ).filter(
                 Module.course_id == course_id,
                 UserInDB.role == "student",
-                UserInDB.is_active == True
+                UserInDB.is_active == True,
+                UserInDB.is_trial == False
             ).distinct().all()
-            
+
             enrolled_students_ids = db.query(Enrollment.user_id).filter(
                 Enrollment.course_id == course_id,
                 Enrollment.is_active == True
             ).subquery()
-            
+
             enrolled_no_progress = db.query(UserInDB).filter(
                 UserInDB.id.in_(enrolled_students_ids),
                 UserInDB.role == "student",
-                UserInDB.is_active == True
+                UserInDB.is_active == True,
+                UserInDB.is_trial == False
             ).all()
             
             enrolled_students_set = {s.id: s for s in students_with_progress}
@@ -3740,7 +3742,7 @@ def get_course_progress_history(
         raise HTTPException(status_code=403, detail="Access denied")
 
     # 1. Determine the set of student IDs to consider
-    student_query = db.query(UserInDB.id).filter(UserInDB.role == "student")
+    student_query = db.query(UserInDB.id).filter(UserInDB.role == "student", UserInDB.is_trial == False)
     
     if group_id:
         # Filter students by group

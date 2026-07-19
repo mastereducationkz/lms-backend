@@ -21,6 +21,11 @@ from src.schemas.models import (
 )
 
 
+def _trial_flag(db: Session, user_id: int) -> bool:
+    row = db.query(UserInDB.is_trial).filter(UserInDB.id == user_id).first()
+    return bool(row and row[0])
+
+
 def get_user_courses(
     user_id: int,
     db: Session,
@@ -28,18 +33,28 @@ def get_user_courses(
 ) -> List[Course]:
     """
     Get all courses accessible by a user via enrollment or group access.
-    
+
     This is the canonical function for determining course access and should be
     used throughout the codebase instead of duplicating this logic.
-    
+
     Args:
         user_id: The user's ID
         db: Database session
         include_inactive: If True, include inactive courses
-        
+
     Returns:
         List of Course objects the user can access
     """
+    if _trial_flag(db, user_id):
+        from src.trials.services import trial_course_ids
+        ids = trial_course_ids(db, user_id)
+        if not ids:
+            return []
+        query = db.query(Course).filter(Course.id.in_(ids))
+        if not include_inactive:
+            query = query.filter(Course.is_active == True)
+        return query.all()
+
     # Get courses via direct enrollment
     enrollment_course_ids = db.query(Enrollment.course_id).filter(
         Enrollment.user_id == user_id,
@@ -76,6 +91,10 @@ def get_user_course_ids(user_id: int, db: Session) -> List[int]:
     
     Lightweight version of get_user_courses when you only need IDs.
     """
+    if _trial_flag(db, user_id):
+        from src.trials.services import trial_course_ids
+        return trial_course_ids(db, user_id)
+
     # Via enrollment
     enrollment_ids = set(
         r[0] for r in db.query(Enrollment.course_id).filter(
@@ -117,6 +136,10 @@ def check_user_course_access(
     Returns:
         True if user has access, False otherwise
     """
+    if _trial_flag(db, user_id):
+        from src.trials.services import get_active_trial
+        return get_active_trial(db, user_id, course_id) is not None
+
     # Check enrollment
     has_enrollment = db.query(Enrollment).filter(
         Enrollment.user_id == user_id,

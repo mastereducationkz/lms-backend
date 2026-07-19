@@ -34,6 +34,9 @@ class UserSchema(BaseModel):
     course_ids: Optional[List[int]] = []
     created_at: Optional[datetime] = None
     is_analytics_hidden: Optional[bool] = False
+    is_trial: Optional[bool] = False
+    # Computed on /auth/me for trial users: earliest active grant deadline (None = no active grant)
+    trial_expires_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

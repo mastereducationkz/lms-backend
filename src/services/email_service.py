@@ -253,10 +253,24 @@ def _para(ru: str, en: str = "") -> str:
     return f'<p style="margin:0 0 8px;font-size:15px;">{ru}</p>{en_html}'
 
 
-def send_invite_email(to_email: str, name: str, login_email: str, password: str) -> Optional[dict]:
-    """Welcome/invite email with platform link and login credentials (students)."""
+def send_invite_email(
+    to_email: str, name: str, login_email: str, password: str,
+    access_until: Optional[str] = None,
+) -> Optional[dict]:
+    """Welcome/invite email with platform link and login credentials (students).
+
+    access_until, when given, renders one extra line stating the trial-access
+    deadline (used for trial invites; regular student invites omit it).
+    """
     base_url = _get_lms_base_url()
     greeting = name or "студент"
+    trial_notice = (
+        _para(
+            f"Ваш пробный доступ действует до {access_until}.",
+            f"Your trial access is available until {access_until}.",
+        )
+        if access_until else ""
+    )
     inner = (
         f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте, <strong>{greeting}</strong>!</p>'
         + _para(
@@ -268,6 +282,7 @@ def send_invite_email(to_email: str, name: str, login_email: str, password: str)
             "“Continue with Master Education” button. Your credentials:",
         )
         + _credentials_block(login_email, password)
+        + trial_notice
         + f'<div style="margin-bottom:24px;">{_button(base_url, "Войти / Sign in")}</div>'
         + _para(
             "На странице входа нажмите «Продолжить с Master Education» и войдите с данными выше. "
@@ -276,6 +291,7 @@ def send_invite_email(to_email: str, name: str, login_email: str, password: str)
             "details above. We recommend changing your password after your first sign-in.",
         )
     )
+    trial_text = f"Пробный доступ до / Trial access until: {access_until}\n" if access_until else ""
     return get_email_service().send_email(
         to_emails=[to_email],
         subject="Ваш аккаунт Master Education готов / Your Master Education account is ready",
@@ -284,6 +300,7 @@ def send_invite_email(to_email: str, name: str, login_email: str, password: str)
             f"Здравствуйте, {greeting}! Для вас создан единый аккаунт Master Education — "
             "он работает во всех платформах через «Продолжить с Master Education».\n"
             f"Логин/Login: {login_email}\nПароль/Password: {password}\n"
+            f"{trial_text}"
             f"Войти / Sign in: {base_url}\n"
         ),
     )

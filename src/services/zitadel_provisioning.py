@@ -340,6 +340,7 @@ def bulk_import(db, *, roles: list[str] | None = None, limit: int | None = None,
         .filter(UserInDB.is_active.is_(True))
         .filter(UserInDB.email.isnot(None))
         .filter((UserInDB.central_auth_user_id.is_(None)) | (UserInDB.central_auth_user_id == ""))
+        .filter(UserInDB.is_trial.is_(False))
         .order_by(UserInDB.id)
     )
     if roles:
