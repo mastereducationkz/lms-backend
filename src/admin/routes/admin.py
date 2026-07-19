@@ -880,7 +880,7 @@ def get_admin_stats(
     """Get platform statistics (admin only)"""
     # Basic counts
     total_users = db.query(UserInDB).count()
-    total_students = db.query(UserInDB).filter(UserInDB.role == "student").count()
+    total_students = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_trial == False).count()
     total_teachers = db.query(UserInDB).filter(UserInDB.role == "teacher").count()
     total_curators = db.query(UserInDB).filter(UserInDB.role == "curator").count()
     total_courses = db.query(Course).count()
@@ -912,7 +912,7 @@ def get_students_progress_summary(
     current_user: UserInDB = Depends(require_admin())
 ):
     """Get progress summary for all students (admin only)"""
-    query = db.query(UserInDB).filter(UserInDB.role == "student")
+    query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_trial == False)
     
     if group_id:
         # Filter students by group using GroupStudent association table
