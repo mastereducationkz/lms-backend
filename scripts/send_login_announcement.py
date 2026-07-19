@@ -32,8 +32,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import requests
 
-from src.auth.models import UserInDB
 from src.config import SessionLocal
+# Import UserInDB from the aggregating models package (not src.auth.models directly):
+# a direct import of src.auth.models triggers a circular import via src.models.base.
+from src.models import UserInDB
 from src.services.email_service import _button, _email_shell, get_email_service
 from src.services.sync_provision_gaps import _is_test_email
 
