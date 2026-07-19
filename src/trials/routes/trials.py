@@ -185,7 +185,10 @@ def update_trial(
     grant = _get_grant_or_404(db, trial_id)
     if body.expires_at is not None:
         grant.expires_at = trial_services._as_utc_naive(body.expires_at)
-        if grant.status in ("expired",) and trial_services.grant_is_active(grant):
+        # NOTE: can't use trial_services.grant_is_active(grant) here — it also
+        # requires status == 'active', which is self-defeating in this branch
+        # (status is still 'expired' at this point). Check the new deadline directly.
+        if grant.status == "expired" and grant.expires_at > trial_services.utcnow():
             # Extending a lapsed trial re-activates it — but only one row per
             # (user, course) may hold the 'active' status (partial unique index).
             trial_services.expire_stale_trials_for(db, grant.user_id, grant.course_id)

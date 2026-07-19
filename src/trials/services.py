@@ -84,7 +84,16 @@ def trial_lesson_access(db: Session, user_id: int, lesson_id: int) -> Tuple[bool
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not module:
         return False, "Module not found"
-    grant = get_active_trial(db, user_id, module.course_id)
+    # Deliberately NOT get_active_trial() here: that helper collapses a
+    # status='active'-but-past-deadline row to None for its boolean-gate callers
+    # (correct for them — it must deny access). But evaluate_trial_lesson_access()
+    # already re-derives the time check via grant_is_active() and needs the raw
+    # row to tell "your trial has ended" apart from "you never had this course".
+    grant = db.query(TrialAccess).filter(
+        TrialAccess.user_id == user_id,
+        TrialAccess.course_id == module.course_id,
+        TrialAccess.status == TRIAL_ACTIVE,
+    ).first()
     return evaluate_trial_lesson_access(grant, lesson_id)
 
 
