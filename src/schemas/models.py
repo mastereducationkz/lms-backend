@@ -13,3 +13,4 @@ from src.gamification.schemas import *  # noqa: F401,F403
 from src.content.schemas import *  # noqa: F401,F403
 from src.curator.schemas import *  # noqa: F401,F403
 from src.lesson_requests.schemas import *  # noqa: F401,F403
+from src.trials.models import TrialAccess  # noqa: F401
