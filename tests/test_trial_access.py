@@ -221,3 +221,20 @@ def test_trial_filter_lesson_payload_strips_steps_outside_allowlist():
     _trial_filter_lesson_payload(with_flag, {1})
     assert with_flag[0].is_accessible is True
     assert with_flag[1].is_accessible is False
+
+
+def test_auth_me_carries_trial_expiry(monkeypatch):
+    from src.auth import user_schema as us
+
+    user = SimpleNamespace(
+        id=5, email="p@x.kz", name="P", role="student", is_active=True,
+        is_trial=True, assignment_zero_completed=True,
+    )
+    deadline = datetime.utcnow() + timedelta(hours=3)
+    monkeypatch.setattr("src.trials.services.earliest_active_expiry", lambda db, uid: deadline)
+    monkeypatch.setattr(us, "student_has_only_special_groups", lambda uid, db: False)
+    monkeypatch.setattr(us.UserSchema, "model_validate", classmethod(lambda cls, u: us.UserSchema(
+        id=u.id, email=u.email, name=u.name, role=u.role, is_active=u.is_active, is_trial=True,
+    )))
+    resp = us.build_user_schema_response(user, db=None)
+    assert resp.trial_expires_at == deadline
