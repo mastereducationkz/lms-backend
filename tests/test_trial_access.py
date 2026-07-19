@@ -308,3 +308,29 @@ def test_regular_invite_email_keeps_sso():
     assert "Continue with Master Education" in reg["html"]
     assert "единый аккаунт" in reg["html"]
     assert "TempPass1" in reg["html"]
+
+
+def test_trial_create_request_normalizes_and_validates():
+    import pytest
+    from src.trials.schemas import TrialCreateRequest
+
+    exp = datetime.utcnow() + timedelta(hours=24)
+    # Legacy single-course shape folds into `courses`.
+    legacy = TrialCreateRequest(email="a@x.kz", name="A", course_id=7, lesson_ids=[1, 2], expires_at=exp)
+    assert [s.course_id for s in legacy.selections] == [7]
+    assert legacy.selections[0].lesson_ids == [1, 2]
+    # New multi-course shape is preserved in order.
+    multi = TrialCreateRequest(
+        email="a@x.kz", name="A", expires_at=exp,
+        courses=[{"course_id": 1, "lesson_ids": [10]}, {"course_id": 2, "lesson_ids": [20]}],
+    )
+    assert [s.course_id for s in multi.selections] == [1, 2]
+    # Neither shape supplied -> validation error.
+    with pytest.raises(Exception):
+        TrialCreateRequest(email="a@x.kz", name="A", expires_at=exp)
+    # Same course listed twice -> validation error.
+    with pytest.raises(Exception):
+        TrialCreateRequest(
+            email="a@x.kz", name="A", expires_at=exp,
+            courses=[{"course_id": 1, "lesson_ids": [10]}, {"course_id": 1, "lesson_ids": [11]}],
+        )

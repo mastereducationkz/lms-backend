@@ -85,10 +85,17 @@ def create_trial(
     current_user: UserInDB = Depends(require_admin_or_head_curator()),
 ):
     email = body.email.lower().strip()
-    course = db.query(Course).filter(Course.id == body.course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    lesson_ids = _validate_lesson_ids(body.lesson_ids, _course_lesson_ids(db, body.course_id))
+
+    # Validate EVERY course + its lessons before touching the DB, so a multi-course
+    # grant is all-or-nothing (no partial grants left behind on a mid-list failure).
+    validated: List[tuple] = []  # (course, sorted_lesson_ids)
+    for sel in body.selections:
+        course = db.query(Course).filter(Course.id == sel.course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail=f"Course not found: {sel.course_id}")
+        lesson_ids = _validate_lesson_ids(sel.lesson_ids, _course_lesson_ids(db, sel.course_id))
+        validated.append((course, lesson_ids))
+    course_ids = [c.id for c, _ in validated]
     expires_at = trial_services._as_utc_naive(body.expires_at)
 
     user = db.query(UserInDB).filter(UserInDB.email == email).first()
@@ -96,23 +103,31 @@ def create_trial(
     if user and not user.is_trial:
         raise HTTPException(status_code=409, detail="Email belongs to an existing non-trial account")
     if user:
-        # Flip any stale 'active'-status-past-deadline row first so the duplicate
-        # check below and the status-only partial unique index agree exactly.
-        trial_services.expire_stale_trials_for(db, user.id, body.course_id)
-        existing = db.query(TrialAccess).filter(
+        # Decide password rotation from the state BEFORE this request adds any grants:
+        # rotate only when the prospect has no other live grant (else their current
+        # credentials are already in use — keep them; admin can rotate via resend-invite).
+        rotate = trial_services.should_rotate_password(trial_services.get_active_trials(db, user.id))
+        # Flip any stale 'active'-status-past-deadline rows first so the duplicate check
+        # below and the status-only partial unique index agree exactly.
+        for cid in course_ids:
+            trial_services.expire_stale_trials_for(db, user.id, cid)
+        conflicts = db.query(TrialAccess).filter(
             TrialAccess.user_id == user.id,
-            TrialAccess.course_id == body.course_id,
+            TrialAccess.course_id.in_(course_ids),
             TrialAccess.status == TRIAL_ACTIVE,
-        ).first()
-        if existing:
-            raise HTTPException(status_code=409, detail=_DUPLICATE_ACTIVE_DETAIL)
-        if trial_services.should_rotate_password(trial_services.get_active_trials(db, user.id)):
+        ).all()
+        if conflicts:
+            title_by_id = {c.id: c.title for c, _ in validated}
+            names = ", ".join(sorted(title_by_id.get(r.course_id, str(r.course_id)) for r in conflicts))
+            raise HTTPException(
+                status_code=409,
+                detail=f"This prospect already has an active trial for: {names} — edit it instead",
+            )
+        if rotate:
             password = generate_password()
             generated_password = password
             user.hashed_password = hash_password(password)  # fresh credentials for the new grant
         else:
-            # Another live grant means their current credentials are in use —
-            # keep them; admin can rotate explicitly via resend-invite.
             password = None
     else:
         password = generate_password()
@@ -133,31 +148,38 @@ def create_trial(
         db.add(user)
         db.flush()
 
-    grant = TrialAccess(
-        user_id=user.id,
-        course_id=body.course_id,
-        lesson_ids=lesson_ids,
-        expires_at=expires_at,
-        status=TRIAL_ACTIVE,
-        granted_by=current_user.id,
-        prospect_note=body.prospect_note,
-    )
-    db.add(grant)
+    grants = [
+        TrialAccess(
+            user_id=user.id,
+            course_id=course.id,
+            lesson_ids=lesson_ids,
+            expires_at=expires_at,
+            status=TRIAL_ACTIVE,
+            granted_by=current_user.id,
+            prospect_note=body.prospect_note,
+        )
+        for course, lesson_ids in validated
+    ]
+    for g in grants:
+        db.add(g)
     try:
         db.commit()
     except IntegrityError:
         # Multi-worker race on the status-only partial unique index
         db.rollback()
         raise HTTPException(status_code=409, detail=_DUPLICATE_ACTIVE_DETAIL)
-    db.refresh(grant)
+    for g in grants:
+        db.refresh(g)
 
+    # One invite per prospect (all grants share the same account + deadline), not one per course.
     if body.send_invite and password is not None:
         background_tasks.add_task(
             send_invite_email, user.email, user.name or "", user.email, password,
-            access_until=_format_access_until(grant.expires_at),
+            access_until=_format_access_until(expires_at),
         )
 
-    return TrialCreateResponse(trial=_to_schema(db, grant), generated_password=generated_password)
+    schemas = [_to_schema(db, g) for g in grants]
+    return TrialCreateResponse(trials=schemas, trial=schemas[0], generated_password=generated_password)
 
 
 @router.get("/")

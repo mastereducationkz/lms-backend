@@ -171,7 +171,7 @@ def test_enforcement_matrix_db(db):
 # --- 2. route-level state machine (Task 4 review carry-forward) ----------------
 
 def test_create_trial_duplicate_active_returns_409(db):
-    from src.trials.routes.trials import create_trial, _DUPLICATE_ACTIVE_DETAIL
+    from src.trials.routes.trials import create_trial
     from src.trials.schemas import TrialCreateRequest
 
     admin = _admin(db)
@@ -185,7 +185,9 @@ def test_create_trial_duplicate_active_returns_409(db):
     with pytest.raises(HTTPException) as exc:
         create_trial(body, background_tasks=BackgroundTasks(), db=db, current_user=admin)
     assert exc.value.status_code == 409
-    assert exc.value.detail == _DUPLICATE_ACTIVE_DETAIL
+    # The message now names the conflicting course(s).
+    assert "already has an active trial" in exc.value.detail
+    assert c.title in exc.value.detail
 
 
 def test_create_trial_stale_active_window_flips_and_succeeds(db):
@@ -353,3 +355,69 @@ def test_create_trial_rotates_password_when_no_live_grants(db):
     assert resp.generated_password is not None
     db.refresh(u)
     assert u.hashed_password != original_hash
+
+
+def test_create_trial_grants_multiple_courses_in_one_request(db):
+    """A single request with a `courses` list creates one active grant per course,
+    all bound to one new account, with exactly one generated password."""
+    from src.trials.routes.trials import create_trial
+    from src.trials.schemas import TrialCreateRequest, TrialCourseSelection
+    from src.trials.models import TrialAccess, TRIAL_ACTIVE
+    from src.schemas.models import UserInDB
+
+    admin = _admin(db)
+    c1, _, (l1a, l1b) = _course_with_lessons(db, "trial-e2e-multi-A")
+    c2, _, (l2a, l2b) = _course_with_lessons(db, "trial-e2e-multi-B")
+    email = "trial-e2e-multi@x.kz"
+
+    body = TrialCreateRequest(
+        email=email, name="Prospect",
+        courses=[
+            TrialCourseSelection(course_id=c1.id, lesson_ids=[l1a.id]),
+            TrialCourseSelection(course_id=c2.id, lesson_ids=[l2a.id, l2b.id]),
+        ],
+        expires_at=_future(), send_invite=False,
+    )
+    resp = create_trial(body, background_tasks=BackgroundTasks(), db=db, current_user=admin)
+
+    # One account, two grants, one password.
+    assert len(resp.trials) == 2
+    assert resp.trial is not None and resp.trial.id == resp.trials[0].id  # legacy alias
+    assert resp.generated_password is not None
+    u = db.query(UserInDB).filter(UserInDB.email == email).first()
+    assert u is not None and u.is_trial
+    rows = db.query(TrialAccess).filter(TrialAccess.user_id == u.id).order_by(TrialAccess.course_id).all()
+    assert {r.course_id for r in rows} == {c1.id, c2.id}
+    assert all(r.status == TRIAL_ACTIVE for r in rows)
+    by_course = {r.course_id: sorted(r.lesson_ids) for r in rows}
+    assert by_course[c1.id] == [l1a.id]
+    assert by_course[c2.id] == sorted([l2a.id, l2b.id])
+
+
+def test_create_trial_multi_course_conflict_is_atomic(db):
+    """If any requested course already has an active grant, the whole multi-course
+    request is rejected (409) and no new grants are created for the other courses."""
+    from src.trials.routes.trials import create_trial
+    from src.trials.schemas import TrialCreateRequest, TrialCourseSelection
+    from src.trials.models import TrialAccess
+
+    admin = _admin(db)
+    c1, _, (l1a, _l1b) = _course_with_lessons(db, "trial-e2e-multi-atomic-A")
+    c2, _, (l2a, _l2b) = _course_with_lessons(db, "trial-e2e-multi-atomic-B")
+    email = "trial-e2e-multi-atomic@x.kz"
+    u = _trial_user(db, email)
+    _make_grant(db, u, c1, [l1a.id])  # already active on course 1
+
+    body = TrialCreateRequest(
+        email=email, name="Prospect",
+        courses=[
+            TrialCourseSelection(course_id=c1.id, lesson_ids=[l1a.id]),
+            TrialCourseSelection(course_id=c2.id, lesson_ids=[l2a.id]),
+        ],
+        expires_at=_future(), send_invite=False,
+    )
+    with pytest.raises(HTTPException) as ei:
+        create_trial(body, background_tasks=BackgroundTasks(), db=db, current_user=admin)
+    assert ei.value.status_code == 409
+    # course 2 must NOT have been granted (atomic rollback)
+    assert db.query(TrialAccess).filter(TrialAccess.user_id == u.id, TrialAccess.course_id == c2.id).count() == 0
