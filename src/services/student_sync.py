@@ -181,12 +181,17 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
     published = failed = retried = 0
     for row in rows:
         if row.event_type == "user.created":
-            # Not an HTTP fan-out: provisions the new user into Zitadel (see p10 trigger notes).
+            # Provisions the new user into Zitadel AND (for staff roles) creates their
+            # teacher/curator account on SAT + IELTS so a later group can link them.
             outcome, detail = _deliver_user_created(db, row)
         elif row.event_type == "user.upserted":
             # Fan out to SAT/IELTS AND update the Zitadel identity (email/name) — otherwise an
             # email change breaks SSO (Zitadel keeps the old email; the platforms get the new one).
             outcome, detail = _deliver_user_upserted(db, row)
+        elif row.event_type == "group.upserted":
+            # Ensure the group's teacher/curator have a platform-local staff account BEFORE the
+            # group is delivered, so the consumer can resolve the FK (platforms never JIT staff).
+            outcome, detail = _deliver_group(db, row)
         else:
             outcome, detail = _deliver(row)
         if outcome == "ok":
@@ -229,19 +234,34 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
 
 
 def _deliver_user_created(db: Session, row) -> tuple[str, str]:
-    from src.services import zitadel_provisioning as zp
-
-    if not zp.zitadel_enabled():
-        return "ok", "zitadel: not configured (bulk import will catch up)"
-
+    """A new LMS user needs TWO things provisioned: a Zitadel account (so SSO works day-one) and —
+    if they are a teacher/curator — a platform-local staff account on SAT + IELTS (so a group that
+    later references them can resolve the FK; the platforms never create staff just-in-time). Both
+    run every time (a Zitadel-linked teacher may still lack a platform account); the outcomes are
+    combined so a transient failure in EITHER retries the whole event, and both steps are idempotent
+    so re-running is safe."""
     from src.auth.models import UserInDB
 
     user_id = ((row.payload or {}).get("user") or {}).get("lms_user_id")
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first() if user_id else None
     if user is None:
-        return "ok", f"zitadel: user {user_id} no longer exists"
-    if user.is_trial:
-        return "ok", "zitadel: trial user, provisioning skipped"
+        return "ok", f"user {user_id} no longer exists"
+    if getattr(user, "is_trial", False):
+        # Trial prospects are LMS-only by design — no Zitadel account, no platform footprint.
+        return "ok", "trial user, provisioning skipped"
+
+    z_outcome, z_detail = _provision_zitadel_for_created(user)
+    s_outcome, s_detail = _provision_platform_staff_for_created(user)
+    detail = f"{z_detail}; {s_detail}" if s_detail else z_detail
+    return _combine_outcomes(z_outcome, s_outcome), detail
+
+
+def _provision_zitadel_for_created(user) -> tuple[str, str]:
+    """Provision the new user into Zitadel and link central_auth_user_id (unchanged p10 behaviour)."""
+    from src.services import zitadel_provisioning as zp
+
+    if not zp.zitadel_enabled():
+        return "ok", "zitadel: not configured (bulk import will catch up)"
     if user.central_auth_user_id:
         return "ok", "zitadel: already linked"
     if not user.email or "@" not in user.email:
@@ -252,6 +272,95 @@ def _deliver_user_created(db: Session, row) -> tuple[str, str]:
         return "retry", f"zitadel: {exc}"
     user.central_auth_user_id = zitadel_id
     return "ok", f"zitadel: provisioned {zitadel_id}"
+
+
+def _provision_platform_staff_for_created(user) -> tuple[str, str]:
+    """For a teacher/curator, create their staff account on every configured platform (SAT+IELTS),
+    keyed by email, idempotent. No-op (``ok``) for students/admins and unconfigured platforms."""
+    from src.services.sync_provision_staff import staff_entries_for_user
+
+    entries = staff_entries_for_user(user.id, user.email, user.name, user.role)
+    return _run_staff_entries(entries)
+
+
+def _deliver_group(db: Session, row) -> tuple[str, str]:
+    """Deliver a group.upserted, but FIRST make sure the group's teacher/curator exist as staff on
+    the group's target platform — otherwise the consumer resolves the email to nothing and leaves
+    the group teacher-less/curator-less (the platforms never auto-create staff). The group is
+    delivered regardless (so the entity still syncs); a transient staff failure retries the whole
+    event so the link is re-attempted once the account exists (delivery is idempotent)."""
+    staff_outcome, staff_detail = _ensure_group_staff(db, row)
+    group_outcome, group_detail = _deliver(row)
+    detail = f"{group_detail}; {staff_detail}" if staff_detail else group_detail
+    return _combine_outcomes(group_outcome, staff_outcome), detail
+
+
+def _ensure_group_staff(db: Session, row) -> tuple[str, str]:
+    """Provision the group's teacher/curator (resolved from the payload emails to LMS users) onto
+    the group's own program platform. Skips programs with no staff target (general_english) and
+    emails that don't map to an LMS user (nothing to provision — the group still syncs)."""
+    from sqlalchemy import func
+
+    from src.auth.models import UserInDB
+    from src.services.sync_provision_staff import _platform_of, staff_entry
+
+    grp = (row.payload or {}).get("group") or {}
+    platform = _platform_of(grp.get("program_type"))
+    if platform is None:
+        return "ok", ""
+    entries = []
+    for email, slot in (
+        (grp.get("teacher_email"), "teacher"),
+        (grp.get("curator_email"), "curator"),
+    ):
+        if not email:
+            continue
+        email_norm = str(email).strip().lower()
+        user = (
+            db.query(UserInDB)
+            .filter(func.lower(func.trim(UserInDB.email)) == email_norm)
+            .first()
+        )
+        if user is None:
+            continue
+        entry = staff_entry(user.id, user.email, user.name, slot, platform)
+        if entry is not None:
+            entries.append(entry)
+    return _run_staff_entries(entries)
+
+
+def _run_staff_entries(entries) -> tuple[str, str]:
+    """POST a list of staff entries and fold their per-entry results into one drainer outcome.
+    Empty list => ("ok", "") so callers can pass through non-staff cases unchanged."""
+    if not entries:
+        return "ok", ""
+    from src.services.sync_provision_staff import provision_staff_now
+
+    outcome = "ok"
+    details = []
+    for _staff, cli_outcome, cli_detail in provision_staff_now(entries):
+        details.append(cli_detail)
+        outcome = _combine_outcomes(outcome, _staff_drainer_outcome(cli_outcome, cli_detail))
+    return outcome, "staff: " + "; ".join(details)
+
+
+def _staff_drainer_outcome(cli_outcome: str, detail: str) -> str:
+    """Map the staff endpoint's (created|exists|error) to a drainer outcome (ok|not_ready|retry).
+    A 503 means the consumer's flag is off — reschedule without spending the retry budget."""
+    if cli_outcome in ("created", "exists"):
+        return "ok"
+    if "HTTP 503" in detail:
+        return "not_ready"
+    return "retry"
+
+
+def _combine_outcomes(*outcomes: str) -> str:
+    """Aggregate drainer outcomes: a real failure (retry) outranks a not-ready sibling outranks ok."""
+    if "retry" in outcomes:
+        return "retry"
+    if "not_ready" in outcomes:
+        return "not_ready"
+    return "ok"
 
 
 def _deliver_user_upserted(db: Session, row) -> tuple[str, str]:
