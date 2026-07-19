@@ -1,4 +1,6 @@
+from datetime import timezone
 from typing import Optional, List, Set
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +22,14 @@ router = APIRouter()
 
 _DUPLICATE_ACTIVE_DETAIL = "This prospect already has an active trial for this course — edit it instead"
 _REACTIVATE_CONFLICT_DETAIL = "Another active trial exists for this course — revoke it first"
+
+_ALMATY_TZ = ZoneInfo("Asia/Almaty")
+
+
+def _format_access_until(expires_at) -> str:
+    """Render a grant's (naive-UTC) expires_at as Almaty local time for invite emails."""
+    aware = expires_at.replace(tzinfo=timezone.utc).astimezone(_ALMATY_TZ)
+    return f"{aware.day} {aware.strftime('%B %Y, %H:%M')} (Almaty time)"
 
 
 def _validate_lesson_ids(lesson_ids: List[int], course_lesson_ids: Set[int]) -> List[int]:
@@ -142,7 +152,10 @@ def create_trial(
     db.refresh(grant)
 
     if body.send_invite and password is not None:
-        background_tasks.add_task(send_invite_email, user.email, user.name or "", user.email, password)
+        background_tasks.add_task(
+            send_invite_email, user.email, user.name or "", user.email, password,
+            access_until=_format_access_until(grant.expires_at),
+        )
 
     return TrialCreateResponse(trial=_to_schema(db, grant), generated_password=generated_password)
 
@@ -245,7 +258,10 @@ def resend_trial_invite(
     password = generate_password()
     user.hashed_password = hash_password(password)
     db.commit()
-    background_tasks.add_task(send_invite_email, user.email, user.name or "", user.email, password)
+    background_tasks.add_task(
+        send_invite_email, user.email, user.name or "", user.email, password,
+        access_until=_format_access_until(grant.expires_at),
+    )
     return {"sent": True}
 
 

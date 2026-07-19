@@ -153,6 +153,20 @@ def test_already_linked_user_is_noop(db, monkeypatch):
     assert u.central_auth_user_id == "z-existing"
 
 
+def test_trial_user_skips_provisioning(db, monkeypatch):
+    monkeypatch.setenv("ZITADEL_PAT", "pat")
+    u = _mk_user(db)
+    u.is_trial = True
+    db.commit()
+    _seed_created(db, u.id)
+    monkeypatch.setattr(zp, "provision_user",
+                        lambda *a, **k: pytest.fail("must not provision a trial user"))
+    result = student_sync.drain_outbox(db)
+    assert result["published"] == 1
+    db.refresh(u)
+    assert u.central_auth_user_id is None
+
+
 def test_deleted_user_completes(db, monkeypatch):
     monkeypatch.setenv("ZITADEL_PAT", "pat")
     _seed_created(db, user_id=424242)                 # no such users row

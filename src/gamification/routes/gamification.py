@@ -456,8 +456,10 @@ def get_leaderboard(
         ).filter(
             extract('year', PointHistory.created_at) == now.year,
             extract('month', PointHistory.created_at) == now.month
+        ).filter(
+            PointHistory.user_id.notin_(db.query(UserInDB.id).filter(UserInDB.is_trial == True))
         )
-        
+
         # Filter by group if specified (active, not finished)
         if group_id:
             student_ids = (
@@ -490,8 +492,10 @@ def get_leaderboard(
         ).filter(
             PointHistory.created_at >= datetime.combine(start_date, datetime.min.time()),
             PointHistory.created_at <= datetime.combine(end_date, datetime.max.time())
+        ).filter(
+            PointHistory.user_id.notin_(db.query(UserInDB.id).filter(UserInDB.is_trial == True))
         )
-        
+
         # Filter by group if specified (active, not finished)
         if group_id:
             student_ids = (

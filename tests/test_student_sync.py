@@ -60,6 +60,33 @@ def test_sync_enabled_truthy(monkeypatch):
     assert student_sync.sync_enabled() is True
 
 
+# --- user.created delivery: trial-user exclusion ----------------------------
+# Full drainer coverage (provisioning, linking, retries) lives in
+# tests/test_zitadel_auto_provision.py; this is a narrow unit test of the
+# is_trial skip using a mocked db so it doesn't need the UserInDB table.
+
+def test_deliver_user_created_skips_trial_user(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.services import zitadel_provisioning as zp
+
+    monkeypatch.setattr(zp, "zitadel_enabled", lambda: True)
+    monkeypatch.setattr(zp, "provision_user",
+                        lambda *a, **k: pytest.fail("must not provision a trial user"))
+
+    trial_user = SimpleNamespace(id=42, is_trial=True, central_auth_user_id=None,
+                                  email="trial@x.io", name="Trial User", hashed_password="h")
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = trial_user
+    row = SimpleNamespace(payload={"user": {"lms_user_id": 42}})
+
+    outcome, detail = student_sync._deliver_user_created(db, row)
+    assert outcome == "ok"
+    assert "trial" in detail.lower()
+    assert trial_user.central_auth_user_id is None
+
+
 # --- drainer ---------------------------------------------------------------
 
 class _Resp:

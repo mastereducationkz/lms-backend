@@ -240,6 +240,8 @@ def _deliver_user_created(db: Session, row) -> tuple[str, str]:
     user = db.query(UserInDB).filter(UserInDB.id == user_id).first() if user_id else None
     if user is None:
         return "ok", f"zitadel: user {user_id} no longer exists"
+    if user.is_trial:
+        return "ok", "zitadel: trial user, provisioning skipped"
     if user.central_auth_user_id:
         return "ok", "zitadel: already linked"
     if not user.email or "@" not in user.email:
