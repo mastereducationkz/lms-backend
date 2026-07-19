@@ -253,6 +253,74 @@ def _created_flag(resp: httpx.Response):
     return None
 
 
+# --- single-student provisioning (shared with the admin "provision" button) ---
+# The batch CLI above discovers gaps from failed outbox rows. The admin endpoint needs the same
+# create-or-fetch call for ONE chosen student, plus a re-emit of that student's memberships so the
+# now-existing account gets linked to their groups on the platform (their original member.upserted
+# had 404-dead-lettered before the account existed). Factored here so the button and the CLI share
+# the exact wire contract and never drift on the /students/ payload.
+
+_SAT_PROGRAMS = ("sat", "nuet")
+_PLATFORM_PROGRAMS = {"ielts": ("ielts",), "sat": _SAT_PROGRAMS}
+
+
+def platform_configured(platform: str) -> bool:
+    """True when the target platform has both a base URL and an API key set."""
+    if platform == "ielts":
+        return bool(_ielts_base()) and bool(os.getenv("IELTS_API_KEY", ""))
+    if platform == "sat":
+        return bool(_sat_base()) and bool(os.getenv("MASTEREDU_API_KEY", ""))
+    return False
+
+
+def sat_product_for_student(db: Session, student_id: int) -> str:
+    """Derive the SAT product (SAT|NUET|BOTH) from the student's SAT/NUET group memberships;
+    defaults to SAT when they are in no SAT-family group yet (operator can still provision)."""
+    from sqlalchemy import func
+
+    from src.courses.models import Group, GroupStudent
+
+    rows = (
+        db.query(Group.program_type)
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .filter(GroupStudent.student_id == student_id, func.lower(Group.program_type).in_(_SAT_PROGRAMS))
+        .distinct()
+        .all()
+    )
+    programs = {str(p or "").strip().lower() for (p,) in rows}
+    return _sat_product(programs) if programs else "SAT"
+
+
+def provision_student_account(
+    email: str, name: str | None, platform: str, product: str | None = None
+) -> tuple[str, str]:
+    """Create (or fetch, idempotently) one student on a platform. Returns (outcome, detail) with
+    outcome in created|exists|error. Thin wrapper over ``_provision_one`` so callers don't build a
+    GapStudent by hand."""
+    return _provision_one(GapStudent(email, name, platform, product))
+
+
+def reemit_student_memberships(db: Session, student_id: int, platform: str) -> int:
+    """Touch the student's group_students rows for the platform's programs so the member trigger
+    (p14, UPDATE) re-emits member.upserted — linking the just-provisioned account to its groups.
+    Returns the number of membership rows touched. No-op on a DB without the trigger (SQLite tests)."""
+    from sqlalchemy import bindparam, text
+
+    programs = _PLATFORM_PROGRAMS.get(platform)
+    if not programs:
+        return 0
+    stmt = text(
+        """
+        UPDATE group_students SET student_id = student_id
+        WHERE student_id = :sid
+          AND group_id IN (SELECT id FROM groups WHERE lower(program_type) IN :programs)
+        """
+    ).bindparams(bindparam("programs", expanding=True))
+    result = db.execute(stmt, {"sid": student_id, "programs": list(programs)})
+    db.commit()
+    return result.rowcount or 0
+
+
 # --- driver ------------------------------------------------------------------
 
 

@@ -3395,3 +3395,83 @@ def export_teachers_lessons_count_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+class ProvisionPlatformRequest(BaseModel):
+    platform: Literal["ielts", "sat"]
+    # SAT only; derived from the student's SAT/NUET groups when omitted. Ignored for IELTS.
+    product: Optional[Literal["SAT", "NUET", "BOTH"]] = None
+
+
+class ProvisionPlatformResponse(BaseModel):
+    ok: bool
+    outcome: str  # "created" | "exists"
+    platform: str
+    product: Optional[str] = None
+    detail: str
+    memberships_relinked: int
+
+
+@router.post("/users/{user_id}/provision-platform", response_model=ProvisionPlatformResponse)
+async def provision_user_to_platform(
+    user_id: int,
+    body: ProvisionPlatformRequest,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin()),
+):
+    """Provision an LMS student onto SAT/NUET or IELTS — the LMS-side equivalent of the CRM
+    «Создать аккаунт SAT/IELTS» button. Idempotent by email; never emails credentials (students
+    log in via SSO / their LMS password). After creating the account it re-emits the student's
+    memberships for that platform's programs (p14 touch) so the new account is linked to its groups.
+    Staff (teacher/curator) are provisioned automatically by the sync drainer and use no button."""
+    from src.services.sync_provision_gaps import (
+        _is_test_email,
+        platform_configured,
+        provision_student_account,
+        reemit_student_memberships,
+        sat_product_for_student,
+    )
+
+    user = db.query(UserInDB).filter(UserInDB.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.role != "student":
+        raise HTTPException(
+            status_code=400,
+            detail="Only student accounts can be provisioned here; teachers/curators sync automatically.",
+        )
+    if getattr(user, "is_trial", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Trial accounts are LMS-only and are not provisioned to external platforms.",
+        )
+
+    email = (user.email or "").strip().lower()
+    if not email or _is_test_email(email):
+        raise HTTPException(status_code=400, detail="This account has no real email to provision.")
+
+    platform = body.platform
+    if not platform_configured(platform):
+        raise HTTPException(
+            status_code=503,
+            detail=f"{platform.upper()} provisioning is not configured on this server.",
+        )
+
+    product = body.product
+    if platform == "sat" and not product:
+        product = sat_product_for_student(db, user_id)
+
+    outcome, detail = provision_student_account(email, user.name, platform, product)
+    if outcome == "error":
+        # 502: we reached our own layer fine, the downstream platform rejected/was unreachable.
+        raise HTTPException(status_code=502, detail=f"Provisioning failed: {detail}")
+
+    relinked = reemit_student_memberships(db, user_id, platform)
+    return ProvisionPlatformResponse(
+        ok=True,
+        outcome=outcome,
+        platform=platform,
+        product=product if platform == "sat" else None,
+        detail=detail,
+        memberships_relinked=relinked,
+    )
