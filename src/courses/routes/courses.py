@@ -44,6 +44,26 @@ def _trial_hard_gate(db, current_user, lesson_id: int):
         if not allowed:
             raise HTTPException(status_code=403, detail=reason or "Not included in your trial")
 
+
+def _trial_filter_lesson_payload(lessons, allowed_ids):
+    """Strip step content from serialized lessons outside the trial allowlist.
+
+    Lesson metadata stays in the response (locked lessons remain visible,
+    matching the modules-endpoint UX), but content-bearing fields (steps)
+    never leave the server for non-allowlisted lessons. If the serialized
+    object carries an ``is_accessible`` field, it is set per the allowlist.
+    Mutates the given list in place and returns it.
+    """
+    for lesson in lessons:
+        in_allowlist = int(lesson.id) in allowed_ids
+        if hasattr(lesson, "is_accessible"):
+            lesson.is_accessible = in_allowlist
+        if not in_allowlist:
+            lesson.steps = []
+            if hasattr(lesson, "total_steps"):
+                lesson.total_steps = 0
+    return lessons
+
 # =============================================================================
 # COURSE MANAGEMENT
 # =============================================================================
@@ -997,9 +1017,17 @@ def get_module_lessons(
         lesson_schema = LessonSchema.from_orm(lesson)
         lesson_schema.steps = [StepSchema.from_orm(step) for step in steps]
         lesson_schema.total_steps = len(steps)
-        
+
         lessons_data.append(lesson_schema)
-    
+
+    if current_user.role == "student" and getattr(current_user, "is_trial", False):
+        # Derive course_id from the module itself (path param is not verified
+        # against the module) so the allowlist matches the actual course.
+        module = db.query(Module).filter(Module.id == module_id).first()
+        grant = get_active_trial_grant(db, current_user.id, module.course_id) if module else None
+        allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
+        _trial_filter_lesson_payload(lessons_data, allowed_ids)
+
     return lessons_data
 
 @router.get("/{course_id}/lessons", response_model=List[LessonSchema])
@@ -1044,9 +1072,14 @@ def get_course_lessons(
         else:
             lesson_schema.steps = []
             lesson_schema.total_steps = 0
-        
+
         lessons_data.append(lesson_schema)
-    
+
+    if current_user.role == "student" and getattr(current_user, "is_trial", False):
+        grant = get_active_trial_grant(db, current_user.id, course_id)
+        allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
+        _trial_filter_lesson_payload(lessons_data, allowed_ids)
+
     return lessons_data
 
 

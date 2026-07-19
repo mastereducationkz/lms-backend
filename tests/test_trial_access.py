@@ -136,3 +136,30 @@ def test_trial_hard_gate_blocks_and_passes(monkeypatch):
     real_student = SimpleNamespace(id=8, role="student", is_trial=False)
     monkeypatch.setattr(courses_routes, "trial_lesson_access", lambda db, uid, lid: (False, "x"))
     courses_routes._trial_hard_gate(None, real_student, 1)  # no-op for real students
+
+
+def test_trial_filter_lesson_payload_strips_steps_outside_allowlist():
+    from src.courses.routes.courses import _trial_filter_lesson_payload
+
+    lessons = [
+        SimpleNamespace(id=1, title="Allowed lesson", steps=["s1", "s2"], total_steps=2),
+        SimpleNamespace(id=2, title="Locked lesson", steps=["s3"], total_steps=1),
+    ]
+    out = _trial_filter_lesson_payload(lessons, {1})
+    assert out is lessons  # mutates and returns the same list
+    # Allowlisted lesson keeps its steps
+    assert lessons[0].steps == ["s1", "s2"]
+    assert lessons[0].total_steps == 2
+    # Non-allowlisted lesson: content stripped, metadata preserved
+    assert lessons[1].steps == []
+    assert lessons[1].total_steps == 0
+    assert lessons[0].title == "Allowed lesson"
+    assert lessons[1].title == "Locked lesson"
+    # If the serialized object carries is_accessible, it is set per allowlist
+    with_flag = [
+        SimpleNamespace(id=1, title="a", steps=["s"], total_steps=1, is_accessible=None),
+        SimpleNamespace(id=2, title="b", steps=["s"], total_steps=1, is_accessible=None),
+    ]
+    _trial_filter_lesson_payload(with_flag, {1})
+    assert with_flag[0].is_accessible is True
+    assert with_flag[1].is_accessible is False
