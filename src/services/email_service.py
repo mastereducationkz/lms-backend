@@ -253,17 +253,65 @@ def _para(ru: str, en: str = "") -> str:
     return f'<p style="margin:0 0 8px;font-size:15px;">{ru}</p>{en_html}'
 
 
-def send_invite_email(
-    to_email: str, name: str, login_email: str, password: str,
+def build_invite_email(
+    name: str, login_email: str, password: str,
     access_until: Optional[str] = None,
-) -> Optional[dict]:
-    """Welcome/invite email with platform link and login credentials (students).
+) -> dict:
+    """Render the invite email (subject/html/text) — pure, so it is unit-testable.
 
-    access_until, when given, renders one extra line stating the trial-access
-    deadline (used for trial invites; regular student invites omit it).
+    Two audiences, one signature. A **regular** student invite (access_until=None) is
+    backed by the shared Master Education account (Zitadel), so it tells the recipient to
+    sign in via the "Continue with Master Education" button. A **trial** invite
+    (access_until set) is an LMS-only account with NO Zitadel identity — that button can
+    never authenticate them — so it instead tells the prospect to sign in with email +
+    password directly on the LMS login page, and states the trial deadline.
     """
     base_url = _get_lms_base_url()
     greeting = name or "студент"
+    is_trial = access_until is not None
+
+    if is_trial:
+        header = "🎓 Пробный доступ / Trial access"
+        subject = "Ваш пробный доступ к Master Education / Your Master Education trial access"
+        intro = _para(
+            "Для вас открыт пробный доступ к платформе LMS Master Education. Войдите по email "
+            "и паролю ниже прямо на странице входа LMS — кнопка «Продолжить с Master Education» "
+            "для пробного доступа не используется. Данные для входа:",
+            "Trial access to the Master Education LMS has been opened for you. Sign in with the "
+            "email and password below directly on the LMS sign-in page — the “Continue with "
+            "Master Education” button is not used for trial access. Your credentials:",
+        )
+        closing = _para(
+            "Введите email и пароль на странице входа LMS. Пробный доступ ограничен по времени.",
+            "Enter the email and password on the LMS sign-in page. Trial access is time-limited.",
+        )
+        text_intro = (
+            f"Здравствуйте, {greeting}! Для вас открыт пробный доступ к LMS Master Education. "
+            "Войдите по email и паролю ниже прямо на странице входа LMS "
+            "(без кнопки «Продолжить с Master Education»).\n"
+        )
+    else:
+        header = "🎓 Добро пожаловать / Welcome"
+        subject = "Ваш аккаунт Master Education готов / Your Master Education account is ready"
+        intro = _para(
+            "Для вас создан единый аккаунт Master Education. С ним вы входите во все платформы "
+            "Master Education (LMS, SAT/NUET, IELTS и другие) — одним аккаунтом, через кнопку "
+            "«Продолжить с Master Education». Данные для входа:",
+            "Your single Master Education account is ready. Use it to sign in to every Master "
+            "Education platform (LMS, SAT/NUET, IELTS and more) with one account, via the "
+            "“Continue with Master Education” button. Your credentials:",
+        )
+        closing = _para(
+            "На странице входа нажмите «Продолжить с Master Education» и войдите с данными выше. "
+            "Рекомендуем сменить пароль после первого входа.",
+            "On the sign-in page, choose “Continue with Master Education” and log in with the "
+            "details above. We recommend changing your password after your first sign-in.",
+        )
+        text_intro = (
+            f"Здравствуйте, {greeting}! Для вас создан единый аккаунт Master Education — "
+            "он работает во всех платформах через «Продолжить с Master Education».\n"
+        )
+
     trial_notice = (
         _para(
             f"Ваш пробный доступ действует до {access_until}.",
@@ -273,36 +321,41 @@ def send_invite_email(
     )
     inner = (
         f'<p style="margin:0 0 16px;font-size:15px;">Здравствуйте, <strong>{greeting}</strong>!</p>'
-        + _para(
-            "Для вас создан единый аккаунт Master Education. С ним вы входите во все платформы "
-            "Master Education (LMS, SAT/NUET, IELTS и другие) — одним аккаунтом, через кнопку "
-            "«Продолжить с Master Education». Данные для входа:",
-            "Your single Master Education account is ready. Use it to sign in to every Master "
-            "Education platform (LMS, SAT/NUET, IELTS and more) with one account, via the "
-            "“Continue with Master Education” button. Your credentials:",
-        )
+        + intro
         + _credentials_block(login_email, password)
         + trial_notice
         + f'<div style="margin-bottom:24px;">{_button(base_url, "Войти / Sign in")}</div>'
-        + _para(
-            "На странице входа нажмите «Продолжить с Master Education» и войдите с данными выше. "
-            "Рекомендуем сменить пароль после первого входа.",
-            "On the sign-in page, choose “Continue with Master Education” and log in with the "
-            "details above. We recommend changing your password after your first sign-in.",
-        )
+        + closing
     )
     trial_text = f"Пробный доступ до / Trial access until: {access_until}\n" if access_until else ""
+    text_content = (
+        text_intro
+        + f"Логин/Login: {login_email}\nПароль/Password: {password}\n"
+        + trial_text
+        + f"Войти / Sign in: {base_url}\n"
+    )
+    return {
+        "subject": subject,
+        "html": _email_shell(header, inner),
+        "text": text_content,
+    }
+
+
+def send_invite_email(
+    to_email: str, name: str, login_email: str, password: str,
+    access_until: Optional[str] = None,
+) -> Optional[dict]:
+    """Welcome/invite email with platform link and login credentials (students).
+
+    access_until, when given, marks this as a trial invite: the copy switches to
+    direct LMS email/password login (no SSO button) and states the trial deadline.
+    """
+    content = build_invite_email(name, login_email, password, access_until)
     return get_email_service().send_email(
         to_emails=[to_email],
-        subject="Ваш аккаунт Master Education готов / Your Master Education account is ready",
-        html_content=_email_shell("🎓 Добро пожаловать / Welcome", inner),
-        text_content=(
-            f"Здравствуйте, {greeting}! Для вас создан единый аккаунт Master Education — "
-            "он работает во всех платформах через «Продолжить с Master Education».\n"
-            f"Логин/Login: {login_email}\nПароль/Password: {password}\n"
-            f"{trial_text}"
-            f"Войти / Sign in: {base_url}\n"
-        ),
+        subject=content["subject"],
+        html_content=content["html"],
+        text_content=content["text"],
     )
 
 

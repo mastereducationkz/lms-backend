@@ -273,3 +273,38 @@ def test_trial_status_job_uses_expire_stale(monkeypatch):
     monkeypatch.setattr(trial_status_job, "expire_stale_trials", lambda db: called.setdefault("n", 3))
     trial_status_job.run_once()
     assert called["n"] == 3
+
+
+def test_trial_invite_email_uses_direct_login_not_sso():
+    # Trial accounts are LMS-only (no Zitadel identity), so the invite must NOT tell the
+    # prospect to click "Continue with Master Education" — that button can never sign them in.
+    from src.services.email_service import build_invite_email
+
+    trial = build_invite_email("Aidana", "prospect@x.io", "TempPass1", access_until="20.07.2026 18:00")
+    for field in ("html", "text"):
+        # No false "one account for every platform" claim (there is no Zitadel account).
+        assert "единый аккаунт" not in trial[field], field
+        # No affirmative instruction to sign in via the SSO button.
+        assert "нажмите «Продолжить с Master Education»" not in trial[field], field
+        assert "работает во всех платформах" not in trial[field], field
+    # The button is only referenced to say it is NOT used for trials (prevents a dead-end
+    # since the login page shows it), and direct email/password login is the instruction.
+    assert "не используется" in trial["html"]
+    assert "странице входа LMS" in trial["html"]
+    # It must show the credentials and the deadline.
+    assert "TempPass1" in trial["html"]
+    assert "prospect@x.io" in trial["html"]
+    assert "20.07.2026 18:00" in trial["html"]
+    assert "20.07.2026 18:00" in trial["text"]
+
+
+def test_regular_invite_email_keeps_sso():
+    # Regular student invites DO get a shared Master Education (Zitadel) account, so the
+    # single-account / "Continue with Master Education" copy must stay for them.
+    from src.services.email_service import build_invite_email
+
+    reg = build_invite_email("Aizhan", "stu@x.io", "TempPass1")
+    assert "Продолжить с Master Education" in reg["html"]
+    assert "Continue with Master Education" in reg["html"]
+    assert "единый аккаунт" in reg["html"]
+    assert "TempPass1" in reg["html"]
