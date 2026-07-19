@@ -103,3 +103,25 @@ def expire_stale_trials(db: Session) -> int:
     ).update({TrialAccess.status: TRIAL_EXPIRED}, synchronize_session=False)
     db.commit()
     return count
+
+
+def expire_stale_trials_for(db: Session, user_id: int, course_id: int) -> int:
+    """Inline, targeted version of expire_stale_trials for one (user, course) pair.
+    Run before creating/re-activating a grant so the status-only partial unique
+    index can never collide with a row that is merely awaiting the bookkeeping job."""
+    count = db.query(TrialAccess).filter(
+        TrialAccess.user_id == user_id,
+        TrialAccess.course_id == course_id,
+        TrialAccess.status == TRIAL_ACTIVE,
+        TrialAccess.expires_at <= utcnow(),
+    ).update({TrialAccess.status: TRIAL_EXPIRED}, synchronize_session=False)
+    return count  # no commit here — caller owns the transaction
+
+
+def should_rotate_password(other_active_grants) -> bool:
+    """Rotate a prospect's credentials only when they hold no other live grant.
+
+    An existing trial user with another active grant is already using their
+    current password — silently rotating it mid-trial would lock them out.
+    Admins can force a rotation explicitly via resend-invite."""
+    return not other_active_grants

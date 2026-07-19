@@ -1,7 +1,7 @@
-from datetime import datetime
 from typing import Optional, List, Set
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.config import get_db
@@ -17,6 +17,9 @@ from src.trials.schemas import (
 from src.trials import services as trial_services
 
 router = APIRouter()
+
+_DUPLICATE_ACTIVE_DETAIL = "This prospect already has an active trial for this course — edit it instead"
+_REACTIVATE_CONFLICT_DETAIL = "Another active trial exists for this course — revoke it first"
 
 
 def _validate_lesson_ids(lesson_ids: List[int], course_lesson_ids: Set[int]) -> List[int]:
@@ -83,15 +86,24 @@ def create_trial(
     if user and not user.is_trial:
         raise HTTPException(status_code=409, detail="Email belongs to an existing non-trial account")
     if user:
-        existing = trial_services.get_active_trial(db, user.id, body.course_id)
+        # Flip any stale 'active'-status-past-deadline row first so the duplicate
+        # check below and the status-only partial unique index agree exactly.
+        trial_services.expire_stale_trials_for(db, user.id, body.course_id)
+        existing = db.query(TrialAccess).filter(
+            TrialAccess.user_id == user.id,
+            TrialAccess.course_id == body.course_id,
+            TrialAccess.status == TRIAL_ACTIVE,
+        ).first()
         if existing:
-            raise HTTPException(
-                status_code=409,
-                detail="This prospect already has an active trial for this course — edit it instead",
-            )
-        password = generate_password()
-        generated_password = password
-        user.hashed_password = hash_password(password)  # fresh credentials for the new grant
+            raise HTTPException(status_code=409, detail=_DUPLICATE_ACTIVE_DETAIL)
+        if trial_services.should_rotate_password(trial_services.get_active_trials(db, user.id)):
+            password = generate_password()
+            generated_password = password
+            user.hashed_password = hash_password(password)  # fresh credentials for the new grant
+        else:
+            # Another live grant means their current credentials are in use —
+            # keep them; admin can rotate explicitly via resend-invite.
+            password = None
     else:
         password = generate_password()
         generated_password = password
@@ -121,10 +133,15 @@ def create_trial(
         prospect_note=body.prospect_note,
     )
     db.add(grant)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Multi-worker race on the status-only partial unique index
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_DUPLICATE_ACTIVE_DETAIL)
     db.refresh(grant)
 
-    if body.send_invite:
+    if body.send_invite and password is not None:
         background_tasks.add_task(send_invite_email, user.email, user.name or "", user.email, password)
 
     return TrialCreateResponse(trial=_to_schema(db, grant), generated_password=generated_password)
@@ -169,12 +186,28 @@ def update_trial(
     if body.expires_at is not None:
         grant.expires_at = trial_services._as_utc_naive(body.expires_at)
         if grant.status in ("expired",) and trial_services.grant_is_active(grant):
-            grant.status = TRIAL_ACTIVE  # extending a lapsed trial re-activates it
+            # Extending a lapsed trial re-activates it — but only one row per
+            # (user, course) may hold the 'active' status (partial unique index).
+            trial_services.expire_stale_trials_for(db, grant.user_id, grant.course_id)
+            other_active = db.query(TrialAccess).filter(
+                TrialAccess.user_id == grant.user_id,
+                TrialAccess.course_id == grant.course_id,
+                TrialAccess.status == TRIAL_ACTIVE,
+                TrialAccess.id != grant.id,
+            ).first()
+            if other_active:
+                raise HTTPException(status_code=409, detail=_REACTIVATE_CONFLICT_DETAIL)
+            grant.status = TRIAL_ACTIVE
     if body.lesson_ids is not None:
         grant.lesson_ids = _validate_lesson_ids(body.lesson_ids, _course_lesson_ids(db, grant.course_id))
     if body.prospect_note is not None:
         grant.prospect_note = body.prospect_note
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Multi-worker race on the status-only partial unique index
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_REACTIVATE_CONFLICT_DETAIL)
     db.refresh(grant)
     return _to_schema(db, grant)
 
@@ -186,6 +219,8 @@ def revoke_trial(
     current_user: UserInDB = Depends(require_admin_or_head_curator()),
 ):
     grant = _get_grant_or_404(db, trial_id)
+    if grant.status == TRIAL_CONVERTED:
+        raise HTTPException(status_code=409, detail="Trial has already been converted — it can no longer be revoked")
     grant.status = TRIAL_REVOKED
     grant.revoked_at = trial_services.utcnow()
     db.commit()
@@ -218,6 +253,8 @@ def convert_trial(
     current_user: UserInDB = Depends(require_admin_or_head_curator()),
 ):
     grant = _get_grant_or_404(db, trial_id)
+    if grant.status in (TRIAL_REVOKED, TRIAL_CONVERTED):
+        raise HTTPException(status_code=409, detail=f"Cannot convert a {grant.status} trial")
     grant.status = TRIAL_CONVERTED
     user = db.query(UserInDB).filter(UserInDB.id == grant.user_id).first()
     if user:

@@ -138,6 +138,44 @@ def test_trial_hard_gate_blocks_and_passes(monkeypatch):
     courses_routes._trial_hard_gate(None, real_student, 1)  # no-op for real students
 
 
+def test_expire_stale_trials_for_targets_only_stale_active_pair():
+    from unittest.mock import MagicMock
+    from src.trials import services
+    from src.trials.models import TrialAccess, TRIAL_ACTIVE, TRIAL_EXPIRED
+
+    db = MagicMock()
+    db.query.return_value.filter.return_value.update.return_value = 2
+
+    count = services.expire_stale_trials_for(db, user_id=7, course_id=10)
+    assert count == 2
+
+    # Targets TrialAccess rows only
+    db.query.assert_called_once_with(TrialAccess)
+
+    # Filter criteria: exactly (user_id, course_id, status=='active', expires_at <= now)
+    filter_args = db.query.return_value.filter.call_args[0]
+    assert len(filter_args) == 4
+    assert filter_args[0].compare(TrialAccess.user_id == 7)
+    assert filter_args[1].compare(TrialAccess.course_id == 10)
+    assert filter_args[2].compare(TrialAccess.status == TRIAL_ACTIVE)
+    deadline = filter_args[3]
+    assert deadline.left.name == "expires_at"
+    assert deadline.operator.__name__ == "le"  # past-deadline only, boundary inclusive
+    assert deadline.right.value.tzinfo is None  # naive UTC, matching the column
+
+    # Flips to expired without loading rows; caller owns the transaction
+    update_args, update_kwargs = db.query.return_value.filter.return_value.update.call_args
+    assert update_args[0][TrialAccess.status] == TRIAL_EXPIRED
+    assert update_kwargs.get("synchronize_session") is False
+    db.commit.assert_not_called()
+
+
+def test_should_rotate_password_only_when_no_other_active_grants():
+    from src.trials.services import should_rotate_password
+    assert should_rotate_password([]) is True
+    assert should_rotate_password([_grant()]) is False
+
+
 def test_effective_status_computed():
     from src.trials.schemas import effective_status
     assert effective_status(_grant()) == "active"
