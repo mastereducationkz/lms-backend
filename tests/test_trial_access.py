@@ -138,6 +138,26 @@ def test_trial_hard_gate_blocks_and_passes(monkeypatch):
     courses_routes._trial_hard_gate(None, real_student, 1)  # no-op for real students
 
 
+def test_effective_status_computed():
+    from src.trials.schemas import effective_status
+    assert effective_status(_grant()) == "active"
+    assert effective_status(_grant(expires_in_minutes=-1)) == "expired"
+    assert effective_status(_grant(status="revoked")) == "revoked"
+    assert effective_status(_grant(status="converted")) == "converted"
+
+
+def test_validate_lesson_ids_pure():
+    from src.trials.routes.trials import _validate_lesson_ids
+    # lessons that exist in the course: {1, 2, 3}
+    assert _validate_lesson_ids([1, 2], {1, 2, 3}) == [1, 2]
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException):
+        _validate_lesson_ids([], {1, 2, 3})          # empty
+    with pytest.raises(HTTPException):
+        _validate_lesson_ids([1, 99], {1, 2, 3})     # foreign lesson
+
+
 def test_trial_filter_lesson_payload_strips_steps_outside_allowlist():
     from src.courses.routes.courses import _trial_filter_lesson_payload
 
