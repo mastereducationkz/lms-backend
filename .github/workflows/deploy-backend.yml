@@ -24,6 +24,10 @@ jobs:
           set -e
           echo "🚀 Starting backend deployment..."
           cd ~/projects/lms
+          # Previous deploys run `chmod +x scripts/*`, leaving mode-only changes in
+          # the tree that block `git pull --ff-only`. Ignore file modes so pulls of
+          # script content changes don't abort with "local changes would be overwritten".
+          git config core.fileMode false
           git fetch origin main
           git checkout main
           git pull --ff-only origin main
