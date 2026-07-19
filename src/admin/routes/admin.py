@@ -2374,7 +2374,7 @@ def get_admin_dashboard(
     """Get admin dashboard data (admin only)"""
     # Get basic stats
     total_users = db.query(UserInDB).count()
-    total_students = db.query(UserInDB).filter(UserInDB.role == "student").count()
+    total_students = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_trial == False).count()
     total_teachers = db.query(UserInDB).filter(UserInDB.role == "teacher").count()
     total_curators = db.query(UserInDB).filter(UserInDB.role == "curator").count()
     total_courses = db.query(Course).count()
