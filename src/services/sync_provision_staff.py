@@ -266,6 +266,85 @@ def _created_flag(resp: httpx.Response):
     return None
 
 
+# --- inline provisioning (shared with the drainer) ---------------------------
+# The batch CLI above discovers WHO to provision from the group graph. The drainer needs the same
+# wire contract but for ONE known user/group event at a time (no discovery, no pacing), so these
+# helpers factor out "build the envelope + POST it" without pulling in the CLI's group scan. Keeping
+# them here means the drainer and the CLI can never drift on the staff.upserted shape or role map.
+
+_ALL_PLATFORMS = ("ielts", "sat")
+
+
+def _platform_configured(platform: str) -> bool:
+    """True when a platform has BOTH a base URL and an API key set — i.e. worth POSTing to.
+
+    Filtering here (rather than letting ``_provision_one`` return a "not configured" error) keeps
+    the drainer's outcome clean: a genuinely-configured platform that then errors is transient
+    (retry), never a config gap masquerading as a failure.
+    """
+    if platform == "ielts":
+        return bool(_ielts_base()) and bool(os.getenv("IELTS_API_KEY", ""))
+    if platform == "sat":
+        return bool(_sat_base()) and bool(os.getenv("MASTEREDU_API_KEY", ""))
+    return False
+
+
+def staff_entry(
+    lms_user_id: int, email: str | None, name: str | None, platform_role: str, platform: str
+) -> ProvisionStaff | None:
+    """Build ONE ProvisionStaff for a known (role, platform), or None if it must be skipped.
+
+    Skips empty/internal/test emails (never provision an @lms.com/test account onto a real
+    platform) and unconfigured/unknown platforms. ``platform_role`` is the platform family
+    ("teacher"|"curator") — for a group event it is the SLOT (teacher_email->teacher).
+    """
+    if platform_role not in ("teacher", "curator"):
+        return None
+    if not _platform_configured(platform):
+        return None
+    email_norm = (email or "").strip().lower()
+    if not email_norm or _is_test_email(email_norm):
+        return None
+    nm = name.strip() if isinstance(name, str) and name.strip() else None
+    return ProvisionStaff(lms_user_id, email_norm, nm, platform_role, platform)
+
+
+def staff_entries_for_user(
+    lms_user_id: int,
+    email: str | None,
+    name: str | None,
+    lms_role: str | None,
+    platforms: tuple[str, ...] = _ALL_PLATFORMS,
+) -> list[ProvisionStaff]:
+    """Entries to make a newly-created LMS staff user exist on every configured platform.
+
+    Uses the user's OWN LMS role to pick the platform family (teacher vs curator); returns [] for
+    non-staff roles (students/admins/parents) so the caller is a no-op for them.
+    """
+    platform_role = _platform_role(lms_role or "")
+    if platform_role is None:
+        return []
+    out = []
+    for platform in platforms:
+        entry = staff_entry(lms_user_id, email, name, platform_role, platform)
+        if entry is not None:
+            out.append(entry)
+    return out
+
+
+def provision_staff_now(
+    entries: list[ProvisionStaff], *, timeout: float = _TIMEOUT
+) -> list[tuple[ProvisionStaff, str, str]]:
+    """POST each entry to its ``/staff`` endpoint immediately (no pacing). For the drainer, which
+    handles a handful of staff per event and wants low latency. Returns (staff, outcome, detail)
+    with outcome in created|exists|error (same as ``_provision_one``). Idempotent per entry."""
+    results = []
+    for s in entries:
+        outcome, detail = _provision_one(s, timeout=timeout)
+        results.append((s, outcome, detail))
+    return results
+
+
 # --- driver ------------------------------------------------------------------
 
 
