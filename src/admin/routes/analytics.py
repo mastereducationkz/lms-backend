@@ -1286,7 +1286,7 @@ def get_all_students_analytics(
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Базовый запрос студентов
-    students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True)
+    students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True, UserInDB.is_trial == False)
     
     # Фильтрация по ролям
     if current_user.role == "teacher":
@@ -2441,7 +2441,7 @@ def export_all_students_report(
     
     try:
         # Получаем данные всех студентов (дублируем логику из get_all_students_analytics)
-        students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True)
+        students_query = db.query(UserInDB).filter(UserInDB.role == "student", UserInDB.is_active == True, UserInDB.is_trial == False)
         
         # Фильтрация по ролям
         if current_user.role == "teacher":
@@ -3742,7 +3742,7 @@ def get_course_progress_history(
         raise HTTPException(status_code=403, detail="Access denied")
 
     # 1. Determine the set of student IDs to consider
-    student_query = db.query(UserInDB.id).filter(UserInDB.role == "student")
+    student_query = db.query(UserInDB.id).filter(UserInDB.role == "student", UserInDB.is_trial == False)
     
     if group_id:
         # Filter students by group
