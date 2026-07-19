@@ -3213,18 +3213,20 @@ def export_analytics_to_excel(
             ).filter(
                 Module.course_id == course_id,
                 UserInDB.role == "student",
-                UserInDB.is_active == True
+                UserInDB.is_active == True,
+                UserInDB.is_trial == False
             ).distinct().all()
-            
+
             enrolled_students_ids = db.query(Enrollment.user_id).filter(
                 Enrollment.course_id == course_id,
                 Enrollment.is_active == True
             ).subquery()
-            
+
             enrolled_no_progress = db.query(UserInDB).filter(
                 UserInDB.id.in_(enrolled_students_ids),
                 UserInDB.role == "student",
-                UserInDB.is_active == True
+                UserInDB.is_active == True,
+                UserInDB.is_trial == False
             ).all()
             
             enrolled_students_set = {s.id: s for s in students_with_progress}

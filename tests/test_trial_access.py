@@ -238,3 +238,13 @@ def test_auth_me_carries_trial_expiry(monkeypatch):
     )))
     resp = us.build_user_schema_response(user, db=None)
     assert resp.trial_expires_at == deadline
+
+
+def test_trial_status_job_uses_expire_stale(monkeypatch):
+    from src.services import trial_status_job
+
+    called = {}
+    monkeypatch.setattr(trial_status_job, "SessionLocal", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(trial_status_job, "expire_stale_trials", lambda db: called.setdefault("n", 3))
+    trial_status_job.run_once()
+    assert called["n"] == 3

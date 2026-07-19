@@ -2078,7 +2078,8 @@ def get_student_ranking(
         # User is not in any group, show global leaderboard for students
         students = db.query(UserInDB).filter(
             UserInDB.role == 'student',
-            UserInDB.is_active == True
+            UserInDB.is_active == True,
+            UserInDB.is_trial == False
         ).limit(100).all()
         student_ids = [s.id for s in students]
         group_name = "Global Rankings"

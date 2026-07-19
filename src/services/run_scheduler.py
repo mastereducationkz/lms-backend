@@ -56,6 +56,14 @@ def main():
     except Exception as e:
         logger.error(f"Failed to start student-sync drainer: {e}", exc_info=True)
 
+    # Trial-access bookkeeping: flips expired trial grants' status (enforcement is
+    # request-time; this only keeps admin list views truthful). Scheduler-container only.
+    try:
+        from src.services.trial_status_job import TrialStatusScheduler
+        TrialStatusScheduler(check_interval=int(os.getenv("TRIAL_STATUS_POLL", "300"))).start()
+    except Exception as e:
+        logger.error(f"Failed to start trial status scheduler: {e}", exc_info=True)
+
     # Check configuration
     resend_api_key = os.getenv('RESEND_API_KEY')
     postgres_url = os.getenv('POSTGRES_URL')

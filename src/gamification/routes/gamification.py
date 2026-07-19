@@ -515,7 +515,7 @@ def get_leaderboard(
         start_date = None
         end_date = None
         
-        query = db.query(UserInDB).filter(UserInDB.role == 'student')
+        query = db.query(UserInDB).filter(UserInDB.role == 'student', UserInDB.is_trial == False)
         
         if group_id:
             student_ids = (

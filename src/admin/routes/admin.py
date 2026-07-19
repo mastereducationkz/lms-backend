@@ -1861,6 +1861,7 @@ def get_all_users(
     is_active: Optional[bool] = None,
     search: Optional[str] = None,
     all_students: bool = False,
+    is_trial: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
@@ -1906,6 +1907,8 @@ def get_all_users(
         query = query.join(GroupStudent, UserInDB.id == GroupStudent.student_id).filter(GroupStudent.group_id == group_id)
     if is_active is not None:
         query = query.filter(UserInDB.is_active == is_active)
+    if is_trial is not None:
+        query = query.filter(UserInDB.is_trial == is_trial)
     if search:
         search_filter = f"%{search}%"
         query = query.filter(
@@ -1913,7 +1916,7 @@ def get_all_users(
             (UserInDB.email.ilike(search_filter)) |
             (UserInDB.student_id.ilike(search_filter))
         )
-    
+
     # Get total count
     total = query.count()
     
@@ -1972,6 +1975,7 @@ def get_all_users(
             role=user.role,
             avatar_url=user.avatar_url,
             is_active=user.is_active,
+            is_trial=user.is_trial,
             student_id=user.student_id,
             teacher_name=teacher_name,
             curator_name=curator_name,
