@@ -36,7 +36,7 @@ class UserInDB(Base):
     is_analytics_hidden = Column(Boolean, default=False, nullable=False)
     # Sales-prospect trial account (see src/trials). Filterable everywhere real
     # students are listed/synced; access comes solely from trial_accesses rows.
-    is_trial = Column(Boolean, default=False, nullable=False)
+    is_trial = Column(Boolean, default=False, nullable=False, index=True)
 
     groups = relationship("GroupStudent", back_populates="student", cascade="all, delete-orphan")
     enrollments = relationship("Enrollment", back_populates="user", cascade="all, delete-orphan")
