@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -159,7 +160,13 @@ def main() -> None:
         recipients = recipients[: args.limit]
 
     out_file = Path(__file__).resolve().parent / "support_announcement_recipients.txt"
-    out_file.write_text("\n".join(e for e, _ in recipients), encoding="utf-8")
+    payload = "\n".join(e for e, _ in recipients)
+    try:
+        out_file.write_text(payload, encoding="utf-8")
+    except OSError:
+        # In the deployed container scripts/ is a read-only bind mount; fall back to a writable dir.
+        out_file = Path(tempfile.gettempdir()) / "support_announcement_recipients.txt"
+        out_file.write_text(payload, encoding="utf-8")
     print(f"Eligible recipients: {len(recipients)}")
     print(f"Full list written to: {out_file}")
     print(f"Sample: {[e for e, _ in recipients[:5]]}")
