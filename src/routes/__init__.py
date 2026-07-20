@@ -23,6 +23,7 @@ def register_routes(app: FastAPI):
     from src.lesson_requests.routes import router as lesson_requests_router
     from src.routes.crm_internal import router as crm_internal_router
     from src.trials.routes import trials_router
+    from src.routes.support_api import router as support_api_router
 
     app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
     app.include_router(admin_router, prefix="/admin", tags=["Admin"])
@@ -53,3 +54,4 @@ def register_routes(app: FastAPI):
     app.include_router(sat_schedules_router, prefix="/sat", tags=["SAT Schedules"])
     app.include_router(crm_internal_router, prefix="/internal/crm", tags=["CRM Internal"])
     app.include_router(trials_router, prefix="/trials", tags=["Trials"])
+    app.include_router(support_api_router, prefix="/support-api", tags=["Support API"])
