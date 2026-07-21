@@ -369,6 +369,17 @@ def delete_account(
 
     # ORM relationships on UserInDB use cascade="all, delete-orphan", so db.delete cascades
     # messages, submissions, push tokens, progress, parent links, notifications, points, etc.
+    # A few child tables have a non-nullable, non-ondelete-CASCADE FK to users.id that is NOT
+    # modeled as a UserInDB relationship, so db.delete would orphan them and raise IntegrityError.
+    # Delete those rows explicitly first (staff-only FKs like events.created_by/teacher_id are
+    # unreachable here since the role guard above already blocks non-student/parent accounts).
+    from src.events.models import EventParticipant
+    from src.progress.models import ProgressSnapshot, QuizAttempt
+
+    db.query(EventParticipant).filter(EventParticipant.user_id == current_user.id).delete(synchronize_session=False)
+    db.query(ProgressSnapshot).filter(ProgressSnapshot.user_id == current_user.id).delete(synchronize_session=False)
+    db.query(QuizAttempt).filter(QuizAttempt.user_id == current_user.id).delete(synchronize_session=False)
+
     db.delete(current_user)
     db.commit()
     return Response(status_code=204)

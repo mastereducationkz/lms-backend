@@ -2,24 +2,41 @@
 
 Savepoint-isolated: the endpoint commits, so we roll back the outer transaction.
 """
+from datetime import datetime, timedelta
+
 import pytest
 from fastapi import HTTPException
 
-from src.schemas.models import UserInDB, Message
+from src.schemas.models import UserInDB, Message, Event, EventParticipant
 from src.utils.auth_utils import hash_password
 from src.auth.routes.auth import delete_account, DeleteAccountRequest
 
 
 @pytest.fixture
 def db():
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
     from src.config import engine
-    connection = engine.connect()
+
+    try:
+        connection = engine.connect()
+    except OperationalError:
+        pytest.skip("No database available (requires Postgres); skipping account-deletion tests")
+
     trans = connection.begin()
     session = SASession(bind=connection)
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart_savepoint(sess, transaction):
+        if transaction.nested and not transaction._parent.nested:
+            sess.begin_nested()
+
     try:
         yield session
     finally:
+        event.remove(session, "after_transaction_end", _restart_savepoint)
         session.close()
         trans.rollback()
         connection.close()
@@ -47,6 +64,7 @@ def test_wrong_password_rejected(db):
         delete_account(DeleteAccountRequest(current_password="WRONG"),
                        current_user=student, db=db)
     assert exc.value.status_code == 400
+    assert db.query(UserInDB).filter(UserInDB.id == student.id).first() is not None
 
 
 def test_staff_cannot_self_delete(db):
@@ -66,3 +84,27 @@ def test_student_with_messages_deletes_clean(db):
     delete_account(DeleteAccountRequest(current_password="secret123"),
                    current_user=a, db=db)
     assert db.query(Message).filter(Message.from_user_id == a.id).count() == 0
+
+
+def test_student_with_event_registration_deletes_clean(db):
+    admin = _make_user(db, role="admin", email="del-event-admin@test.local")
+    student = _make_user(db, role="student", email="del-event-student@test.local")
+    sid = student.id
+    now = datetime.utcnow()
+    ev = Event(
+        title="Test Event",
+        event_type="webinar",
+        start_datetime=now,
+        end_datetime=now + timedelta(hours=1),
+        created_by=admin.id,
+    )
+    db.add(ev)
+    db.flush()
+    db.add(EventParticipant(event_id=ev.id, user_id=sid))
+    db.flush()
+
+    delete_account(DeleteAccountRequest(current_password="secret123"),
+                   current_user=student, db=db)
+
+    assert db.query(UserInDB).filter(UserInDB.id == sid).first() is None
+    assert db.query(EventParticipant).filter(EventParticipant.user_id == sid).count() == 0
