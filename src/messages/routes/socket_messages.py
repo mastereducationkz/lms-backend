@@ -663,6 +663,9 @@ async def handle_group_threads_get(sid):
         from src.messages.group_service import list_conversations
         uid = _resolve_user_id(session, db)
         await sio.emit('group:threads', list_conversations(db, uid), to=sid)
+    except Exception as e:
+        logger.error(f"group threads:get error: {e}")
+        await sio.emit('message:error', {'detail': 'Internal server error'}, to=sid)
     finally:
         db.close()
 
@@ -679,7 +682,15 @@ async def handle_group_messages_get(sid, data):
         from src.messages.group_service import get_messages
         uid = _resolve_user_id(session, db)
         try:
-            msgs = get_messages(db, uid, conv_id, int(data.get('limit') or 50), data.get('before_id'))
+            before_id = data.get('before_id')
+            if before_id is not None:
+                try:
+                    before_id = int(before_id)
+                except (TypeError, ValueError):
+                    await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+                    return
+            limit = min(int(data.get('limit') or 50), 100)
+            msgs = get_messages(db, uid, conv_id, limit, before_id)
         except PermissionError:
             await sio.emit('message:error', {'detail': 'Access denied'}, to=sid)
             return
@@ -700,7 +711,10 @@ async def handle_group_message_send(sid, data):
         from src.schemas.models import GroupConversation
         from src.utils.push_notifications import send_group_message_push
         uid = _resolve_user_id(session, db)
-        conv_id = int(data.get('conversation_id'))
+        conv_id = int(data.get('conversation_id')) if data and data.get('conversation_id') is not None else None
+        if conv_id is None:
+            await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+            return
         try:
             msg = post_message(db, uid, conv_id, data.get('content') or '', data.get('file_url'))
         except PermissionError:

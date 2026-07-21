@@ -41,5 +41,23 @@ def post_group_message(conversation_id: int,
         raise HTTPException(status_code=403, detail="Not a member of this conversation")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # Fan-out (socket + push) is wired in Task 6 via group_service hooks; REST returns the message.
+
+    # Push fan-out to all group members (mirrors the socket `group:message:send`
+    # handler in socket_messages.py for parity). Realtime socket emit is
+    # intentionally not done here, matching the 1:1 REST path's behavior.
+    from src.messages.group_service import member_ids, _title
+    from src.schemas.models import GroupConversation
+    from src.utils.push_notifications import send_group_message_push
+    conv = db.query(GroupConversation).filter_by(id=conversation_id).first()
+    title = _title(db, conv) if conv else "Group chat"
+    send_group_message_push(
+        db,
+        member_ids=member_ids(db, conversation_id),
+        sender_name=msg["sender_name"],
+        conversation_id=conversation_id,
+        title=title,
+        message_preview=msg["content"] or "📎 Attachment",
+        sender_id=current_user.id,
+    )
+
     return msg
