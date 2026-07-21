@@ -93,3 +93,16 @@ def test_unread_count_uses_last_read(db):
     group_service.mark_read(db, s["student"].id, conv.id); db.flush()
     convs = {c["id"]: c for c in group_service.list_conversations(db, s["student"].id)}
     assert convs[conv.id]["unread_count"] == 0
+
+
+def test_parent_message_sender_name_includes_child(db):
+    """In a parents channel, a parent's message sender_name is tagged with the child
+    so staff know whose parent is writing."""
+    s = _setup(db); ensure_group_conversations(db, s["g"]); db.flush()
+    parents_conv = _conv(db, s["g"].id, "parents")
+    msg = group_service.post_message(db, s["parent"].id, parents_conv.id, "hello"); db.flush()
+    assert "родитель" in msg["sender_name"]
+    assert s["student"].name in msg["sender_name"]
+    # A non-parent (teacher) is unchanged.
+    tmsg = group_service.post_message(db, s["teacher"].id, parents_conv.id, "hi"); db.flush()
+    assert "родитель" not in tmsg["sender_name"]

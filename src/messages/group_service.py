@@ -4,7 +4,24 @@ from sqlalchemy.orm import Session
 
 from src.schemas.models import (
     UserInDB, Group, GroupConversation, GroupConversationMember, GroupMessage,
+    ParentStudent,
 )
+
+
+def _children_names_for_parents(db: Session, parent_ids) -> dict:
+    """Map parent user id -> 'Child A, Child B'. Lets staff see whose parent is
+    writing in a parents channel. One query for the whole batch."""
+    ids = [i for i in (parent_ids or []) if i]
+    if not ids:
+        return {}
+    rows = (db.query(ParentStudent.parent_id, UserInDB.name)
+              .join(UserInDB, UserInDB.id == ParentStudent.student_id)
+              .filter(ParentStudent.parent_id.in_(ids)).all())
+    acc: dict = {}
+    for pid, name in rows:
+        if name:
+            acc.setdefault(pid, []).append(name)
+    return {pid: ", ".join(names) for pid, names in acc.items()}
 
 
 def _membership(db: Session, user_id: int, conversation_id: int):
@@ -28,12 +45,19 @@ def _can_post(db: Session, user: UserInDB, conv: GroupConversation) -> bool:
     return True
 
 
-def _message_dict(msg: GroupMessage, sender: UserInDB) -> dict:
+def _message_dict(msg: GroupMessage, sender: UserInDB, children_map: dict = None) -> dict:
+    name = sender.name if sender else "Unknown"
+    # In a parents channel, tag a parent's messages with their child so staff know
+    # whose parent is writing: "Test Parent · родитель Айгерим".
+    if sender is not None and getattr(sender, "role", None) == "parent" and children_map:
+        kids = children_map.get(sender.id)
+        if kids:
+            name = f"{name} · родитель {kids}"
     return {
         "id": msg.id,
         "conversation_id": msg.conversation_id,
         "from_user_id": msg.from_user_id,
-        "sender_name": sender.name if sender else "Unknown",
+        "sender_name": name,
         "content": msg.content,
         "file_url": msg.file_url,
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
@@ -60,12 +84,13 @@ def list_conversations(db: Session, user_id: int) -> list:
         if m.last_read_at is not None:
             unread_q = unread_q.filter(GroupMessage.created_at > m.last_read_at)
         sender = db.query(UserInDB).filter_by(id=last.from_user_id).first() if last else None
+        cm = _children_names_for_parents(db, [sender.id]) if sender and sender.role == "parent" else {}
         out.append({
             "id": conv.id,
             "group_id": conv.group_id,
             "kind": conv.kind,
             "title": _title(db, conv),
-            "last_message": _message_dict(last, sender) if last else None,
+            "last_message": _message_dict(last, sender, cm) if last else None,
             "unread_count": unread_q.count(),
         })
     out.sort(key=lambda c: (c["last_message"] or {}).get("created_at") or "", reverse=True)
@@ -82,7 +107,8 @@ def get_messages(db: Session, user_id: int, conversation_id: int,
     rows.reverse()
     sender_ids = {r.from_user_id for r in rows}
     senders = {u.id: u for u in db.query(UserInDB).filter(UserInDB.id.in_(sender_ids)).all()} if sender_ids else {}
-    return [_message_dict(r, senders.get(r.from_user_id)) for r in rows]
+    children_map = _children_names_for_parents(db, [u.id for u in senders.values() if u.role == "parent"])
+    return [_message_dict(r, senders.get(r.from_user_id), children_map) for r in rows]
 
 
 def post_message(db: Session, user_id: int, conversation_id: int,
@@ -100,7 +126,8 @@ def post_message(db: Session, user_id: int, conversation_id: int,
     db.add(msg)
     member.last_read_at = datetime.now(timezone.utc)
     db.commit(); db.refresh(msg)
-    return _message_dict(msg, user)
+    cm = _children_names_for_parents(db, [user.id]) if user and user.role == "parent" else {}
+    return _message_dict(msg, user, cm)
 
 
 def mark_read(db: Session, user_id: int, conversation_id: int) -> None:
