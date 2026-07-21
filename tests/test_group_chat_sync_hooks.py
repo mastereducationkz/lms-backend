@@ -91,3 +91,32 @@ def test_sync_student_groups_returns_empty_when_unchanged(db):
     from src.admin.routes.admin import _sync_student_groups
     s = _setup(db)
     assert _sync_student_groups(db, s["student"].id, [s["g"].id]) == set()
+
+
+def test_sync_groups_for_students_adds_then_removes_parent(db):
+    """Linking a parent to a student must add them to the parents channel of that
+    student's groups; unlinking must remove them (via sync_groups_for_students)."""
+    from src.schemas.models import ParentStudent
+    from src.messages.group_membership import sync_groups_for_students
+    s = _setup(db)  # group with a teacher, curator, student
+    parent = _u(db, "gcs-p@test.local", "parent")
+    ensure_group_conversations(db, s["g"]); db.flush()
+    parents_conv = db.query(GroupConversation).filter_by(group_id=s["g"].id, kind="parents").first()
+
+    # Not linked yet → parent is not a member.
+    assert db.query(GroupConversationMember).filter_by(
+        conversation_id=parents_conv.id, user_id=parent.id).count() == 0
+
+    # Link → sync → member.
+    db.add(ParentStudent(parent_id=parent.id, student_id=s["student"].id)); db.flush()
+    sync_groups_for_students(db, [s["student"].id]); db.flush()
+    assert db.query(GroupConversationMember).filter_by(
+        conversation_id=parents_conv.id, user_id=parent.id).count() == 1
+
+    # Unlink → sync → removed.
+    db.query(ParentStudent).filter_by(parent_id=parent.id, student_id=s["student"].id).delete(
+        synchronize_session=False)
+    db.flush()
+    sync_groups_for_students(db, [s["student"].id]); db.flush()
+    assert db.query(GroupConversationMember).filter_by(
+        conversation_id=parents_conv.id, user_id=parent.id).count() == 0

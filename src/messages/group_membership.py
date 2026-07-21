@@ -71,6 +71,22 @@ def sync_group_conversation_members(db: Session, group_id: int) -> None:
     ensure_group_conversations(db, group)
 
 
+def sync_groups_for_students(db: Session, student_ids) -> None:
+    """Resync group-chat channels for every group the given students belong to.
+
+    Used after parent<->child links change: a newly-linked parent must appear in the
+    parents channel of each of their children's groups, and an unlinked parent must be
+    removed (when they no longer have a child in that group). Does not commit — the
+    caller owns the transaction boundary.
+    """
+    ids = list(student_ids or [])
+    if not ids:
+        return
+    rows = db.query(GroupStudent.group_id).filter(GroupStudent.student_id.in_(ids)).all()
+    for gid in {r[0] for r in rows}:
+        sync_group_conversation_members(db, gid)
+
+
 def provision_all_groups(db: Session) -> int:
     groups = db.query(Group).filter(Group.is_active == True).all()  # noqa: E712
     for g in groups:

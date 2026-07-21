@@ -459,8 +459,15 @@ def create_single_user(
         
         # Link children if creating a parent
         if user_data.role == "parent" and user_data.child_ids:
-            _link_children_to_parent(db, new_user.id, user_data.child_ids)
+            _gc_linked = _link_children_to_parent(db, new_user.id, user_data.child_ids)
             db.commit()
+            try:
+                from src.messages.group_membership import sync_groups_for_students
+                sync_groups_for_students(db, _gc_linked)
+                db.commit()
+            except Exception:
+                logger.exception("group chat parent-link sync failed (create parent %s)", new_user.id)
+                db.rollback()
 
         # Email an invite (link + credentials) to created students
         if user_data.send_invites and new_user.role == "student":
@@ -522,6 +529,13 @@ def link_parent_children(
         raise HTTPException(status_code=404, detail="Parent not found")
     linked = _link_children_to_parent(db, parent_id, body.child_ids)
     db.commit()
+    try:
+        from src.messages.group_membership import sync_groups_for_students
+        sync_groups_for_students(db, linked)
+        db.commit()
+    except Exception:
+        logger.exception("group chat parent-link sync failed (link parent %s)", parent_id)
+        db.rollback()
     return {"linked": linked}
 
 
@@ -541,6 +555,13 @@ def unlink_parent_child(
         raise HTTPException(status_code=404, detail="Link not found")
     db.delete(link)
     db.commit()
+    try:
+        from src.messages.group_membership import sync_groups_for_students
+        sync_groups_for_students(db, [student_id])
+        db.commit()
+    except Exception:
+        logger.exception("group chat parent-unlink sync failed (parent %s child %s)", parent_id, student_id)
+        db.rollback()
     return {"detail": "unlinked"}
 
 
