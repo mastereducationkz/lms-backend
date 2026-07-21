@@ -45,8 +45,11 @@ class GroupConversationMember(Base):
 class GroupMessage(Base):
     __tablename__ = "group_messages"
     id = Column(Integer, primary_key=True, index=True)
+    # No single-column index=True here: the composite (conversation_id, created_at) index below
+    # covers conversation_id equality lookups, and this keeps the model in sync with the migration
+    # (avoids spurious alembic autogenerate drift).
     conversation_id = Column(Integer, ForeignKey("group_conversations.id", ondelete="CASCADE"),
-                             nullable=False, index=True)
+                             nullable=False)
     from_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     content = Column(Text, nullable=False)
     file_url = Column(String, nullable=True)
