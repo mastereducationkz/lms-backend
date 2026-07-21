@@ -19,6 +19,7 @@ from src.events.models import (
     MissedAttendanceLog, LessonSchedule, Attendance,
 )
 from src.messages.models import Message, Notification
+from src.messages.group_models import GroupConversation, GroupConversationMember, GroupMessage
 from src.gamification.models import (
     LeaderboardEntry, LeaderboardConfig, CuratorRating,
     DailyQuestionCompletion,
@@ -42,6 +43,7 @@ __all__ = [
     "Event", "EventGroup", "EventCourse", "EventParticipant",
     "MissedAttendanceLog", "LessonSchedule", "Attendance",
     "Message", "Notification",
+    "GroupConversation", "GroupConversationMember", "GroupMessage",
     "LeaderboardEntry", "LeaderboardConfig", "CuratorRating",
     "DailyQuestionCompletion",
     "FavoriteFlashcard", "QuestionErrorReport",

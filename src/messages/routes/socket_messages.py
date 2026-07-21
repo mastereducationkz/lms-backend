@@ -43,6 +43,7 @@ sio = socketio.AsyncServer(
 )
 
 USER_ROOM_PREFIX = "user:"
+GROUP_ROOM_PREFIX = "group:"
 
 def _user_id_from_token(token: str) -> int | None:
     """Resolve the LMS user id from a bearer token (legacy HS256 or OIDC).
@@ -144,6 +145,18 @@ async def connect(sid, environ, auth):
     
     await sio.save_session(sid, { 'user_id': user_id })
     await sio.enter_room(sid, f"{USER_ROOM_PREFIX}{user_id}")
+
+    # Auto-join group-chat rooms for this user
+    try:
+        _gdb = next(get_db())
+        try:
+            from src.messages.group_service import list_conversations
+            for c in list_conversations(_gdb, user_id):
+                await sio.enter_room(sid, f"{GROUP_ROOM_PREFIX}{c['id']}")
+        finally:
+            _gdb.close()
+    except Exception as e:
+        logger.error(f"group auto-join failed for {user_id}: {e}")
 
 @sio.event
 async def disconnect(sid):
@@ -641,6 +654,111 @@ async def handle_unread_count(sid):
         return {"unread_count": 0}
     finally:
         db.close()
+
+@sio.on('group:threads:get')
+async def handle_group_threads_get(sid):
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    try:
+        from src.messages.group_service import list_conversations
+        uid = _resolve_user_id(session, db)
+        await sio.emit('group:threads', list_conversations(db, uid), to=sid)
+    except Exception as e:
+        logger.error(f"group threads:get error: {e}")
+        await sio.emit('message:error', {'detail': 'Internal server error'}, to=sid)
+    finally:
+        db.close()
+
+
+@sio.on('group:messages:get')
+async def handle_group_messages_get(sid, data):
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    try:
+        conv_id = int(data.get('conversation_id')) if data and data.get('conversation_id') is not None else None
+        if conv_id is None:
+            await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+            return
+        from src.messages.group_service import get_messages
+        uid = _resolve_user_id(session, db)
+        try:
+            before_id = data.get('before_id')
+            if before_id is not None:
+                try:
+                    before_id = int(before_id)
+                except (TypeError, ValueError):
+                    await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+                    return
+            limit = min(int(data.get('limit') or 50), 100)
+            msgs = get_messages(db, uid, conv_id, limit, before_id)
+        except PermissionError:
+            await sio.emit('message:error', {'detail': 'Access denied'}, to=sid)
+            return
+        await sio.emit('group:messages', {'conversation_id': conv_id, 'messages': msgs}, to=sid)
+    except Exception as e:
+        logger.error(f"group messages:get error: {e}")
+        await sio.emit('message:error', {'detail': 'Internal server error'}, to=sid)
+    finally:
+        db.close()
+
+
+@sio.on('group:message:send')
+async def handle_group_message_send(sid, data):
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    try:
+        from src.messages.group_service import post_message, member_ids, _title
+        from src.schemas.models import GroupConversation
+        from src.utils.push_notifications import send_group_message_push
+        uid = _resolve_user_id(session, db)
+        conv_id = int(data.get('conversation_id')) if data and data.get('conversation_id') is not None else None
+        if conv_id is None:
+            await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+            return
+        try:
+            msg = post_message(db, uid, conv_id, data.get('content') or '', data.get('file_url'))
+        except PermissionError:
+            await sio.emit('message:error', {'detail': 'Access denied'}, to=sid)
+            return
+        except ValueError as e:
+            await sio.emit('message:error', {'detail': str(e)}, to=sid)
+            return
+        await sio.emit('group:message:new', msg, to=f"{GROUP_ROOM_PREFIX}{conv_id}")
+        members = member_ids(db, conv_id)
+        for mid in members:
+            await sio.emit('group:threads:update', to=f"{USER_ROOM_PREFIX}{mid}")
+        conv = db.query(GroupConversation).filter_by(id=conv_id).first()
+        title = _title(db, conv) if conv else 'Group chat'
+        send_group_message_push(db, member_ids=members, sender_name=msg['sender_name'],
+                                conversation_id=conv_id, title=title,
+                                message_preview=msg['content'] or '📎 Attachment', sender_id=uid)
+    except Exception as e:
+        logger.error(f"group send error: {e}")
+        await sio.emit('message:error', {'detail': 'Internal server error'}, to=sid)
+    finally:
+        db.close()
+
+
+@sio.on('group:read')
+async def handle_group_read(sid, data):
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    try:
+        conv_id = int(data.get('conversation_id')) if data and data.get('conversation_id') is not None else None
+        if conv_id is None:
+            return
+        from src.messages.group_service import mark_read
+        uid = _resolve_user_id(session, db)
+        try:
+            mark_read(db, uid, conv_id)
+        except PermissionError:
+            return
+        await sio.emit('group:unread:update', to=f"{USER_ROOM_PREFIX}{uid}")
+    except Exception as e:
+        logger.error(f"group read error: {e}")
+    finally:
+        db.close()
+
 
 def create_socket_app(app: FastAPI):
     """Create Socket.IO app wrapper"""
