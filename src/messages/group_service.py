@@ -93,6 +93,10 @@ def list_conversations(db: Session, user_id: int) -> list:
             "last_message": _message_dict(last, sender, cm) if last else None,
             "unread_count": unread_q.count(),
         })
+    # Deterministic order: newest-message-first, empties last, with a stable id
+    # tiebreaker so the list doesn't reshuffle when a member row is updated (e.g.
+    # marking a group read reorders the unsorted members query in Postgres).
+    out.sort(key=lambda c: c["id"])
     out.sort(key=lambda c: (c["last_message"] or {}).get("created_at") or "", reverse=True)
     return out
 
