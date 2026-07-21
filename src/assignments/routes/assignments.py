@@ -470,6 +470,59 @@ def get_student_previous_homework(
     return result
 
 
+@router.get("/teacher/today")
+def teacher_today_homework(
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """End-of-day coverage check for a teacher: each of their active groups and
+    whether homework was assigned to it TODAY (Almaty), so they can confirm they
+    didn't forget anyone. 'Assigned by me' is approximated as assignments created
+    today for groups this teacher owns (assignments carry no explicit creator)."""
+    from src.schemas.models import Group, Assignment
+
+    # Kazakhstan is a single UTC+5 timezone (no DST). Today's Almaty window in naive-UTC:
+    almaty = timezone(timedelta(hours=5))
+    now_almaty = datetime.now(almaty)
+    day_start_utc = (now_almaty.replace(hour=0, minute=0, second=0, microsecond=0)
+                     .astimezone(timezone.utc).replace(tzinfo=None))
+    day_end_utc = day_start_utc + timedelta(days=1)
+
+    groups = (db.query(Group)
+                .filter(Group.teacher_id == current_user.id, Group.is_active == True)  # noqa: E712
+                .order_by(Group.name).all())
+    group_ids = [g.id for g in groups]
+
+    by_group: dict = {}
+    if group_ids:
+        todays = (db.query(Assignment)
+                    .filter(Assignment.group_id.in_(group_ids),
+                            Assignment.is_active == True,  # noqa: E712
+                            Assignment.created_at >= day_start_utc,
+                            Assignment.created_at < day_end_utc)
+                    .all())
+        for a in todays:
+            by_group.setdefault(a.group_id, []).append({"id": a.id, "title": a.title})
+
+    result_groups = []
+    for g in groups:
+        items = by_group.get(g.id, [])
+        result_groups.append({
+            "group_id": g.id,
+            "group_name": g.name,
+            "has_homework_today": len(items) > 0,
+            "assignments": items,
+        })
+    assigned = sum(1 for g in result_groups if g["has_homework_today"])
+    return {
+        "date": now_almaty.date().isoformat(),
+        "total_groups": len(result_groups),
+        "assigned_count": assigned,
+        "missing_count": len(result_groups) - assigned,
+        "groups": result_groups,
+    }
+
+
 @router.post("/", response_model=AssignmentSchema)
 def create_assignment(
     assignment_data: AssignmentCreateSchema,
