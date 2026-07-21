@@ -55,6 +55,8 @@ class UserInDB(Base):
     # children_links: rows where this user is the PARENT. parent_links: rows where this user is the STUDENT.
     children_links = relationship("ParentStudent", foreign_keys="ParentStudent.parent_id", back_populates="parent", cascade="all, delete-orphan")
     parent_links = relationship("ParentStudent", foreign_keys="ParentStudent.student_id", back_populates="student", cascade="all, delete-orphan")
+    group_chat_memberships = relationship("GroupConversationMember", back_populates="user", cascade="all, delete-orphan")
+    sent_group_messages = relationship("GroupMessage", back_populates="sender", cascade="all, delete-orphan")
 
     @property
     def course_ids(self) -> List[int]:
