@@ -58,11 +58,14 @@ def _sync_group_students(db: Session, group_id: int, desired_student_ids: List[i
             db.add(GroupStudent(group_id=group_id, student_id=student_id))
 
 
-def _sync_student_groups(db: Session, user_id: int, desired_group_ids: List[int]) -> None:
+def _sync_student_groups(db: Session, user_id: int, desired_group_ids: List[int]) -> set:
     """Add/remove a student's group memberships by diff; skip when unchanged.
 
     Submissions are tied to assignment_id and are never moved or deleted here —
     old group homework stays in the DB; new group gets its own assignments.
+
+    Returns the set of affected group ids (added or removed) so the caller can
+    resync those groups' chat channels; empty set when nothing changed.
     """
     desired_ids = set(desired_group_ids)
     current_ids = {
@@ -72,7 +75,7 @@ def _sync_student_groups(db: Session, user_id: int, desired_group_ids: List[int]
         ).all()
     }
     if desired_ids == current_ids:
-        return
+        return set()
 
     to_remove = current_ids - desired_ids
     to_add = desired_ids - current_ids
@@ -87,6 +90,8 @@ def _sync_student_groups(db: Session, user_id: int, desired_group_ids: List[int]
         group = db.query(Group).filter(Group.id == group_id).first()
         if group:
             db.add(GroupStudent(group_id=group_id, student_id=user_id))
+
+    return to_remove | to_add
 
 
 router = APIRouter()
@@ -2251,8 +2256,17 @@ def update_user(
     final_role = user_data.role if user_data.role is not None else user.role
 
     if "group_ids" in user_patch and final_role == "student":
-        _sync_student_groups(db, user_id, user_patch["group_ids"])
+        _gc_affected_group_ids = _sync_student_groups(db, user_id, user_patch["group_ids"])
         db.commit()
+        # Resync group-chat channels for every group the student joined or left.
+        for _gc_gid in _gc_affected_group_ids:
+            try:
+                from src.messages.group_membership import sync_group_conversation_members
+                sync_group_conversation_members(db, _gc_gid)
+                db.commit()
+            except Exception:
+                logger.exception("group chat member sync failed for group %s", _gc_gid)
+                db.rollback()
     
     # Update managed courses for Head Teacher
     if user_data.course_ids is not None and final_role == "head_teacher":

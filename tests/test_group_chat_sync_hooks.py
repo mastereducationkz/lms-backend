@@ -59,3 +59,35 @@ def test_new_student_added_after_provision_gets_synced_in(db):
     class_conv = db.query(GroupConversation).filter_by(group_id=s["g"].id, kind="class").first()
     assert db.query(GroupConversationMember).filter_by(
         conversation_id=class_conv.id, user_id=newstud.id).count() == 1
+
+
+def test_sync_student_groups_returns_affected_and_channels_follow(db):
+    """update_user's group diff must report which groups changed so their channels resync."""
+    from src.admin.routes.admin import _sync_student_groups
+    teacher = _u(db, "gcs2-t@test.local", "teacher")
+    student = _u(db, "gcs2-s@test.local", "student")
+    gA = Group(name="A", is_active=True, teacher_id=teacher.id)
+    gB = Group(name="B", is_active=True, teacher_id=teacher.id)
+    db.add_all([gA, gB]); db.flush()
+    db.add(GroupStudent(group_id=gA.id, student_id=student.id)); db.flush()
+    ensure_group_conversations(db, gA); ensure_group_conversations(db, gB); db.flush()
+
+    # Move the student from A to B; the diff must report both groups as affected.
+    affected = _sync_student_groups(db, student.id, [gB.id]); db.flush()
+    assert affected == {gA.id, gB.id}
+    for gid in affected:
+        sync_group_conversation_members(db, gid)
+    db.flush()
+
+    a_class = db.query(GroupConversation).filter_by(group_id=gA.id, kind="class").first()
+    b_class = db.query(GroupConversation).filter_by(group_id=gB.id, kind="class").first()
+    assert db.query(GroupConversationMember).filter_by(
+        conversation_id=a_class.id, user_id=student.id).count() == 0
+    assert db.query(GroupConversationMember).filter_by(
+        conversation_id=b_class.id, user_id=student.id).count() == 1
+
+
+def test_sync_student_groups_returns_empty_when_unchanged(db):
+    from src.admin.routes.admin import _sync_student_groups
+    s = _setup(db)
+    assert _sync_student_groups(db, s["student"].id, [s["g"].id]) == set()
