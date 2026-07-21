@@ -506,14 +506,27 @@ def teacher_today_homework(
         for a in todays:
             by_group.setdefault(a.group_id, []).append({"id": a.id, "title": a.title})
 
+    # When each group was LAST assigned any homework (not just today), for context.
+    from sqlalchemy import func
+    last_map: dict = {}
+    if group_ids:
+        for gid, dt in (db.query(Assignment.group_id, func.max(Assignment.created_at))
+                          .filter(Assignment.group_id.in_(group_ids),
+                                  Assignment.is_active == True)  # noqa: E712
+                          .group_by(Assignment.group_id).all()):
+            last_map[gid] = dt
+
     result_groups = []
     for g in groups:
         items = by_group.get(g.id, [])
+        last_dt = last_map.get(g.id)
         result_groups.append({
             "group_id": g.id,
             "group_name": g.name,
             "has_homework_today": len(items) > 0,
             "assignments": items,
+            # naive-UTC; append Z so the client parses it as UTC
+            "last_assigned_at": (last_dt.isoformat() + "Z") if last_dt else None,
         })
     assigned = sum(1 for g in result_groups if g["has_homework_today"])
     return {
