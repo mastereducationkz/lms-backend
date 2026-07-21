@@ -259,3 +259,59 @@ def send_message_push_to_user(
         except Exception:
             pass
         return 0
+
+
+def send_group_message_push(db, *, member_ids, sender_name, conversation_id,
+                            title, message_preview, sender_id) -> int:
+    """Fan a group-chat push out to all members' active devices except the sender's.
+
+    Non-fatal: any failure is logged and swallowed so message delivery is never
+    blocked by push problems.
+    """
+    from src.auth.models import UserPushToken
+    try:
+        recipient_ids = [i for i in member_ids if i != sender_id]
+        if not recipient_ids:
+            return 0
+        rows = db.query(UserPushToken).filter(
+            UserPushToken.user_id.in_(recipient_ids),
+            UserPushToken.is_active == True,  # noqa: E712
+        ).all()
+        valid = [r.token for r in rows if r.token and r.token.startswith("ExponentPushToken[")]
+        if not valid:
+            return 0
+        preview = message_preview if len(message_preview) <= 100 else message_preview[:97] + "..."
+        messages = [{
+            "to": t, "title": title, "body": f"{sender_name}: {preview}",
+            "sound": "default", "priority": "high", "badge": 1,
+            "data": {"type": "group_message", "conversationId": conversation_id, "title": title},
+        } for t in valid]
+        response = requests.post(EXPO_PUSH_ENDPOINT, json=messages,
+                                 headers={"Accept": "application/json", "Content-Type": "application/json"},
+                                 timeout=30)
+        if response.status_code != 200:
+            logger.error(f"Group push failed: {response.status_code} - {response.text[:200]}")
+            return 0
+        results = response.json().get("data", [])
+        by_token = {r.token: r for r in rows}
+        accepted = 0
+        deactivated = False
+        for token, result in zip(valid, results):
+            if result.get("status") == "ok":
+                accepted += 1
+                continue
+            if (result.get("details") or {}).get("error") == "DeviceNotRegistered":
+                row = by_token.get(token)
+                if row is not None:
+                    row.is_active = False
+                    deactivated = True
+        if deactivated:
+            db.commit()
+        return accepted
+    except Exception as e:
+        logger.error(f"send_group_message_push failed for conv {conversation_id}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
