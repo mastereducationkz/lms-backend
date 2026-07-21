@@ -672,15 +672,21 @@ async def handle_group_messages_get(sid, data):
     session = await sio.get_session(sid)
     db: Session = next(get_db())
     try:
+        conv_id = int(data.get('conversation_id')) if data and data.get('conversation_id') is not None else None
+        if conv_id is None:
+            await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+            return
         from src.messages.group_service import get_messages
         uid = _resolve_user_id(session, db)
-        conv_id = int(data.get('conversation_id'))
         try:
             msgs = get_messages(db, uid, conv_id, int(data.get('limit') or 50), data.get('before_id'))
         except PermissionError:
             await sio.emit('message:error', {'detail': 'Access denied'}, to=sid)
             return
         await sio.emit('group:messages', {'conversation_id': conv_id, 'messages': msgs}, to=sid)
+    except Exception as e:
+        logger.error(f"group messages:get error: {e}")
+        await sio.emit('message:error', {'detail': 'Internal server error'}, to=sid)
     finally:
         db.close()
 
@@ -724,13 +730,18 @@ async def handle_group_read(sid, data):
     session = await sio.get_session(sid)
     db: Session = next(get_db())
     try:
+        conv_id = int(data.get('conversation_id')) if data and data.get('conversation_id') is not None else None
+        if conv_id is None:
+            return
         from src.messages.group_service import mark_read
         uid = _resolve_user_id(session, db)
         try:
-            mark_read(db, uid, int(data.get('conversation_id')))
+            mark_read(db, uid, conv_id)
         except PermissionError:
             return
         await sio.emit('group:unread:update', to=f"{USER_ROOM_PREFIX}{uid}")
+    except Exception as e:
+        logger.error(f"group read error: {e}")
     finally:
         db.close()
 
