@@ -1365,9 +1365,13 @@ def update_group(
     db.refresh(group)
     # Cross-platform sync is captured by the `groups` DB trigger (see p7_student_sync_group_trigger).
 
-    from src.messages.group_membership import sync_group_conversation_members
-    sync_group_conversation_members(db, group_id)
-    db.commit()
+    try:
+        from src.messages.group_membership import sync_group_conversation_members
+        sync_group_conversation_members(db, group_id)
+        db.commit()
+    except Exception:
+        logger.exception("group chat member sync failed for group %s", group_id)
+        db.rollback()
 
     # Create response with teacher name, curator name and student count
     teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
@@ -1848,9 +1852,13 @@ def assign_teacher_to_group(
         sync_future_lesson_teachers(db, group.id, teacher_data.teacher_id)
     db.commit()
 
-    from src.messages.group_membership import sync_group_conversation_members
-    sync_group_conversation_members(db, group_id)
-    db.commit()
+    try:
+        from src.messages.group_membership import sync_group_conversation_members
+        sync_group_conversation_members(db, group_id)
+        db.commit()
+    except Exception:
+        logger.exception("group chat member sync failed for group %s", group_id)
+        db.rollback()
 
     return {"detail": f"Teacher '{teacher.name}' assigned to group '{group.name}'"}
 
@@ -2633,9 +2641,13 @@ def add_student_to_group(
     db.add(group_student)
     db.commit()
 
-    from src.messages.group_membership import sync_group_conversation_members
-    sync_group_conversation_members(db, group_id)
-    db.commit()
+    try:
+        from src.messages.group_membership import sync_group_conversation_members
+        sync_group_conversation_members(db, group_id)
+        db.commit()
+    except Exception:
+        logger.exception("group chat member sync failed for group %s", group_id)
+        db.rollback()
 
     return {"detail": f"Student '{student.name}' added to group '{group.name}'"}
 
@@ -2678,9 +2690,13 @@ def remove_student_from_group(
     db.delete(group_student)
     db.commit()
 
-    from src.messages.group_membership import sync_group_conversation_members
-    sync_group_conversation_members(db, group_id)
-    db.commit()
+    try:
+        from src.messages.group_membership import sync_group_conversation_members
+        sync_group_conversation_members(db, group_id)
+        db.commit()
+    except Exception:
+        logger.exception("group chat member sync failed for group %s", group_id)
+        db.rollback()
 
     return {"detail": f"Student '{student.name}' removed from group '{group.name}'"}
 
@@ -2728,7 +2744,15 @@ def bulk_add_students_to_group(
             added_count += 1
     
     db.commit()
-    
+
+    try:
+        from src.messages.group_membership import sync_group_conversation_members
+        sync_group_conversation_members(db, group_id)
+        db.commit()
+    except Exception:
+        logger.exception("group chat member sync failed for group %s", group_id)
+        db.rollback()
+
     return {"detail": f"{added_count} students added to group '{group.name}'"}
 
 # =============================================================================
