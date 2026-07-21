@@ -332,3 +332,54 @@ def change_password(
         lms_user_id=current_user.id,
     )
     return {"detail": "Пароль успешно изменён"}
+
+
+class DeleteAccountRequest(BaseModel):
+    current_password: str
+
+
+@router.delete("/account", status_code=204)
+def delete_account(
+    payload: DeleteAccountRequest,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Permanently delete the authenticated user's own account (student/parent only).
+
+    Apple App Store Guideline 5.1.1(v): apps that support account creation must let
+    users initiate account deletion in-app. Staff accounts are excluded because their
+    non-cascade foreign keys (courses.teacher_id, events.created_by, submissions.graded_by)
+    would orphan institutional data — staff must be removed by an admin.
+    """
+    if current_user.role not in ("student", "parent"):
+        raise HTTPException(
+            status_code=403,
+            detail="Staff accounts cannot be self-deleted. Please contact your administrator.",
+        )
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Текущий пароль неверен")
+
+    # Best-effort external deprovision (Zitadel / Master Education mirror); never blocks deletion.
+    if current_user.central_auth_user_id:
+        try:
+            from src.services.zitadel_provisioning import set_user_active
+            set_user_active(current_user.central_auth_user_id, False)
+        except Exception:
+            logger.warning("Zitadel deprovision failed for user %s", current_user.id, exc_info=True)
+
+    # ORM relationships on UserInDB use cascade="all, delete-orphan", so db.delete cascades
+    # messages, submissions, push tokens, progress, parent links, notifications, points, etc.
+    # A few child tables have a non-nullable, non-ondelete-CASCADE FK to users.id that is NOT
+    # modeled as a UserInDB relationship, so db.delete would orphan them and raise IntegrityError.
+    # Delete those rows explicitly first (staff-only FKs like events.created_by/teacher_id are
+    # unreachable here since the role guard above already blocks non-student/parent accounts).
+    from src.events.models import EventParticipant
+    from src.progress.models import ProgressSnapshot, QuizAttempt
+
+    db.query(EventParticipant).filter(EventParticipant.user_id == current_user.id).delete(synchronize_session=False)
+    db.query(ProgressSnapshot).filter(ProgressSnapshot.user_id == current_user.id).delete(synchronize_session=False)
+    db.query(QuizAttempt).filter(QuizAttempt.user_id == current_user.id).delete(synchronize_session=False)
+
+    db.delete(current_user)
+    db.commit()
+    return Response(status_code=204)
