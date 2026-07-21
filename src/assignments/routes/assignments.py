@@ -489,7 +489,9 @@ def teacher_today_homework(
     day_end_utc = day_start_utc + timedelta(days=1)
 
     groups = (db.query(Group)
-                .filter(Group.teacher_id == current_user.id, Group.is_active == True)  # noqa: E712
+                .filter(Group.teacher_id == current_user.id,
+                        Group.is_active == True,  # noqa: E712
+                        Group.is_over == False)   # noqa: E712  exclude finished groups
                 .order_by(Group.name).all())
     group_ids = [g.id for g in groups]
 
