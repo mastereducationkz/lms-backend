@@ -1865,12 +1865,28 @@ def get_curator_student_homework(
         ).all()
         submissions_map = {s.assignment_id: s for s in submissions}
 
+        # Per-student deadline extensions override the due date for lateness.
+        from src.assignments.models import AssignmentExtension
+        from src.utils.homework_status import is_submission_late
+        extension_map = {
+            ext.assignment_id: ext.extended_deadline
+            for ext in db.query(AssignmentExtension).filter(
+                AssignmentExtension.assignment_id.in_(assignment_ids),
+                AssignmentExtension.student_id == student_id
+            ).all()
+        }
+
         for assignment in all_assignments:
             submission = submissions_map.get(assignment.id)
 
             status = 'not_submitted'
+            late = False
             if submission:
                 status = 'graded' if submission.is_graded else 'submitted'
+                late = is_submission_late(
+                    submission.submitted_at, assignment.due_date,
+                    extension_map.get(assignment.id),
+                )
             elif assignment.due_date and assignment.due_date < datetime.utcnow():
                 status = 'overdue'
 
@@ -1894,6 +1910,7 @@ def get_curator_student_homework(
                 "assignment_type": assignment.assignment_type,
                 "content": assignment_content,
                 "status": status,
+                "late": late,
                 "submission_id": submission.id if submission else None,
                 "score": submission.score if submission else None,
                 "submitted_at": submission.submitted_at.isoformat() if submission and submission.submitted_at else None,

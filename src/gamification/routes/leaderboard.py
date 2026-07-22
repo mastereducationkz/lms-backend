@@ -816,6 +816,17 @@ async def get_weekly_lessons_with_hw_status(
         ).all()
         # Map (user_id, assignment_id) -> submission
         submission_map = {(s.user_id, s.assignment_id): s for s in submissions}
+
+    # 8.5 Per-student deadline extensions (override the assignment due date for lateness).
+    from src.assignments.models import AssignmentExtension
+    from src.utils.homework_status import is_submission_late
+    extension_map = {}  # (user_id, assignment_id) -> extended_deadline
+    if assignment_ids:
+        for ext in db.query(AssignmentExtension).filter(
+            AssignmentExtension.assignment_id.in_(assignment_ids),
+            AssignmentExtension.student_id.in_(student_ids)
+        ).all():
+            extension_map[(ext.student_id, ext.assignment_id)] = ext.extended_deadline
     
     # 9. Get Manual Leaderboard Entries
     manual_entries = db.query(LeaderboardEntry).filter(
@@ -1109,9 +1120,13 @@ async def get_weekly_lessons_with_hw_status(
                         "feedback": sub.feedback,
                         "submitted_at": sub.submitted_at.isoformat() + "Z" if sub.submitted_at else None,
                         "graded_at": sub.graded_at.isoformat() + "Z" if sub.graded_at else None,
+                        "late": is_submission_late(
+                            sub.submitted_at, hw.due_date,
+                            extension_map.get((student.id, hw.id)),
+                        ),
                     }
                 else:
-                    hw_status = {"submitted": False, "score": None}
+                    hw_status = {"submitted": False, "score": None, "late": False}
             
             # Use GLOBAL lesson_number as key to match lessons_meta
             lesson_data[str(lesson_num)] = {
