@@ -130,6 +130,62 @@ def _missing_attendance_reminders(
     return reminders
 
 
+@router.get("/head-teacher/attendance-gaps")
+def head_teacher_attendance_gaps(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Head-teacher attendance oversight, grouped by TEACHER → group. Only groups
+    actively using attendance (marked within 21 days) are included — reuses
+    _missing_attendance_reminders, which applies that filter."""
+    from src.utils.permissions import get_head_teacher_group_ids
+    from src.schemas.models import Group as _Group, UserInDB as _User
+
+    scope = get_head_teacher_group_ids(current_user, db)
+    if not scope:
+        return {"teachers": []}
+    reminders = _missing_attendance_reminders(db, group_ids=scope)
+    if not reminders:
+        return {"teachers": []}
+
+    rows = db.query(_Group.id, _Group.name, _Group.teacher_id).filter(_Group.id.in_(scope)).all()
+    group_teacher = {gid: tid for gid, gname, tid in rows}
+    group_name = {gid: gname for gid, gname, tid in rows}
+    teacher_ids = {tid for tid in group_teacher.values() if tid}
+    teacher_name = ({u.id: u.name for u in db.query(_User).filter(_User.id.in_(teacher_ids)).all()}
+                    if teacher_ids else {})
+
+    agg: dict = {}
+    for r in reminders:
+        gid = r["group_id"]
+        tid = group_teacher.get(gid)
+        tkey = tid if tid else -1
+        tname = teacher_name.get(tid, "—") if tid else "No teacher"
+        t = agg.setdefault(tkey, {"teacher_id": tkey, "teacher_name": tname, "groups": {}})
+        g = t["groups"].setdefault(gid, {
+            "group_id": gid,
+            "group_name": group_name.get(gid) or r.get("group_name") or "—",
+            "lessons_missing": 0,
+            "oldest": r["event_date"],
+        })
+        g["lessons_missing"] += 1
+        if r["event_date"] and r["event_date"] < g["oldest"]:
+            g["oldest"] = r["event_date"]
+
+    teachers = []
+    for t in agg.values():
+        groups = sorted(t["groups"].values(), key=lambda x: -x["lessons_missing"])
+        teachers.append({
+            "teacher_id": t["teacher_id"],
+            "teacher_name": t["teacher_name"],
+            "total_lessons": sum(g["lessons_missing"] for g in groups),
+            "groups_count": len(groups),
+            "groups": groups,
+        })
+    teachers.sort(key=lambda x: -x["total_lessons"])
+    return {"teachers": teachers}
+
+
 def _compute_group_program_end(group) -> Optional[date]:
     cfg = group.schedule_config or {}
     start_raw = cfg.get("start_date")
