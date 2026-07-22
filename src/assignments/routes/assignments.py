@@ -591,26 +591,45 @@ def head_teacher_hw_gaps_today(
 
 @router.get("/head-teacher/hw-gaps-by-teacher")
 def head_teacher_hw_gaps_by_teacher(
+    start_date: Optional[str] = Query(None, description="Almaty date YYYY-MM-DD (inclusive)"),
+    end_date: Optional[str] = Query(None, description="Almaty date YYYY-MM-DD (inclusive)"),
     current_user: UserInDB = Depends(require_teacher_or_admin()),
     db: Session = Depends(get_db),
 ):
-    """Same as hw-gaps-today, but aggregated by TEACHER → group so it renders in the
-    same expandable table as the attendance oversight. Each gap group is a group that
-    had a class lesson today with no homework assigned today (lessons_missing = 1)."""
+    """Homework gaps aggregated by TEACHER → group so it renders in the same
+    expandable table as the attendance oversight. A gap is a (group, day) that had a
+    class lesson but no homework assigned that day; ``lessons_missing`` counts such
+    days for the group. ``start_date``/``end_date`` scope the Almaty calendar range
+    (defaults to today)."""
     from src.utils.permissions import get_head_teacher_group_ids
     from src.schemas.models import Group, Assignment, Event, EventGroup
     from src.auth.models import UserInDB as _User
 
     almaty = timezone(timedelta(hours=5))
-    now_almaty = datetime.now(almaty)
-    today = now_almaty.date().isoformat()
-    day_start_utc = (now_almaty.replace(hour=0, minute=0, second=0, microsecond=0)
-                     .astimezone(timezone.utc).replace(tzinfo=None))
-    day_end_utc = day_start_utc + timedelta(days=1)
+
+    def _alm_date(dt):
+        # dt is naive-UTC; shift into Almaty (UTC+5) and take the calendar date.
+        return (dt + timedelta(hours=5)).date()
+
+    if start_date or end_date:
+        s = start_date or end_date
+        e = end_date or start_date
+        sd = datetime.strptime(s, "%Y-%m-%d").date()
+        ed = datetime.strptime(e, "%Y-%m-%d").date()
+        if ed < sd:
+            sd, ed = ed, sd
+    else:
+        today_alm = datetime.now(almaty).date()
+        sd = ed = today_alm
+    win_start = (datetime(sd.year, sd.month, sd.day, tzinfo=almaty)
+                 .astimezone(timezone.utc).replace(tzinfo=None))
+    win_end = ((datetime(ed.year, ed.month, ed.day, tzinfo=almaty) + timedelta(days=1))
+               .astimezone(timezone.utc).replace(tzinfo=None))
+    resp = {"start_date": sd.isoformat(), "end_date": ed.isoformat(), "teachers": []}
 
     scope_ids = get_head_teacher_group_ids(current_user, db)
     if not scope_ids:
-        return {"date": today, "teachers": []}
+        return resp
 
     rows = (db.query(Group.id, Group.name, Group.teacher_id)
               .filter(Group.id.in_(scope_ids),
@@ -619,36 +638,36 @@ def head_teacher_hw_gaps_by_teacher(
     group_teacher = {gid: tid for gid, gname, tid in rows}
     scope = list(group_name.keys())
     if not scope:
-        return {"date": today, "teachers": []}
+        return resp
 
-    lesson_groups = set()
-    for (gid,) in (db.query(EventGroup.group_id)
-                     .join(Event, Event.id == EventGroup.event_id)
-                     .filter(EventGroup.group_id.in_(scope),
-                             Event.event_type == 'class', Event.is_active == True,  # noqa: E712
-                             Event.start_datetime >= day_start_utc,
-                             Event.start_datetime < day_end_utc)
-                     .distinct().all()):
-        lesson_groups.add(gid)
+    # Almaty-day sets per group: days with a class lesson, and days with homework created.
+    lesson_days: dict = {}
+    for gid, start_dt in (db.query(EventGroup.group_id, Event.start_datetime)
+                            .join(Event, Event.id == EventGroup.event_id)
+                            .filter(EventGroup.group_id.in_(scope),
+                                    Event.event_type == 'class', Event.is_active == True,  # noqa: E712
+                                    Event.start_datetime >= win_start,
+                                    Event.start_datetime < win_end).all()):
+        lesson_days.setdefault(gid, set()).add(_alm_date(start_dt))
 
-    hw_today = set()
-    for (gid,) in (db.query(Assignment.group_id)
-                     .filter(Assignment.group_id.in_(scope),
-                             Assignment.is_active == True,  # noqa: E712
-                             Assignment.created_at >= day_start_utc,
-                             Assignment.created_at < day_end_utc)
-                     .distinct().all()):
-        hw_today.add(gid)
+    hw_days: dict = {}
+    for gid, created in (db.query(Assignment.group_id, Assignment.created_at)
+                           .filter(Assignment.group_id.in_(scope),
+                                   Assignment.is_active == True,  # noqa: E712
+                                   Assignment.created_at >= win_start,
+                                   Assignment.created_at < win_end).all()):
+        hw_days.setdefault(gid, set()).add(_alm_date(created))
 
-    gap_group_ids = [gid for gid in lesson_groups if gid not in hw_today]
-
-    teacher_ids = {group_teacher.get(gid) for gid in gap_group_ids if group_teacher.get(gid)}
+    teacher_ids = {group_teacher.get(gid) for gid in lesson_days if group_teacher.get(gid)}
     teacher_name = ({u.id: (u.official_full_name or u.name)
                      for u in db.query(_User).filter(_User.id.in_(teacher_ids)).all()}
                     if teacher_ids else {})
 
     agg: dict = {}
-    for gid in gap_group_ids:
+    for gid, days in lesson_days.items():
+        gap_days = sorted(days - hw_days.get(gid, set()))
+        if not gap_days:
+            continue
         tid = group_teacher.get(gid)
         tkey = tid if tid else -1
         tname = teacher_name.get(tid, "—") if tid else "No teacher"
@@ -656,22 +675,23 @@ def head_teacher_hw_gaps_by_teacher(
         t["groups"].append({
             "group_id": gid,
             "group_name": group_name.get(gid) or "—",
-            "lessons_missing": 1,
-            "oldest": today,
+            "lessons_missing": len(gap_days),
+            "oldest": gap_days[0].isoformat(),
         })
 
     teachers = []
     for t in agg.values():
-        groups = sorted(t["groups"], key=lambda x: x["group_name"])
+        groups = sorted(t["groups"], key=lambda x: -x["lessons_missing"])
         teachers.append({
             "teacher_id": t["teacher_id"],
             "teacher_name": t["teacher_name"],
-            "total_lessons": len(groups),
+            "total_lessons": sum(g["lessons_missing"] for g in groups),
             "groups_count": len(groups),
             "groups": groups,
         })
-    teachers.sort(key=lambda x: (-x["groups_count"], x["teacher_name"]))
-    return {"date": today, "teachers": teachers}
+    teachers.sort(key=lambda x: (-x["total_lessons"], x["teacher_name"]))
+    resp["teachers"] = teachers
+    return resp
 
 
 @router.post("/", response_model=AssignmentSchema)

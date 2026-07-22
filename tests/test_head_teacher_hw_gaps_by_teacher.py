@@ -71,7 +71,7 @@ def test_hw_gaps_grouped_by_teacher_with_official_name(db):
     db.add(Assignment(title="HW", assignment_type="pdf", content="{}", group_id=gDone.id, is_active=True))
     db.flush()
 
-    res = head_teacher_hw_gaps_by_teacher(current_user=ht, db=db)
+    res = head_teacher_hw_gaps_by_teacher(start_date=None, end_date=None, current_user=ht, db=db)
     by_name = {t["teacher_name"]: t for t in res["teachers"]}
 
     # Official ФИО is used for T1; LMS name for T2.
@@ -88,3 +88,9 @@ def test_hw_gaps_grouped_by_teacher_with_official_name(db):
     assert "D" not in all_groups
 
     assert by_name["Madina"]["groups_count"] == 1
+
+    # A far-past date range should scope out all of today's lessons -> no gaps.
+    empty = head_teacher_hw_gaps_by_teacher(
+        start_date="2020-01-01", end_date="2020-01-01", current_user=ht, db=db)
+    assert empty["teachers"] == []
+    assert empty["start_date"] == "2020-01-01" and empty["end_date"] == "2020-01-01"

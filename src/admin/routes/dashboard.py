@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, and_, or_, case
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 import math
 import json
 
@@ -25,11 +25,34 @@ router = APIRouter()
 # for missing attendance.
 _ATTENDANCE_CUTOFF = datetime(2026, 2, 16, 0, 0, 0)
 
+_ALMATY = timezone(timedelta(hours=5))  # Kazakhstan: single UTC+5 zone, no DST
+
+
+def almaty_day_window(start_date: Optional[str], end_date: Optional[str]):
+    """Map inclusive Almaty calendar dates (YYYY-MM-DD) to a naive-UTC ``[start, end)``
+    window. Returns ``(None, None)`` when neither bound is given. A missing end
+    defaults to the start date (single day); a missing start defaults to the end."""
+    if not start_date and not end_date:
+        return None, None
+    s = start_date or end_date
+    e = end_date or start_date
+    sd = datetime.strptime(s, "%Y-%m-%d").date()
+    ed = datetime.strptime(e, "%Y-%m-%d").date()
+    if ed < sd:
+        sd, ed = ed, sd
+    start_utc = (datetime(sd.year, sd.month, sd.day, tzinfo=_ALMATY)
+                 .astimezone(timezone.utc).replace(tzinfo=None))
+    end_local_excl = datetime(ed.year, ed.month, ed.day, tzinfo=_ALMATY) + timedelta(days=1)
+    end_utc = end_local_excl.astimezone(timezone.utc).replace(tzinfo=None)
+    return start_utc, end_utc
+
 
 def _missing_attendance_reminders(
     db: Session,
     group_ids: Optional[List[int]] = None,
     expected_within_groups: bool = False,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
 ) -> List[dict]:
     """Past class events where fewer attendance records exist than expected students.
 
@@ -37,7 +60,9 @@ def _missing_attendance_reminders(
     measured 17s platform-wide for admins). ``group_ids=None`` checks all events;
     otherwise only events touching those groups. ``expected_within_groups`` counts
     expected students only inside ``group_ids`` (curator semantics) instead of
-    across all of an event's groups (admin/teacher semantics).
+    across all of an event's groups (admin/teacher semantics). ``start``/``end`` are
+    optional naive-UTC bounds on the lesson's start; when given, only lessons that
+    started within ``[start, end)`` are considered.
     """
     from src.schemas.models import Event, EventGroup, Group
     from src.events.models import Attendance
@@ -55,6 +80,10 @@ def _missing_attendance_reminders(
             Event.is_active == True,
         )
     )
+    if start is not None:
+        events_q = events_q.filter(Event.start_datetime >= start)
+    if end is not None:
+        events_q = events_q.filter(Event.start_datetime < end)
     if group_ids is not None:
         events_q = events_q.filter(EventGroup.group_id.in_(group_ids))
     past_event_ids_sq = events_q.distinct().subquery()
@@ -132,19 +161,23 @@ def _missing_attendance_reminders(
 
 @router.get("/head-teacher/attendance-gaps")
 def head_teacher_attendance_gaps(
+    start_date: Optional[str] = Query(None, description="Almaty date YYYY-MM-DD (inclusive)"),
+    end_date: Optional[str] = Query(None, description="Almaty date YYYY-MM-DD (inclusive)"),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
     """Head-teacher attendance oversight, grouped by TEACHER → group. Only groups
     actively using attendance (marked within 21 days) are included — reuses
-    _missing_attendance_reminders, which applies that filter."""
+    _missing_attendance_reminders, which applies that filter. ``start_date``/``end_date``
+    scope the lessons to that Almaty calendar range (defaults to all past lessons)."""
     from src.utils.permissions import get_head_teacher_group_ids
     from src.schemas.models import Group as _Group, UserInDB as _User
 
     scope = get_head_teacher_group_ids(current_user, db)
     if not scope:
         return {"teachers": []}
-    reminders = _missing_attendance_reminders(db, group_ids=scope)
+    win_start, win_end = almaty_day_window(start_date, end_date)
+    reminders = _missing_attendance_reminders(db, group_ids=scope, start=win_start, end=win_end)
     if not reminders:
         return {"teachers": []}
 
