@@ -96,11 +96,27 @@ def _missing_attendance_reminders(
         labels_q = labels_q.filter(EventGroup.group_id.in_(group_ids))
     flagged_rows = labels_q.order_by(Event.id, Group.id).all()
 
+    # Only show reminders for groups that are ACTIVELY using attendance: a group
+    # whose most recent attendance mark is older than 21 days (or never marked)
+    # is treated as not using the feature, so its "missing" rows are hidden
+    # (e.g. groups that ran classes before attendance tracking existed).
+    active_since = datetime.utcnow() - timedelta(days=21)
+    active_gq = (
+        db.query(EventGroup.group_id)
+        .join(Attendance, Attendance.event_id == EventGroup.event_id)
+        .filter(Attendance.created_at >= active_since)
+    )
+    if group_ids is not None:
+        active_gq = active_gq.filter(EventGroup.group_id.in_(group_ids))
+    active_group_ids = {gid for (gid,) in active_gq.distinct().all()}
+
     reminders = []
     seen_event_ids = set()
     for event_id, title, start_dt, g_id, g_name in flagged_rows:
         if event_id in seen_event_ids:
             continue
+        if g_id not in active_group_ids:
+            continue  # group not marking attendance in 21d → skip (another group of this event may still qualify)
         seen_event_ids.add(event_id)
         reminders.append({
             "event_id": event_id,
@@ -1146,6 +1162,17 @@ def get_head_curator_dashboard_stats(
     cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
     missing_attendance_reminders = []
 
+    # Hide groups not actively using attendance (no mark in the last 21 days).
+    active_since = datetime.utcnow() - timedelta(days=21)
+    active_group_ids = set()
+    if current_group_ids:
+        active_group_ids = {
+            gid for (gid,) in db.query(EventGroup.group_id)
+            .join(Attendance, Attendance.event_id == EventGroup.event_id)
+            .filter(EventGroup.group_id.in_(current_group_ids), Attendance.created_at >= active_since)
+            .distinct().all()
+        }
+
     if current_group_ids:
         past_event_rows = (
             db.query(Event.id, Event.title, Event.start_datetime, EventGroup.group_id)
@@ -1187,6 +1214,8 @@ def get_head_curator_dashboard_stats(
             for eid, (title, start_dt, grp_id) in event_group_map.items():
                 if grp_id not in current_group_ids_set:
                     continue
+                if grp_id not in active_group_ids:
+                    continue  # group not marking attendance in 21d → skip
                 expected = len(group_students_map.get(grp_id, []))
                 recorded = att_map.get(eid, 0)
                 if recorded < expected:
@@ -1263,6 +1292,18 @@ def get_head_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardSt
     missing_attendance_reminders = []
     cutoff_date = datetime(2026, 2, 16, 0, 0, 0)
 
+    # Hide groups not actively using attendance (no mark in the last 21 days).
+    from src.events.models import Attendance as _Att
+    active_since = datetime.utcnow() - timedelta(days=21)
+    active_group_ids = set()
+    if managed_group_ids:
+        active_group_ids = {
+            gid for (gid,) in db.query(EventGroup.group_id)
+            .join(_Att, _Att.event_id == EventGroup.event_id)
+            .filter(EventGroup.group_id.in_(managed_group_ids), _Att.created_at >= active_since)
+            .distinct().all()
+        }
+
     if managed_group_ids:
         past_events = db.query(Event).join(EventGroup).filter(
             EventGroup.group_id.in_(managed_group_ids),
@@ -1288,6 +1329,9 @@ def get_head_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardSt
                 if event.event_groups:
                     group_name = event.event_groups[0].group.name if event.event_groups[0].group else ""
                     group_id = event.event_groups[0].group.id if event.event_groups[0].group else None
+
+                if group_id not in active_group_ids:
+                    continue  # group not marking attendance in 21d → skip
 
                 missing_attendance_reminders.append({
                     "event_id": event.id,
