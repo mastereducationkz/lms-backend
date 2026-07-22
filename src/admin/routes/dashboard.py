@@ -152,7 +152,9 @@ def head_teacher_attendance_gaps(
     group_teacher = {gid: tid for gid, gname, tid in rows}
     group_name = {gid: gname for gid, gname, tid in rows}
     teacher_ids = {tid for tid in group_teacher.values() if tid}
-    teacher_name = ({u.id: u.name for u in db.query(_User).filter(_User.id.in_(teacher_ids)).all()}
+    # Prefer the official ФИО synced from CRM; fall back to the LMS display name.
+    teacher_name = ({u.id: (u.official_full_name or u.name)
+                     for u in db.query(_User).filter(_User.id.in_(teacher_ids)).all()}
                     if teacher_ids else {})
 
     agg: dict = {}

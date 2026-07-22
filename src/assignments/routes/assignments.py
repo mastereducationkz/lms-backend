@@ -589,6 +589,91 @@ def head_teacher_hw_gaps_today(
     return {"date": now_almaty.date().isoformat(), "count": len(gaps), "groups": gaps}
 
 
+@router.get("/head-teacher/hw-gaps-by-teacher")
+def head_teacher_hw_gaps_by_teacher(
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """Same as hw-gaps-today, but aggregated by TEACHER → group so it renders in the
+    same expandable table as the attendance oversight. Each gap group is a group that
+    had a class lesson today with no homework assigned today (lessons_missing = 1)."""
+    from src.utils.permissions import get_head_teacher_group_ids
+    from src.schemas.models import Group, Assignment, Event, EventGroup
+    from src.auth.models import UserInDB as _User
+
+    almaty = timezone(timedelta(hours=5))
+    now_almaty = datetime.now(almaty)
+    today = now_almaty.date().isoformat()
+    day_start_utc = (now_almaty.replace(hour=0, minute=0, second=0, microsecond=0)
+                     .astimezone(timezone.utc).replace(tzinfo=None))
+    day_end_utc = day_start_utc + timedelta(days=1)
+
+    scope_ids = get_head_teacher_group_ids(current_user, db)
+    if not scope_ids:
+        return {"date": today, "teachers": []}
+
+    rows = (db.query(Group.id, Group.name, Group.teacher_id)
+              .filter(Group.id.in_(scope_ids),
+                      Group.is_active == True, Group.is_over == False).all())  # noqa: E712
+    group_name = {gid: gname for gid, gname, tid in rows}
+    group_teacher = {gid: tid for gid, gname, tid in rows}
+    scope = list(group_name.keys())
+    if not scope:
+        return {"date": today, "teachers": []}
+
+    lesson_groups = set()
+    for (gid,) in (db.query(EventGroup.group_id)
+                     .join(Event, Event.id == EventGroup.event_id)
+                     .filter(EventGroup.group_id.in_(scope),
+                             Event.event_type == 'class', Event.is_active == True,  # noqa: E712
+                             Event.start_datetime >= day_start_utc,
+                             Event.start_datetime < day_end_utc)
+                     .distinct().all()):
+        lesson_groups.add(gid)
+
+    hw_today = set()
+    for (gid,) in (db.query(Assignment.group_id)
+                     .filter(Assignment.group_id.in_(scope),
+                             Assignment.is_active == True,  # noqa: E712
+                             Assignment.created_at >= day_start_utc,
+                             Assignment.created_at < day_end_utc)
+                     .distinct().all()):
+        hw_today.add(gid)
+
+    gap_group_ids = [gid for gid in lesson_groups if gid not in hw_today]
+
+    teacher_ids = {group_teacher.get(gid) for gid in gap_group_ids if group_teacher.get(gid)}
+    teacher_name = ({u.id: (u.official_full_name or u.name)
+                     for u in db.query(_User).filter(_User.id.in_(teacher_ids)).all()}
+                    if teacher_ids else {})
+
+    agg: dict = {}
+    for gid in gap_group_ids:
+        tid = group_teacher.get(gid)
+        tkey = tid if tid else -1
+        tname = teacher_name.get(tid, "—") if tid else "No teacher"
+        t = agg.setdefault(tkey, {"teacher_id": tkey, "teacher_name": tname, "groups": []})
+        t["groups"].append({
+            "group_id": gid,
+            "group_name": group_name.get(gid) or "—",
+            "lessons_missing": 1,
+            "oldest": today,
+        })
+
+    teachers = []
+    for t in agg.values():
+        groups = sorted(t["groups"], key=lambda x: x["group_name"])
+        teachers.append({
+            "teacher_id": t["teacher_id"],
+            "teacher_name": t["teacher_name"],
+            "total_lessons": len(groups),
+            "groups_count": len(groups),
+            "groups": groups,
+        })
+    teachers.sort(key=lambda x: (-x["groups_count"], x["teacher_name"]))
+    return {"date": today, "teachers": teachers}
+
+
 @router.post("/", response_model=AssignmentSchema)
 def create_assignment(
     assignment_data: AssignmentCreateSchema,
