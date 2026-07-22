@@ -538,6 +538,57 @@ def teacher_today_homework(
     }
 
 
+@router.get("/head-teacher/hw-gaps-today")
+def head_teacher_hw_gaps_today(
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """Head-teacher oversight: subject groups that had a class lesson TODAY but no
+    homework was assigned to them today. Mirrors the attendance 'not recorded'
+    reminders. Scope = groups of courses this head teacher manages."""
+    from src.utils.permissions import get_head_teacher_group_ids
+    from src.schemas.models import Group, Assignment, Event, EventGroup
+
+    almaty = timezone(timedelta(hours=5))
+    now_almaty = datetime.now(almaty)
+    day_start_utc = (now_almaty.replace(hour=0, minute=0, second=0, microsecond=0)
+                     .astimezone(timezone.utc).replace(tzinfo=None))
+    day_end_utc = day_start_utc + timedelta(days=1)
+
+    scope_ids = get_head_teacher_group_ids(current_user, db)
+    groups = {}
+    if scope_ids:
+        groups = {g.id: g.name for g in db.query(Group).filter(
+            Group.id.in_(scope_ids), Group.is_active == True, Group.is_over == False).all()}  # noqa: E712
+    scope = list(groups.keys())
+
+    lesson_groups = set()
+    if scope:
+        for (gid,) in (db.query(EventGroup.group_id)
+                         .join(Event, Event.id == EventGroup.event_id)
+                         .filter(EventGroup.group_id.in_(scope),
+                                 Event.event_type == 'class', Event.is_active == True,  # noqa: E712
+                                 Event.start_datetime >= day_start_utc,
+                                 Event.start_datetime < day_end_utc)
+                         .distinct().all()):
+            lesson_groups.add(gid)
+
+    hw_today = set()
+    if scope:
+        for (gid,) in (db.query(Assignment.group_id)
+                         .filter(Assignment.group_id.in_(scope),
+                                 Assignment.is_active == True,  # noqa: E712
+                                 Assignment.created_at >= day_start_utc,
+                                 Assignment.created_at < day_end_utc)
+                         .distinct().all()):
+            hw_today.add(gid)
+
+    gaps = [{"group_id": gid, "group_name": groups[gid]}
+            for gid in lesson_groups if gid not in hw_today]
+    gaps.sort(key=lambda x: x["group_name"])
+    return {"date": now_almaty.date().isoformat(), "count": len(gaps), "groups": gaps}
+
+
 @router.post("/", response_model=AssignmentSchema)
 def create_assignment(
     assignment_data: AssignmentCreateSchema,
