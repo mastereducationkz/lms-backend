@@ -220,10 +220,12 @@ def _seed_full_student(db):
     )
     db.add(sub1)
 
-    # A second assignment the student has NOT submitted -> counts toward pending_count.
+    # A second assignment the student has NOT submitted -> counts toward
+    # pending_count AND surfaces (with its due date) in homework.pending_items.
     a2 = Assignment(
         group_id=group.id, title="Essay 2 (pending)", assignment_type="text",
         content="{}", max_score=100, is_active=True,
+        due_date=datetime(2026, 12, 31, 21, 0, 0),
     )
     db.add(a2)
     db.flush()
@@ -286,6 +288,11 @@ def test_get_student_context_shape(db):
 
     assert ctx["homework"]["pending_count"] == 1
     assert ctx["homework"]["recent_grades"] == [{"title": "Essay 1", "grade": 90}]
+    # pending_items lists the OUTSTANDING assignments with their due dates so the
+    # Support assistant can name them (Essay 1 is submitted, so only Essay 2 shows).
+    assert ctx["homework"]["pending_items"] == [
+        {"title": "Essay 2 (pending)", "due_at": "2026-12-31T21:00:00"}
+    ]
 
     assert len(ctx["upcoming_lessons"]) == 1
     assert ctx["upcoming_lessons"][0]["title"] == "Upcoming Lesson"
@@ -303,5 +310,5 @@ def test_get_student_context_empty_groups_returns_defaults(db):
     assert ctx["groups"] == []
     assert ctx["progress"]["courses"] == []
     assert ctx["attendance"] == {"rate_pct": None, "recent": []}
-    assert ctx["homework"] == {"pending_count": 0, "recent_grades": []}
+    assert ctx["homework"] == {"pending_count": 0, "pending_items": [], "recent_grades": []}
     assert ctx["upcoming_lessons"] == []

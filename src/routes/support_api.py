@@ -100,9 +100,10 @@ def get_student_context(email: str, db: Session = Depends(get_db)):
     LMS (curator student-journal profile, student_course_summaries, the
     Attendance/AssignmentSubmission tables, and the trials service) rather than
     hand-rolled joins. Two simplifications, called out explicitly:
-      - homework.pending_count only counts group-scoped assignments
-        (Assignment.group_id) that the student hasn't submitted yet. It does
-        not re-derive the full per-assignment visibility computation in
+      - homework.pending_count / homework.pending_items only count/list
+        group-scoped assignments (Assignment.group_id) the student hasn't
+        submitted yet. They do not re-derive the full per-assignment
+        visibility computation in
         src/assignments/routes/assignments.py (course access / weekly release
         schedule / lesson-linked assignments), which would require an
         expensive per-assignment check.
@@ -195,19 +196,24 @@ def get_student_context(email: str, db: Session = Depends(get_db)):
     ]
 
     # --- Homework ---
+    # pending_count is the true total of outstanding assignments; pending_items
+    # is the soonest-due slice of them (title + due date) so the Support
+    # assistant can NAME the assignments and their deadlines, not just count
+    # them. Same group-scoping / simplifications as noted in the docstring.
     pending_count = 0
+    pending_items: List[dict] = []
     if group_ids:
-        assigned_ids = {
-            row[0]
-            for row in db.query(Assignment.id)
+        assigned = (
+            db.query(Assignment.id, Assignment.title, Assignment.due_date)
             .filter(
                 Assignment.group_id.in_(group_ids),
                 Assignment.is_active == True,
                 Assignment.is_hidden == False,
             )
             .all()
-        }
-        if assigned_ids:
+        )
+        if assigned:
+            assigned_ids = {row[0] for row in assigned}
             submitted_ids = {
                 row[0]
                 for row in db.query(AssignmentSubmission.assignment_id)
@@ -218,7 +224,18 @@ def get_student_context(email: str, db: Session = Depends(get_db)):
                 )
                 .all()
             }
-            pending_count = len(assigned_ids - submitted_ids)
+            pending = [
+                {"title": title, "due_at": due_date.isoformat() if due_date else None}
+                for aid, title, due_date in assigned
+                if aid not in submitted_ids
+            ]
+            pending_count = len(pending)
+            # Soonest deadline first; undated assignments sort last (the sentinel
+            # date is only a sort key, never returned). Cap the list so the
+            # AI-facing payload stays compact even for a large backlog -- the
+            # count above still reflects the true total.
+            pending.sort(key=lambda item: item["due_at"] or "9999-12-31T23:59:59")
+            pending_items = pending[:10]
 
     graded_rows = (
         db.query(AssignmentSubmission, Assignment)
@@ -265,7 +282,11 @@ def get_student_context(email: str, db: Session = Depends(get_db)):
         "groups": groups_data,
         "progress": {"courses": courses_data},
         "attendance": {"rate_pct": att_rate_pct, "recent": recent_attendance},
-        "homework": {"pending_count": pending_count, "recent_grades": recent_grades},
+        "homework": {
+            "pending_count": pending_count,
+            "pending_items": pending_items,
+            "recent_grades": recent_grades,
+        },
         "upcoming_lessons": upcoming_lessons,
         "trial": {
             "is_trial": student.is_trial,
