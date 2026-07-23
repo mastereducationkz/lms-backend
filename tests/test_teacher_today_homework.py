@@ -1,5 +1,6 @@
 import pytest
-from src.schemas.models import UserInDB, Group, Assignment
+from datetime import datetime, timedelta
+from src.schemas.models import UserInDB, Group, Assignment, Event, EventGroup
 from src.utils.auth_utils import hash_password
 from src.assignments.routes.assignments import teacher_today_homework
 
@@ -38,20 +39,33 @@ def _u(db, email, role):
     db.add(u); db.flush(); return u
 
 
+def _lesson_today(db, group_id, creator_id):
+    now = datetime.utcnow()
+    ev = Event(title="Lesson", event_type="class", is_active=True,
+               start_datetime=now, end_datetime=now + timedelta(hours=1), created_by=creator_id)
+    db.add(ev); db.flush()
+    db.add(EventGroup(event_id=ev.id, group_id=group_id)); db.flush()
+
+
 def test_today_homework_coverage(db):
     teacher = _u(db, "tth-t@test.local", "teacher")
     g1 = Group(name="TTH A", is_active=True, teacher_id=teacher.id)
     g2 = Group(name="TTH B", is_active=True, teacher_id=teacher.id)
-    db.add_all([g1, g2]); db.flush()
+    g3 = Group(name="TTH C", is_active=True, teacher_id=teacher.id)  # no lesson today -> excluded
+    db.add_all([g1, g2, g3]); db.flush()
+    _lesson_today(db, g1.id, teacher.id)
+    _lesson_today(db, g2.id, teacher.id)
     db.add(Assignment(title="HW1", assignment_type="pdf", content="{}",
                       group_id=g1.id, is_active=True))
     db.flush()
 
     res = teacher_today_homework(current_user=teacher, db=db)
+    # Only groups with a lesson TODAY are nudged (g3 has none, so it's absent).
     assert res["total_groups"] == 2
     assert res["assigned_count"] == 1
     assert res["missing_count"] == 1
     gmap = {g["group_name"]: g for g in res["groups"]}
+    assert "TTH C" not in gmap
     assert gmap["TTH A"]["has_homework_today"] is True
     assert gmap["TTH A"]["assignments"][0]["title"] == "HW1"
     assert gmap["TTH B"]["has_homework_today"] is False

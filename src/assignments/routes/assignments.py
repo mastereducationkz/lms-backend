@@ -479,7 +479,7 @@ def teacher_today_homework(
     whether homework was assigned to it TODAY (Almaty), so they can confirm they
     didn't forget anyone. 'Assigned by me' is approximated as assignments created
     today for groups this teacher owns (assignments carry no explicit creator)."""
-    from src.schemas.models import Group, Assignment
+    from src.schemas.models import Group, Assignment, Event, EventGroup
 
     # Kazakhstan is a single UTC+5 timezone (no DST). Today's Almaty window in naive-UTC:
     almaty = timezone(timedelta(hours=5))
@@ -493,6 +493,21 @@ def teacher_today_homework(
                         Group.is_active == True,  # noqa: E712
                         Group.is_over == False)   # noqa: E712  exclude finished groups
                 .order_by(Group.name).all())
+
+    # Only nudge for groups that actually have a class lesson TODAY — a group without a
+    # lesson today shouldn't be flagged as "missing homework".
+    all_group_ids = [g.id for g in groups]
+    lesson_today_groups: set[int] = set()
+    if all_group_ids:
+        for (gid,) in (db.query(EventGroup.group_id)
+                         .join(Event, Event.id == EventGroup.event_id)
+                         .filter(EventGroup.group_id.in_(all_group_ids),
+                                 Event.event_type == 'class', Event.is_active == True,  # noqa: E712
+                                 Event.start_datetime >= day_start_utc,
+                                 Event.start_datetime < day_end_utc)
+                         .distinct().all()):
+            lesson_today_groups.add(gid)
+    groups = [g for g in groups if g.id in lesson_today_groups]
     group_ids = [g.id for g in groups]
 
     by_group: dict = {}
