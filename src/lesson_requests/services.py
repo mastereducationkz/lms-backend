@@ -49,6 +49,20 @@ def _managed_course_types(db: Session, head_teacher_id: int) -> set[str]:
     }
 
 
+def requester_self_approves(db: Session, requester_id: int, group: Group | None) -> bool:
+    """A teacher who also HEADS a lesson's subject may change their OWN lessons without
+    approval (they would only be approving themselves). Requires both: the requester
+    teaches the group, and holds head-teacher authority for the group's subject
+    (CourseHeadTeacher — role-independent, so it works even when the head-teacher
+    authority sits on a separate account of the same person)."""
+    if group is None or group.teacher_id != requester_id:
+        return False  # only the requester's own lessons
+    managed = _managed_course_types(db, requester_id)
+    if not managed:
+        return False
+    return get_target_program_type(getattr(group, "program_type", None)) in managed
+
+
 def resolve_head_teachers_for_group(db: Session, group_id: int) -> list[UserInDB]:
     """Find head teachers who should receive notifications for this group's requests."""
     group = db.query(Group).filter(Group.id == group_id).first()
@@ -116,8 +130,12 @@ def create_lesson_request_record(
     db: Session,
     requester: UserInDB,
     data: CreateLessonRequestSchema,
+    skip_limits: bool = False,
 ) -> LessonRequest:
-    """Validate and persist a new lesson request."""
+    """Validate and persist a new lesson request. ``skip_limits`` bypasses the
+    per-teacher monthly cap and the pending-duplicate guard — used when the request is
+    self-approved (the requester heads their own subject), so it isn't rate-limited like
+    a teacher asking someone else."""
     if data.request_type not in VALID_REQUEST_TYPES:
         raise HTTPException(
             status_code=400,
@@ -166,45 +184,46 @@ def create_lesson_request_record(
     if original_dt < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Cannot create requests for past lessons.")
 
-    req_year = original_dt.year
-    req_month = original_dt.month
-    _, last_day = calendar.monthrange(req_year, req_month)
-    month_start = datetime(req_year, req_month, 1, 0, 0, 0, tzinfo=timezone.utc)
-    month_end = datetime(req_year, req_month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+    if not skip_limits:
+        req_year = original_dt.year
+        req_month = original_dt.month
+        _, last_day = calendar.monthrange(req_year, req_month)
+        month_start = datetime(req_year, req_month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        month_end = datetime(req_year, req_month, last_day, 23, 59, 59, tzinfo=timezone.utc)
 
-    month_count = (
-        db.query(LessonRequest)
-        .filter(
+        month_count = (
+            db.query(LessonRequest)
+            .filter(
+                LessonRequest.requester_id == requester.id,
+                LessonRequest.group_id == data.group_id,
+                LessonRequest.status.in_(["pending", "pending_teacher", "approved"]),
+                LessonRequest.original_datetime >= month_start,
+                LessonRequest.original_datetime <= month_end,
+            )
+            .count()
+        )
+        if month_count >= 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Monthly limit reached: You can only request 2 lesson changes per group per month.",
+            )
+
+        dup_query = db.query(LessonRequest).filter(
             LessonRequest.requester_id == requester.id,
             LessonRequest.group_id == data.group_id,
-            LessonRequest.status.in_(["pending", "pending_teacher", "approved"]),
-            LessonRequest.original_datetime >= month_start,
-            LessonRequest.original_datetime <= month_end,
+            LessonRequest.status.in_(["pending", "pending_teacher"]),
         )
-        .count()
-    )
-    if month_count >= 2:
-        raise HTTPException(
-            status_code=400,
-            detail="Monthly limit reached: You can only request 2 lesson changes per group per month.",
-        )
-
-    dup_query = db.query(LessonRequest).filter(
-        LessonRequest.requester_id == requester.id,
-        LessonRequest.group_id == data.group_id,
-        LessonRequest.status.in_(["pending", "pending_teacher"]),
-    )
-    if data.event_id:
-        dup_query = dup_query.filter(LessonRequest.event_id == data.event_id)
-    elif data.lesson_schedule_id:
-        dup_query = dup_query.filter(LessonRequest.lesson_schedule_id == data.lesson_schedule_id)
-    else:
-        dup_query = dup_query.filter(LessonRequest.original_datetime == original_dt)
-    if dup_query.first():
-        raise HTTPException(
-            status_code=400,
-            detail="A pending request already exists for this lesson.",
-        )
+        if data.event_id:
+            dup_query = dup_query.filter(LessonRequest.event_id == data.event_id)
+        elif data.lesson_schedule_id:
+            dup_query = dup_query.filter(LessonRequest.lesson_schedule_id == data.lesson_schedule_id)
+        else:
+            dup_query = dup_query.filter(LessonRequest.original_datetime == original_dt)
+        if dup_query.first():
+            raise HTTPException(
+                status_code=400,
+                detail="A pending request already exists for this lesson.",
+            )
 
     # Substitution no longer waits on the substitute teacher's confirmation:
     # the requester names the substitute and the request goes straight to the

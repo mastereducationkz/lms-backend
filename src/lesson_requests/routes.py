@@ -20,6 +20,7 @@ from src.lesson_requests.services import (
     create_lesson_request_record,
     get_group_ids_in_head_teacher_scope,
     user_can_resolve_request,
+    requester_self_approves,
 )
 from src.lesson_requests.helpers import (
     enrich_request,
@@ -49,12 +50,31 @@ async def create_lesson_request(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
-    """Create a new lesson substitution, reschedule, or cancel request (teacher only)."""
+    """Create a new lesson substitution, reschedule, or cancel request (teacher only).
+
+    A teacher who also HEADS the group's subject changes their OWN lessons without
+    approval: the request is applied and recorded as approved immediately, so it still
+    shows up in the Lesson Requests list. Everyone else still routes to a head teacher.
+    """
     if current_user.role not in ("teacher", "admin"):
         raise HTTPException(status_code=403, detail="Only teachers can create lesson requests")
 
-    new_request = create_lesson_request_record(db, current_user, data)
-    notify_approvers_of_request(db, new_request, current_user)
+    group = db.query(Group).filter(Group.id == data.group_id).first()
+    self_approve = requester_self_approves(db, current_user.id, group)
+
+    new_request = create_lesson_request_record(db, current_user, data, skip_limits=self_approve)
+
+    if self_approve:
+        apply_approved_request(db, new_request, current_user.id)
+        new_request.status = "approved"
+        new_request.resolved_by = current_user.id
+        new_request.resolved_at = datetime.now(timezone.utc)
+        new_request.admin_comment = "Автоматически применено: педагог ведёт этот предмет"
+        db.commit()
+        db.refresh(new_request)
+        notify_resolution(db, new_request, approved=True)
+    else:
+        notify_approvers_of_request(db, new_request, current_user)
     return enrich_request(new_request, db)
 
 
