@@ -2524,6 +2524,33 @@ def get_teacher_pending_submissions(
     }
 
 
+# Task types whose submission is a student artifact a teacher must actually review
+# (listen to the recording / read the uploaded file). A multi_task containing ANY of
+# these is NOT auto-gradable; everything else (course unit, link/resource visit, text)
+# is completion-style and can be full-marked in bulk.
+_NEEDS_REVIEW_TASK_TYPES = {"audio", "file_task"}
+
+
+def _is_auto_gradable_multitask(assignment) -> bool:
+    """A multi_task assignment is bulk auto-gradable when it has tasks and none of them
+    require manual review (no audio, no student file upload)."""
+    if getattr(assignment, "assignment_type", None) != "multi_task":
+        return False
+    try:
+        content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
+    except Exception:
+        return False
+    if not isinstance(content, dict):
+        return False
+    tasks = content.get("tasks", [])
+    if not isinstance(tasks, list) or len(tasks) == 0:
+        return False
+    return all(
+        isinstance(task, dict) and task.get("task_type") not in _NEEDS_REVIEW_TASK_TYPES
+        for task in tasks
+    )
+
+
 @router.get("/teacher/auto-grade-unit-homework/preview")
 @cached(namespace="dashboard:teacher-auto-grade-preview", ttl=30)
 def get_teacher_auto_grade_unit_homework_preview(
@@ -2590,27 +2617,6 @@ def get_teacher_auto_grade_unit_homework_preview(
     if not pending_submissions:
         return {"eligible_count": 0, "items": []}
 
-    def is_unit_only_multitask(assignment: Assignment) -> bool:
-        if assignment.assignment_type != "multi_task":
-            return False
-
-        try:
-            content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
-        except Exception:
-            return False
-
-        if not isinstance(content, dict):
-            return False
-
-        tasks = content.get("tasks", [])
-        if not isinstance(tasks, list) or len(tasks) == 0:
-            return False
-
-        return all(
-            isinstance(task, dict) and task.get("task_type") == "course_unit"
-            for task in tasks
-        )
-
     student_ids = list({sub.user_id for sub in pending_submissions})
     students = db.query(UserInDB).filter(UserInDB.id.in_(student_ids)).all() if student_ids else []
     students_map = {s.id: s for s in students}
@@ -2618,7 +2624,7 @@ def get_teacher_auto_grade_unit_homework_preview(
     items = []
     for submission in pending_submissions:
         assignment = assignment_map.get(submission.assignment_id)
-        if not assignment or not is_unit_only_multitask(assignment):
+        if not assignment or not _is_auto_gradable_multitask(assignment):
             continue
 
         student = students_map.get(submission.user_id)
@@ -2645,7 +2651,8 @@ def auto_grade_teacher_unit_homework(
     """
     Auto-grade pending homework submissions with max score when:
     - assignment is multi_task
-    - all tasks in assignment are course_unit tasks
+    - none of its tasks need manual review (no audio, no student file upload)
+    i.e. completion-style homework (course units, resource/link visits, text).
     """
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
@@ -2708,31 +2715,10 @@ def auto_grade_teacher_unit_homework(
         AssignmentSubmission.is_graded == False
     ).all()
 
-    def is_unit_only_multitask(assignment: Assignment) -> bool:
-        if assignment.assignment_type != "multi_task":
-            return False
-
-        try:
-            content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
-        except Exception:
-            return False
-
-        if not isinstance(content, dict):
-            return False
-
-        tasks = content.get("tasks", [])
-        if not isinstance(tasks, list) or len(tasks) == 0:
-            return False
-
-        return all(
-            isinstance(task, dict) and task.get("task_type") == "course_unit"
-            for task in tasks
-        )
-
     eligible_submissions = []
     for submission in pending_submissions:
         assignment = assignment_map.get(submission.assignment_id)
-        if not assignment or not is_unit_only_multitask(assignment):
+        if not assignment or not _is_auto_gradable_multitask(assignment):
             continue
 
         if assignment.group_id:
@@ -2760,7 +2746,7 @@ def auto_grade_teacher_unit_homework(
     graded_at = datetime.utcnow()
     for submission in eligible_submissions:
         submission.score = submission.max_score
-        submission.feedback = "Auto-graded: unit-only homework completed"
+        submission.feedback = "Auto-graded: completion homework (excludes audio & file uploads)"
         submission.graded_by = current_user.id
         submission.is_graded = True
         submission.graded_at = graded_at
