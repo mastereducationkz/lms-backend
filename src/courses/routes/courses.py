@@ -2579,10 +2579,12 @@ async def analyze_nuet_image(
 
         if questions:
             q = questions[0]
+            _opts = q.get("options")
+            _ca = q.get("correct_answer")
             result.update({
                 "question_text": q.get("question_text"),
-                "options": q.get("options"),
-                "correct_answer": q.get("options")[q.get("correct_answer")]["letter"] if q.get("options") and isinstance(q.get("correct_answer"), int) else "A",
+                "options": _opts,
+                "correct_answer": _opts[_ca]["letter"] if _opts and isinstance(_ca, int) and 0 <= _ca < len(_opts) else "A",
                 "explanation": q.get("explanation"),
                 "content_text": q.get("content_text"),
             })
