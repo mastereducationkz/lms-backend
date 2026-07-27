@@ -107,3 +107,17 @@ def test_excludes_non_class_and_out_of_window(db):
     ids = {r.event_id for r in res}
     assert webinar.id not in ids
     assert old.id not in ids
+
+
+def test_my_substitutions_route_not_shadowed_by_event_id():
+    from starlette.routing import Match
+    from src.events.routes.events import router
+
+    scope = {"type": "http", "method": "GET", "path": "/my-substitutions", "path_params": {}}
+    matched = None
+    for r in router.routes:
+        m, _ = r.matches(scope)
+        if m == Match.FULL:
+            matched = r.path
+            break
+    assert matched == "/my-substitutions", f"/my-substitutions is shadowed by {matched}"
