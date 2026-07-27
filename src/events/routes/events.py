@@ -1492,6 +1492,7 @@ def get_event_participants(
             student_id=s.id,
             name=s.name,
             attendance_status=attendance_status_to_ui(att["status"] if att else None),
+            activity_score=(att["activity_score"] if att else None),
             last_updated=None,
         ))
         
@@ -1519,6 +1520,7 @@ def update_event_attendance(
             "user_id": record.student_id,
             "status": ep_status_to_attendance_status(record.status),
             "score": 1 if record.status in ("attended", "late") else 0,
+            "activity_score": record.activity_score,
         }
         for record in data.attendance
     ]

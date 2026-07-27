@@ -121,6 +121,7 @@ class EventParticipantSchema(BaseModel):
 class AttendanceRecord(BaseModel):
     student_id: int
     status: str
+    activity_score: Optional[float] = None
 
 
 class AttendanceBulkUpdateSchema(BaseModel):
@@ -131,6 +132,7 @@ class EventStudentSchema(BaseModel):
     student_id: int
     name: str
     attendance_status: Optional[str] = "registered"
+    activity_score: Optional[float] = None
     last_updated: Optional[datetime] = None
 
 
