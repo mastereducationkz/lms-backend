@@ -9,7 +9,8 @@ from src.schemas.models import (
     UserInDB, Event, EventGroup, EventParticipant, Group, GroupStudent,
     EventSchema, EventParticipantSchema, Enrollment, EventCourse, Course,
     CreateEventRequest, Assignment, Lesson, Module, LessonSchedule,
-    AttendanceBulkUpdateSchema, EventStudentSchema, CourseGroupAccess, CourseHeadTeacher
+    AttendanceBulkUpdateSchema, EventStudentSchema, CourseGroupAccess, CourseHeadTeacher,
+    SubstitutionLessonSchema
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_role, require_teacher_or_admin, require_teacher_curator_or_admin, check_event_access
@@ -1449,6 +1450,61 @@ def create_curator_event(
         result.courses = []
     
     return result
+
+
+@router.get("/my-substitutions", response_model=List[SubstitutionLessonSchema])
+def get_my_substitutions(
+    current_user: UserInDB = Depends(require_teacher_curator_or_admin()),
+    db: Session = Depends(get_db),
+):
+    """
+    List class lessons the current user is substituting: active class events
+    whose teacher_id is the current user but whose (first) linked group is owned
+    by another teacher. Past lessons (within ~90d) are markable; upcoming (~120d)
+    are shown locked by the client. Substitutions always materialize a real
+    event on approval, so no recurring/virtual expansion is needed here.
+    """
+    now = datetime.utcnow()
+    window_start = now - timedelta(days=90)
+    window_end = now + timedelta(days=120)
+
+    events = (
+        db.query(Event)
+        .options(joinedload(Event.event_groups).joinedload(EventGroup.group))
+        .filter(
+            Event.event_type == "class",
+            Event.is_active == True,  # noqa: E712
+            Event.teacher_id == current_user.id,
+            Event.start_datetime >= window_start,
+            Event.start_datetime <= window_end,
+        )
+        .order_by(Event.start_datetime.desc())
+        .all()
+    )
+
+    result = []
+    for ev in events:
+        # is_substitution compares teacher_id against the FIRST linked group's owner
+        if not ev.is_substitution:
+            continue
+        first_group = ev.event_groups[0].group
+        if not first_group:
+            continue
+        result.append(SubstitutionLessonSchema(
+            event_id=ev.id,
+            title=ev.title,
+            topic=ev.topic,
+            start_datetime=ev.start_datetime,
+            end_datetime=ev.end_datetime,
+            group_id=first_group.id,
+            group_name=first_group.name,
+            is_online=bool(ev.is_online),
+            location=ev.location,
+            meeting_url=ev.meeting_url,
+        ))
+    return result
+
+
 @router.get("/{event_id}/participants", response_model=List[EventStudentSchema])
 def get_event_participants(
     event_id: int,

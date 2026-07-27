@@ -136,6 +136,19 @@ class EventStudentSchema(BaseModel):
     last_updated: Optional[datetime] = None
 
 
+class SubstitutionLessonSchema(BaseModel):
+    event_id: int
+    title: str
+    topic: Optional[str] = None
+    start_datetime: datetime
+    end_datetime: datetime
+    group_id: int
+    group_name: str
+    is_online: bool = True
+    location: Optional[str] = None
+    meeting_url: Optional[str] = None
+
+
 class LessonScheduleSchema(BaseModel):
     id: int
     group_id: int
