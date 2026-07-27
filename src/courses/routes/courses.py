@@ -2531,6 +2531,70 @@ async def analyze_sat_image(
         print(f"Error analyzing file: {e}")
         raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
 
+@router.post("/analyze-nuet-image")
+async def analyze_nuet_image(
+    image: UploadFile = File(...),
+    correct_answers: str = Form(None),
+    current_user: UserInDB = Depends(require_teacher_or_admin()),
+    db: Session = Depends(get_db)
+):
+    """
+    Analyze a NUET question image or PDF using the OpenAI (ChatGPT) API.
+    Extracts both NUET Math (LaTeX) and Critical Thinking (verbal, up to 5 options)
+    questions. Optionally provide correct answers to override AI detection.
+    """
+    try:
+        if not (image.content_type.startswith('image/') or image.content_type == 'application/pdf'):
+            raise HTTPException(status_code=400, detail="File must be an image or PDF")
+
+        file_extension = os.path.splitext(image.filename)[1] if image.filename else '.png'
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+
+        content = await image.read()
+        stored_url = storage_service.save(f"nuet_images/{unique_filename}", content, image.content_type)
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        from src.services.nuet_parser import nuet_parser_service
+
+        try:
+            questions = await nuet_parser_service.parse_file(
+                tmp_path, mime_type=image.content_type, correct_answers=correct_answers
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        result = {
+            "success": True,
+            "questions": questions,
+            "file_url": stored_url,
+            "original_filename": image.filename,
+        }
+
+        if questions:
+            q = questions[0]
+            result.update({
+                "question_text": q.get("question_text"),
+                "options": q.get("options"),
+                "correct_answer": q.get("options")[q.get("correct_answer")]["letter"] if q.get("options") and isinstance(q.get("correct_answer"), int) else "A",
+                "explanation": q.get("explanation"),
+                "content_text": q.get("content_text"),
+            })
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error analyzing NUET file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
+
 @router.post("/{course_id}/add-summary-steps")
 def add_summary_steps_to_course(
     course_id: int,
