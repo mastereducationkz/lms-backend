@@ -95,3 +95,20 @@ class FavoriteFlashcardCreateSchema(BaseModel):
     lesson_id: Optional[int] = None
     course_id: Optional[int] = None
     flashcard_data: str
+
+
+class FavoriteStepCreateSchema(BaseModel):
+    step_id: int
+
+
+class FavoriteStepItemSchema(BaseModel):
+    id: int
+    step_id: int
+    lesson_id: int
+    course_id: int
+    course_title: str
+    lesson_title: str
+    order_index: int
+    step_title: str
+    content_type: str
+    created_at: Optional[datetime] = None

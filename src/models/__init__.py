@@ -24,7 +24,7 @@ from src.gamification.models import (
     LeaderboardEntry, LeaderboardConfig, CuratorRating,
     DailyQuestionCompletion,
 )
-from src.content.models import FavoriteFlashcard, QuestionErrorReport
+from src.content.models import FavoriteFlashcard, QuestionErrorReport, FavoriteStep
 from src.curator.models import CuratorTaskTemplate, CuratorTaskInstance
 from src.lesson_requests.models import LessonRequest
 from src.parents.models import ParentStudent
@@ -46,7 +46,7 @@ __all__ = [
     "GroupConversation", "GroupConversationMember", "GroupMessage",
     "LeaderboardEntry", "LeaderboardConfig", "CuratorRating",
     "DailyQuestionCompletion",
-    "FavoriteFlashcard", "QuestionErrorReport",
+    "FavoriteFlashcard", "QuestionErrorReport", "FavoriteStep",
     "CuratorTaskTemplate", "CuratorTaskInstance",
     "LessonRequest",
     "ParentStudent",

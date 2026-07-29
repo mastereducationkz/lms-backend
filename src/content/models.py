@@ -24,6 +24,20 @@ class FavoriteFlashcard(Base):
     )
 
 
+class FavoriteStep(Base):
+    __tablename__ = "favorite_steps"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    step_id = Column(Integer, ForeignKey("steps.id", ondelete="CASCADE"), nullable=False)
+    lesson_id = Column(Integer, ForeignKey("lessons.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'step_id', name='uq_user_step'),
+    )
+
+
 class QuestionErrorReport(Base):
     """Model for tracking error reports submitted by users for quiz questions."""
     __tablename__ = "question_error_reports"
