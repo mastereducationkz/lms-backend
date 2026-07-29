@@ -18,7 +18,7 @@ def register_routes(app: FastAPI):
     from src.gamification.routes import (
         gamification_router, leaderboard_router, daily_questions_router,
     )
-    from src.content.routes import flashcards_router, questions_router, ai_tools_router
+    from src.content.routes import flashcards_router, questions_router, ai_tools_router, favorite_steps_router
     from src.curator.routes import curator_tasks_router, student_journal_router
     from src.lesson_requests.routes import router as lesson_requests_router
     from src.routes.crm_internal import router as crm_internal_router
@@ -42,6 +42,7 @@ def register_routes(app: FastAPI):
     app.include_router(events_router, prefix="/events", tags=["Events"])
     app.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
     app.include_router(flashcards_router, prefix="/flashcards", tags=["Flashcards"])
+    app.include_router(favorite_steps_router, prefix="/favorite-steps", tags=["Favorite Steps"])
     app.include_router(leaderboard_router, prefix="/leaderboard", tags=["Leaderboard"])
     app.include_router(assignment_zero_router, prefix="/assignment-zero", tags=["Assignment Zero"])
     app.include_router(questions_router, tags=["Questions"])
