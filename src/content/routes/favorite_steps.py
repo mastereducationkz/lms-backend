@@ -1,5 +1,6 @@
 """Routes for favoriting (bookmarking) specific lesson steps."""
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -88,9 +89,21 @@ def add_favorite_step(
             course_id=course_id,
         )
         db.add(fav)
-        db.commit()
-        db.refresh(fav)
-        fav_id = fav.id
+        try:
+            db.commit()
+            db.refresh(fav)
+            fav_id = fav.id
+        except IntegrityError:
+            # Concurrent duplicate (uq_user_step race): fall back to the row the
+            # other request committed, keeping POST idempotent instead of 500ing.
+            db.rollback()
+            existing = db.query(FavoriteStep).filter(
+                FavoriteStep.user_id == current_user.id,
+                FavoriteStep.step_id == payload.step_id,
+            ).first()
+            if not existing:
+                raise
+            fav_id = existing.id
 
     row = _enriched_query(db).filter(FavoriteStep.id == fav_id).first()
     return _row_to_item(row)
