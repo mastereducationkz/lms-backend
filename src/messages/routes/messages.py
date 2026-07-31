@@ -10,7 +10,9 @@ from src.schemas.models import (
     Message, UserInDB, Course, Enrollment,
     MessageSchema, SendMessageSchema
 )
-from src.messages.schemas import ReportMessageSchema
+from src.messages.schemas import ReportMessageSchema, ReactionRequestSchema
+from src.messages.serializers import serialize_message, serialize_messages, reactions_payload
+from src.messages import services as chat_services
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_student_access
 from src.schemas.models import GroupStudent
@@ -76,20 +78,14 @@ def get_messages(
         )
     
     messages = query.order_by(desc(Message.created_at)).offset(skip).limit(limit).all()
-    
-    # Добавляем имена отправителей и получателей
-    enriched_messages = []
-    for message in messages:
-        sender = db.query(UserInDB).filter(UserInDB.id == message.from_user_id).first()
-        recipient = db.query(UserInDB).filter(UserInDB.id == message.to_user_id).first()
-        
-        message_data = MessageSchema.from_orm(message)
-        message_data.sender_name = sender.name if sender else "Unknown"
-        message_data.recipient_name = recipient.name if recipient else "Unknown"
-        
-        enriched_messages.append(message_data)
-    
-    return enriched_messages
+
+    # Opening a conversation implicitly delivers the partner's messages to us. Mark
+    # them delivered here (the fetch is the delivery signal for REST-first clients);
+    # realtime read receipts are still driven by the socket read events.
+    if with_user_id:
+        chat_services.mark_delivered(db, current_user.id, with_user_id)
+
+    return serialize_messages(db, messages)
 
 @router.post("/", response_model=MessageSchema)
 def send_message(
@@ -113,23 +109,28 @@ def send_message(
     if not content and not message_data.file_url:
         raise HTTPException(status_code=400, detail="Message must have content or an attachment")
 
+    # Validate an optional reply target (must be in this same 1:1 conversation).
+    if not chat_services.validate_reply(
+        db, current_user.id, message_data.to_user_id, message_data.reply_to_message_id
+    ):
+        raise HTTPException(status_code=400, detail="Invalid reply target")
+
     # Создать сообщение
     new_message = Message(
         from_user_id=current_user.id,
         to_user_id=message_data.to_user_id,
         content=content,
         file_url=message_data.file_url,
+        reply_to_message_id=message_data.reply_to_message_id,
     )
-    
+
     db.add(new_message)
     db.commit()
     db.refresh(new_message)
-    
-    # Возвращаем с именами
-    message_response = MessageSchema.from_orm(new_message)
-    message_response.sender_name = current_user.name
-    message_response.recipient_name = recipient.name
-    
+
+    # Возвращаем с именами и полным контрактом (reply_preview, reactions, receipts)
+    message_response = serialize_message(db, new_message)
+
     # Push to all of the recipient's active devices (multi-device aware)
     send_message_push_to_user(
         db,
@@ -159,10 +160,9 @@ def mark_message_as_read(
     # Только получатель может отмечать сообщение как прочитанное
     if message.to_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    message.is_read = True
-    db.commit()
-    
+
+    chat_services.mark_read_one(db, current_user.id, message)
+
     return {"detail": "Message marked as read"}
 
 @router.put("/mark-all-read/{partner_id}")
@@ -178,18 +178,10 @@ def mark_all_messages_as_read(
         raise HTTPException(status_code=403, detail="Cannot access messages from this user")
     
     # Отметить все непрочитанные сообщения от этого пользователя как прочитанные
-    unread_messages = db.query(Message).filter(
-        Message.from_user_id == partner_id,
-        Message.to_user_id == current_user.id,
-        Message.is_read == False
-    ).all()
-    
-    for message in unread_messages:
-        message.is_read = True
-    
-    db.commit()
-    
-    return {"detail": f"Marked {len(unread_messages)} messages as read"}
+    # (проставляет read_at + delivered_at для чекмарок прочтения).
+    updated_ids = chat_services.mark_read_all(db, current_user.id, partner_id)
+
+    return {"detail": f"Marked {len(updated_ids)} messages as read"}
 
 @router.get("/conversations", response_model=List[dict])
 def get_conversations(
@@ -216,7 +208,9 @@ def get_conversations(
             conversation_partners.add(message.to_user_id)
         else:
             conversation_partners.add(message.from_user_id)
-    
+
+    muted_ids = set(chat_services.muted_partner_ids(db, current_user.id))
+
     # Подготовить данные о разговорах
     conversations = []
     for partner_id in conversation_partners:
@@ -249,7 +243,8 @@ def get_conversations(
                 "created_at": last_message.created_at if last_message else None,
                 "from_me": last_message.from_user_id == current_user.id if last_message else False
             },
-            "unread_count": unread_count
+            "unread_count": unread_count,
+            "is_muted": partner_id in muted_ids,
         })
     
     # Сортируем по времени последнего сообщения
@@ -342,6 +337,132 @@ def report_message(
     db.refresh(report)
     logger.info("message_report created id=%s message_id=%s reporter_id=%s", report.id, message_id, current_user.id)
     return {"status": "reported", "report_id": report.id}
+
+
+# =============================================================================
+# REACTIONS  (WhatsApp-style emoji reactions — one per user per message)
+# =============================================================================
+
+def _get_participant_message(message_id: int, current_user: UserInDB, db: Session) -> Message:
+    """Load a message and assert the caller is a participant, else 404/403."""
+    message = db.query(Message).filter(Message.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if not chat_services.is_participant(message, current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return message
+
+
+@router.get("/{message_id}/reactions")
+def get_message_reactions(
+    message_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """List reactions on a message (who reacted with what)."""
+    _get_participant_message(message_id, current_user, db)
+    return reactions_payload(db, message_id)
+
+
+@router.post("/{message_id}/reactions")
+def react_to_message(
+    message_id: int,
+    payload: ReactionRequestSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Add/replace/toggle the caller's reaction. Returns the full reaction set."""
+    emoji = (payload.emoji or "").strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="emoji is required")
+    message = _get_participant_message(message_id, current_user, db)
+    chat_services.set_reaction(db, current_user.id, message, emoji)
+    return reactions_payload(db, message_id)
+
+
+@router.delete("/{message_id}/reactions")
+def remove_message_reaction(
+    message_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Remove the caller's reaction. Returns the full reaction set."""
+    message = _get_participant_message(message_id, current_user, db)
+    chat_services.remove_reaction(db, current_user.id, message)
+    return reactions_payload(db, message_id)
+
+
+# =============================================================================
+# MUTE  (per-user, per-conversation notification mute)
+# =============================================================================
+
+@router.get("/mutes")
+def get_muted_conversations(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Partner ids the caller has muted."""
+    return {"muted_partner_ids": chat_services.muted_partner_ids(db, current_user.id)}
+
+
+@router.post("/mutes/{partner_id}")
+def mute_conversation(
+    partner_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Mute new-message notifications from ``partner_id``."""
+    chat_services.set_mute(db, current_user.id, partner_id, True)
+    return {"partner_id": partner_id, "is_muted": True}
+
+
+@router.delete("/mutes/{partner_id}")
+def unmute_conversation(
+    partner_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Unmute notifications from ``partner_id``."""
+    chat_services.set_mute(db, current_user.id, partner_id, False)
+    return {"partner_id": partner_id, "is_muted": False}
+
+
+# =============================================================================
+# SHARED MEDIA  (attachments exchanged with a partner — for the chat-info screen)
+# =============================================================================
+
+@router.get("/shared-media/{partner_id}")
+def get_shared_media(
+    partner_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Every attachment exchanged between the caller and ``partner_id``, newest first."""
+    if not can_communicate_with_user(current_user, partner_id, db):
+        raise HTTPException(status_code=403, detail="Cannot access this conversation")
+
+    msgs = (
+        db.query(Message)
+        .filter(
+            Message.file_url.isnot(None),
+            or_(
+                and_(Message.from_user_id == current_user.id, Message.to_user_id == partner_id),
+                and_(Message.from_user_id == partner_id, Message.to_user_id == current_user.id),
+            ),
+        )
+        .order_by(desc(Message.created_at))
+        .limit(200)
+        .all()
+    )
+    return [
+        {
+            "id": m.id,
+            "file_url": m.file_url,
+            "from_user_id": m.from_user_id,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in msgs
+    ]
 
 
 def _parent_staff_ids(db: Session, parent_id: int) -> set:
