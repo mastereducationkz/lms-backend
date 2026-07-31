@@ -117,27 +117,41 @@ async def upload_file(
 ):
     """Upload a general file and return the file URL"""
     
-    # Validate file type
+    # Validate file type. heic/heif included because iOS camera/photos default to HEIC.
     allowed_types = {
-        "teacher_assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
-        "assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
-        "submission": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt"],
-        "step_attachment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "txt", "zip", "xlsx", "pptx"],
-        "question_media": ["pdf", "jpg", "jpeg", "png", "gif", "webp", "mp3", "wav", "ogg", "m4a"],  # For quiz question attachments and audio
-        "message": ["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "gif", "webp"],  # Chat attachments
+        "teacher_assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "txt"],
+        "assignment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "txt"],
+        "submission": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "txt"],
+        "step_attachment": ["pdf", "docx", "doc", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "txt", "zip", "xlsx", "pptx"],
+        "question_media": ["pdf", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "mp3", "wav", "ogg", "m4a"],  # For quiz question attachments and audio
+        "message": ["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"],  # Chat attachments
     }
-    
+
     if file_type not in allowed_types:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
-    
-    # Get file extension
-    file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+
+    # Get the extension from the filename; if there is none (e.g. an iOS camera capture that
+    # arrives as a bare uri), fall back to the content-type so valid images aren't 400'd.
+    _MIME_EXT = {
+        "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/gif": "gif",
+        "image/webp": "webp", "image/heic": "heic", "image/heif": "heif", "application/pdf": "pdf",
+    }
+    file_extension = file.filename.split('.')[-1].lower() if (file.filename and '.' in file.filename) else ''
+    if not file_extension or file_extension not in allowed_types[file_type]:
+        file_extension = _MIME_EXT.get((file.content_type or "").lower(), file_extension)
     if file_extension not in allowed_types[file_type]:
-        raise HTTPException(status_code=400, detail=f"Unsupported file extension: {file_extension}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file extension: {file_extension or file.content_type or 'unknown'}",
+        )
     
-    # Generate unique filename
+    # Generate unique filename. Ensure it carries an extension (clients preview attachments by
+    # extension), appending the resolved one when the original filename had none.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_filename = f"{file_type}_{timestamp}_{current_user.id}_{file.filename}"
+    base_name = file.filename or f"upload.{file_extension}"
+    if '.' not in base_name and file_extension:
+        base_name = f"{base_name}.{file_extension}"
+    safe_filename = f"{file_type}_{timestamp}_{current_user.id}_{base_name}"
 
     try:
         content = await file.read()
