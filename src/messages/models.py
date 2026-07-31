@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, ForeignKey, Text
+from sqlalchemy import Column, String, Integer, DateTime, Boolean, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -17,6 +17,24 @@ class Message(Base):
 
     sender = relationship("UserInDB", foreign_keys=[from_user_id], back_populates="sent_messages")
     recipient = relationship("UserInDB", foreign_keys=[to_user_id], back_populates="received_messages")
+
+
+class MessageReport(Base):
+    """User-flagged chat message awaiting admin review (App Store guideline 1.2)."""
+    __tablename__ = "message_reports"
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True)
+    reporter_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    reason = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="open")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint('message_id', 'reporter_id', name='uq_message_report_reporter'),
+    )
+
+    message = relationship("Message")
+    reporter = relationship("UserInDB", foreign_keys=[reporter_id])
 
 
 class Notification(Base):

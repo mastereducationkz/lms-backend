@@ -10,6 +10,7 @@ from src.schemas.models import (
     Message, UserInDB, Course, Enrollment,
     MessageSchema, SendMessageSchema
 )
+from src.messages.schemas import ReportMessageSchema
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import check_student_access
 from src.schemas.models import GroupStudent
@@ -272,6 +273,76 @@ def get_unread_message_count(
     ).count()
     
     return {"unread_count": unread_count}
+
+
+@router.get("/reports")
+def list_message_reports(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """List reported messages for admin review."""
+    from src.messages.models import MessageReport
+
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    reports = (
+        db.query(MessageReport)
+        .order_by(desc(MessageReport.created_at))
+        .limit(500)
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "message_id": r.message_id,
+            "message_content": r.message.content if r.message else None,
+            "message_sender_id": r.message.from_user_id if r.message else None,
+            "reporter_id": r.reporter_id,
+            "reporter_name": r.reporter.name if r.reporter else None,
+            "reason": r.reason,
+            "status": r.status,
+            "created_at": r.created_at,
+        }
+        for r in reports
+    ]
+
+
+@router.post("/{message_id}/report")
+def report_message(
+    message_id: int,
+    payload: ReportMessageSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """Flag a message for admin review. Only conversation participants may report."""
+    from src.messages.models import MessageReport
+
+    message = db.query(Message).filter(Message.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if current_user.id not in (message.from_user_id, message.to_user_id):
+        raise HTTPException(status_code=403, detail="Only conversation participants can report a message")
+
+    existing = db.query(MessageReport).filter(
+        MessageReport.message_id == message_id,
+        MessageReport.reporter_id == current_user.id,
+    ).first()
+    if existing:
+        return {"status": "reported", "report_id": existing.id}
+
+    report = MessageReport(
+        message_id=message_id,
+        reporter_id=current_user.id,
+        reason=payload.reason,
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    logger.info("message_report created id=%s message_id=%s reporter_id=%s", report.id, message_id, current_user.id)
+    return {"status": "reported", "report_id": report.id}
+
 
 def _parent_staff_ids(db: Session, parent_id: int) -> set:
     """Teacher + curator user ids across all of a parent's children (their groups'

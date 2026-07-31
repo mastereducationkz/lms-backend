@@ -24,6 +24,10 @@ class SendMessageSchema(BaseModel):
     file_url: Optional[str] = None
 
 
+class ReportMessageSchema(BaseModel):
+    reason: Optional[str] = None
+
+
 class DashboardStatsSchema(BaseModel):
     user: dict
     stats: dict
