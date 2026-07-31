@@ -1224,6 +1224,8 @@ def update_assignment(
     
     # Resolve per-group mapping values for update flow.
     # AssignmentBuilder sends group-specific values in *_mapping fields.
+    # Absent event/due-date/group fields mean "no change", never "unlink":
+    # clients (including stale cached bundles) routinely omit them on edit.
     target_group_id = assignment_data.group_id or assignment.group_id
 
     resolved_event_id = assignment_data.event_id
@@ -1246,9 +1248,12 @@ def update_assignment(
     assignment.correct_answers = json.dumps(assignment_data.correct_answers) if assignment_data.correct_answers else None
     assignment.max_score = assignment_data.max_score
     assignment.time_limit_minutes = assignment_data.time_limit_minutes
-    assignment.due_date = resolved_due_date
-    assignment.group_id = assignment_data.group_id
-    assignment.event_id = EventService.resolve_event_id(db, resolved_event_id)
+    if resolved_due_date is not None:
+        assignment.due_date = resolved_due_date
+    if assignment_data.group_id is not None:
+        assignment.group_id = assignment_data.group_id
+    if resolved_event_id is not None:
+        assignment.event_id = EventService.resolve_event_id(db, resolved_event_id, user_id=current_user.id)
     assignment.lesson_number = resolved_lesson_number
     assignment.allowed_file_types = assignment_data.allowed_file_types
     assignment.max_file_size_mb = assignment_data.max_file_size_mb
