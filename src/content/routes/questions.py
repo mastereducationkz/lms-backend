@@ -7,7 +7,7 @@ import json
 
 from src.config import get_db
 from src.schemas.models import UserInDB, QuestionErrorReport, Step, Lesson, Module, Course
-from src.routes.auth import get_current_user
+from src.routes.auth import get_current_user_dependency
 from src.services.telegram_service import notify_admins_about_error_report
 
 router = APIRouter(prefix="/questions", tags=["Questions"])
@@ -36,7 +36,7 @@ class UpdateQuestionRequest(BaseModel):
 def report_question_error(
     request: ReportErrorRequest,
     background_tasks: BackgroundTasks,
-    current_user: UserInDB = Depends(get_current_user),
+    current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """
@@ -119,7 +119,7 @@ def report_question_error(
 @router.get("/error-reports")
 def get_error_reports(
     status: Optional[str] = None,
-    current_user: UserInDB = Depends(get_current_user),
+    current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """
@@ -215,7 +215,7 @@ def get_error_reports(
 @router.get("/error-reports/{report_id}")
 def get_error_report_detail(
     report_id: int,
-    current_user: UserInDB = Depends(get_current_user),
+    current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """
@@ -351,7 +351,7 @@ def update_error_report(
     report_id: int,
     status: str,
     sync_same_question: bool = True,
-    current_user: UserInDB = Depends(get_current_user),
+    current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """
@@ -405,7 +405,7 @@ def update_question(
     step_id: int,
     question_id: str,
     request: UpdateQuestionRequest,
-    current_user: UserInDB = Depends(get_current_user),
+    current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """
