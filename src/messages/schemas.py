@@ -3,6 +3,20 @@ from datetime import datetime
 from typing import Optional, List
 
 
+class ReactionSchema(BaseModel):
+    user_id: int
+    user_name: Optional[str] = None
+    emoji: str
+
+
+class ReplyPreviewSchema(BaseModel):
+    id: int
+    content: str
+    file_url: Optional[str] = None
+    from_user_id: int
+    sender_name: Optional[str] = None
+
+
 class MessageSchema(BaseModel):
     id: int
     from_user_id: int
@@ -12,6 +26,11 @@ class MessageSchema(BaseModel):
     content: str
     file_url: Optional[str] = None
     is_read: bool
+    delivered_at: Optional[datetime] = None
+    read_at: Optional[datetime] = None
+    reply_to_message_id: Optional[int] = None
+    reply_preview: Optional[ReplyPreviewSchema] = None
+    reactions: List[ReactionSchema] = []
     created_at: datetime
 
     class Config:
@@ -22,6 +41,11 @@ class SendMessageSchema(BaseModel):
     to_user_id: int
     content: str = ""          # may be empty when an attachment is sent
     file_url: Optional[str] = None
+    reply_to_message_id: Optional[int] = None
+
+
+class ReactionRequestSchema(BaseModel):
+    emoji: str
 
 
 class ReportMessageSchema(BaseModel):

@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_, and_
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import os
 
@@ -16,6 +16,8 @@ from src.utils.auth_utils import verify_bearer_token
 from src.routes.messages import can_communicate_with_user, create_message_notification
 from src.schemas.models import GroupStudent
 from src.utils.push_notifications import send_message_push_to_user
+from src.messages.serializers import serialize_message, serialize_messages, reactions_payload
+from src.messages import services as chat_services
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,41 @@ async def _emit_unread_update(user_id: int):
     """Emit unread count update to user's room"""
     await sio.emit('unread:update', to=f"{USER_ROOM_PREFIX}{user_id}")
 
+
+def _is_user_online(user_id: int) -> bool:
+    """True when the user has at least one live socket on THIS worker. Used to set
+    delivered_at at send time (best-effort — the recipient client also emits
+    ``message:delivered`` as a safety net)."""
+    try:
+        participants = sio.manager.rooms.get('/', {}).get(f"{USER_ROOM_PREFIX}{user_id}")
+        return bool(participants)
+    except Exception:
+        return False
+
+
+async def _emit_receipts(user_a: int, user_b: int, message_ids, status: str,
+                         by_user_id: int, partner_id: int):
+    """Broadcast a delivery/read receipt for a batch of messages to both
+    participants. ``status`` is 'delivered' | 'read'; ``by_user_id`` is who
+    triggered it and ``partner_id`` is the other side."""
+    if not message_ids:
+        return
+    body = {
+        'message_ids': message_ids,
+        'status': status,
+        'by_user_id': by_user_id,
+        'partner_id': partner_id,
+    }
+    await sio.emit('message:receipts', body, to=f"{USER_ROOM_PREFIX}{user_a}")
+    await sio.emit('message:receipts', body, to=f"{USER_ROOM_PREFIX}{user_b}")
+
+
+async def _emit_reaction(message_id: int, user_a: int, user_b: int, db: Session):
+    """Broadcast the full reaction set of a message to both participants."""
+    body = reactions_payload(db, message_id)
+    await sio.emit('message:reaction', body, to=f"{USER_ROOM_PREFIX}{user_a}")
+    await sio.emit('message:reaction', body, to=f"{USER_ROOM_PREFIX}{user_b}")
+
 async def emit_unseen_graded_update(user_id: int):
     """Emit unseen graded count update to user's room"""
     await sio.emit('unseen_graded:update', to=f"{USER_ROOM_PREFIX}{user_id}")
@@ -173,6 +210,11 @@ async def handle_message_send(sid, data):
     to_user_id = int(data.get('to_user_id')) if data and data.get('to_user_id') is not None else None
     content = (data.get('content') or '').strip()
     file_url = (data.get('file_url') or None)
+    reply_to_message_id = data.get('reply_to_message_id') if data else None
+    try:
+        reply_to_message_id = int(reply_to_message_id) if reply_to_message_id is not None else None
+    except (TypeError, ValueError):
+        reply_to_message_id = None
     if not from_user_id or not to_user_id or (not content and not file_url):
         await sio.emit('message:error', { 'detail': 'Invalid payload' }, to=sid)
         return
@@ -182,49 +224,45 @@ async def handle_message_send(sid, data):
         if not current_user or not can_communicate_with_user(current_user, to_user_id, db):
             await sio.emit('message:error', { 'detail': 'Access denied' }, to=sid)
             return
-        
-        # Create message
+
+        # Validate an optional reply target (same 1:1 conversation only).
+        if not chat_services.validate_reply(db, from_user_id, to_user_id, reply_to_message_id):
+            reply_to_message_id = None
+
+        # Create message. If the recipient has a live socket here, mark it delivered
+        # immediately so the sender gets the double-tick without an extra round trip.
         new_message = Message(
             from_user_id=from_user_id,
             to_user_id=to_user_id,
             content=content,
-            file_url=file_url
+            file_url=file_url,
+            reply_to_message_id=reply_to_message_id,
         )
+        if _is_user_online(to_user_id):
+            new_message.delivered_at = datetime.now(timezone.utc)
         db.add(new_message)
         db.commit()
         db.refresh(new_message)
-        
-        # Enrich with names
+
+        # Canonical payload (reply_preview, reactions, receipts) shared with REST.
+        message_data = serialize_message(db, new_message)
         sender = db.query(UserInDB).filter(UserInDB.id == from_user_id).first()
-        recipient = db.query(UserInDB).filter(UserInDB.id == to_user_id).first()
-        
-        message_data = {
-            'id': new_message.id,
-            'from_user_id': new_message.from_user_id,
-            'to_user_id': new_message.to_user_id,
-            'content': new_message.content,
-            'file_url': new_message.file_url,
-            'is_read': new_message.is_read,
-            'created_at': new_message.created_at.isoformat(),
-            'sender_name': sender.name if sender else 'Unknown',
-            'recipient_name': recipient.name if recipient else 'Unknown'
-        }
-        
+
         # Emit to both users
         await sio.emit('message:new', message_data, to=f"{USER_ROOM_PREFIX}{from_user_id}")
         await sio.emit('message:new', message_data, to=f"{USER_ROOM_PREFIX}{to_user_id}")
-        
+
         # Update threads for both users
         await _emit_threads_update(from_user_id)
         await _emit_threads_update(to_user_id)
-        
+
         # Update unread count for recipient
         await _emit_unread_update(to_user_id)
-        
+
         # Create notification
         create_message_notification(new_message, db)
 
-        # Push to all of the recipient's active devices
+        # Push to all of the recipient's active devices (mute-aware — see push util)
         send_message_push_to_user(
             db,
             recipient_id=to_user_id,
@@ -232,7 +270,7 @@ async def handle_message_send(sid, data):
             message_preview=content or '📎 Attachment',
             partner_id=from_user_id,
         )
-        
+
     except Exception as e:
         logger.error(f"Error sending message: {e}")
         await sio.emit('message:error', { 'detail': 'Internal server error' }, to=sid)
@@ -251,26 +289,39 @@ async def handle_message_read(sid, data):
         msg = db.query(Message).filter(Message.id == message_id).first()
         if not msg or msg.to_user_id != user_id:
             return
-        if not msg.is_read:
-            msg.is_read = True
-            db.commit()
-            
-            # Emit update to both users
-            message_data = {
-                'id': msg.id,
-                'from_user_id': msg.from_user_id,
-                'to_user_id': msg.to_user_id,
-                'content': msg.content,
-                'is_read': msg.is_read,
-                'created_at': msg.created_at.isoformat()
-            }
+        if chat_services.mark_read_one(db, user_id, msg):
+            db.refresh(msg)
+            # Full canonical payload so read_at/delivered_at reach the sender.
+            message_data = serialize_message(db, msg)
             await sio.emit('message:updated', message_data, to=f"{USER_ROOM_PREFIX}{msg.from_user_id}")
             await sio.emit('message:updated', message_data, to=f"{USER_ROOM_PREFIX}{msg.to_user_id}")
-            
+            await _emit_receipts(msg.from_user_id, msg.to_user_id, [msg.id], 'read',
+                                 by_user_id=user_id, partner_id=msg.from_user_id)
             # Update unread count for reader
             await _emit_unread_update(user_id)
     except Exception as e:
         logger.error(f"Error marking message as read: {e}")
+    finally:
+        db.close()
+
+
+@sio.on('message:delivered')
+async def handle_message_delivered(sid, data):
+    """Recipient acknowledges receipt of a partner's messages. Sets delivered_at on
+    every not-yet-delivered partner->me message and broadcasts a delivered receipt."""
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    user_id = _resolve_user_id(session, db)
+    partner_id = int(data.get('partner_id')) if data and data.get('partner_id') is not None else None
+    if not user_id or not partner_id:
+        return
+    try:
+        ids = chat_services.mark_delivered(db, user_id, partner_id)
+        if ids:
+            await _emit_receipts(user_id, partner_id, ids, 'delivered',
+                                 by_user_id=user_id, partner_id=partner_id)
+    except Exception as e:
+        logger.error(f"Error marking messages delivered: {e}")
     finally:
         db.close()
 
@@ -283,22 +334,17 @@ async def handle_message_read_all(sid, data):
     if not user_id or not partner_id:
         return
     try:
-        msgs = db.query(Message).filter(
-            Message.from_user_id == partner_id,
-            Message.to_user_id == user_id,
-            Message.is_read == False
-        ).all()
-        
-        if msgs:
-            for m in msgs:
-                m.is_read = True
-            db.commit()
-            
-            # Emit bulk update to both users
-            message_ids = [msg.id for msg in msgs]
+        # Sets is_read + read_at + delivered_at for partner->me unread messages.
+        message_ids = chat_services.mark_read_all(db, user_id, partner_id)
+
+        if message_ids:
+            # New rich receipt event (carries read status for blue ticks)...
+            await _emit_receipts(user_id, partner_id, message_ids, 'read',
+                                 by_user_id=user_id, partner_id=partner_id)
+            # ...plus the legacy bulk-updated event for older shipped clients.
             await sio.emit('message:bulk-updated', { 'message_ids': message_ids }, to=f"{USER_ROOM_PREFIX}{user_id}")
             await sio.emit('message:bulk-updated', { 'message_ids': message_ids }, to=f"{USER_ROOM_PREFIX}{partner_id}")
-            
+
             # Update unread count and threads for both users
             await _emit_unread_update(user_id)
             await _emit_unread_update(partner_id)
@@ -306,6 +352,52 @@ async def handle_message_read_all(sid, data):
             await _emit_threads_update(partner_id)
     except Exception as e:
         logger.error(f"Error marking all messages as read: {e}")
+    finally:
+        db.close()
+
+
+@sio.on('message:react')
+async def handle_message_react(sid, data):
+    """Add/replace/toggle the caller's emoji reaction; broadcast the new set."""
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    user_id = _resolve_user_id(session, db)
+    message_id = int(data.get('message_id')) if data and data.get('message_id') is not None else None
+    emoji = (data.get('emoji') or '').strip() if data else ''
+    if not user_id or not message_id or not emoji:
+        await sio.emit('message:error', {'detail': 'Invalid payload'}, to=sid)
+        return
+    try:
+        msg = db.query(Message).filter(Message.id == message_id).first()
+        if not msg or not chat_services.is_participant(msg, user_id):
+            await sio.emit('message:error', {'detail': 'Access denied'}, to=sid)
+            return
+        chat_services.set_reaction(db, user_id, msg, emoji)
+        await _emit_reaction(message_id, msg.from_user_id, msg.to_user_id, db)
+    except Exception as e:
+        logger.error(f"Error reacting to message: {e}")
+        await sio.emit('message:error', {'detail': 'Internal server error'}, to=sid)
+    finally:
+        db.close()
+
+
+@sio.on('message:unreact')
+async def handle_message_unreact(sid, data):
+    """Remove the caller's reaction; broadcast the new set."""
+    session = await sio.get_session(sid)
+    db: Session = next(get_db())
+    user_id = _resolve_user_id(session, db)
+    message_id = int(data.get('message_id')) if data and data.get('message_id') is not None else None
+    if not user_id or not message_id:
+        return
+    try:
+        msg = db.query(Message).filter(Message.id == message_id).first()
+        if not msg or not chat_services.is_participant(msg, user_id):
+            return
+        chat_services.remove_reaction(db, user_id, msg)
+        await _emit_reaction(message_id, msg.from_user_id, msg.to_user_id, db)
+    except Exception as e:
+        logger.error(f"Error removing reaction: {e}")
     finally:
         db.close()
 
@@ -402,26 +494,13 @@ async def handle_messages_get(sid, data):
             )
         
         messages = query.order_by(desc(Message.created_at)).limit(50).all()
-        
-        # Enrich with names
-        enriched_messages = []
-        for message in messages:
-            sender = db.query(UserInDB).filter(UserInDB.id == message.from_user_id).first()
-            recipient = db.query(UserInDB).filter(UserInDB.id == message.to_user_id).first()
-            
-            message_data = {
-                'id': message.id,
-                'from_user_id': message.from_user_id,
-                'to_user_id': message.to_user_id,
-                'content': message.content,
-                'is_read': message.is_read,
-                'created_at': message.created_at.isoformat(),
-                'sender_name': sender.name if sender else 'Unknown',
-                'recipient_name': recipient.name if recipient else 'Unknown'
-            }
-            enriched_messages.append(message_data)
-        
-        return enriched_messages
+
+        # Opening the thread delivers the partner's messages to us.
+        if partner_id:
+            chat_services.mark_delivered(db, current_user_id, partner_id)
+
+        # Canonical payload (reply_preview, reactions, receipts) shared with REST.
+        return serialize_messages(db, messages)
     except Exception as e:
         logger.error(f"Error getting messages: {e}")
         return []

@@ -194,6 +194,15 @@ def send_message_push_to_user(
     from src.auth.models import UserInDB, UserPushToken
 
     try:
+        # Respect a per-conversation mute: if the recipient muted this sender, do
+        # not push (the message is still delivered, just silently).
+        try:
+            from src.messages.services import is_muted
+            if is_muted(db, recipient_id, partner_id):
+                return 0
+        except Exception as mute_exc:  # never let the mute check block delivery
+            logger.debug("mute check failed for %s<-%s: %s", recipient_id, partner_id, mute_exc)
+
         token_rows = db.query(UserPushToken).filter(
             UserPushToken.user_id == recipient_id,
             UserPushToken.is_active == True,  # noqa: E712
