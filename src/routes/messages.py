@@ -632,7 +632,10 @@ def create_message_notification(message: Message, db: Session):
         title="Новое сообщение",
         content=f"Новое сообщение от {sender.name if sender else 'Неизвестный пользователь'}",
         notification_type="message",
-        related_id=message.id
+        # related_id is the conversation PARTNER's user id (the sender), so clients can
+        # deep-link straight into that chat. (Was message.id, which broke the mobile
+        # deep-link: it opened /chat/<messageId> and failed can_communicate_with_user.)
+        related_id=message.from_user_id
     )
     
     db.add(notification)
