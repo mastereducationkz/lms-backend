@@ -913,7 +913,16 @@ async def get_weekly_lessons_with_hw_status(
                             item.get("writingBand"), item.get("speakingBand"),
                             item.get("overallBand"),
                         ]
-                        if all(v is None for v in band_values):
+                        # A booked-but-not-yet-sat or missed speaking session
+                        # carries no bands, but is still real activity we must
+                        # surface (scheduled / no_show / cancelled). Only skip a
+                        # row when there is nothing at all to show.
+                        speaking_source = item.get("speakingSource")
+                        speaking_status = item.get("speakingStatus")
+                        has_speaking_activity = (
+                            speaking_source is not None or speaking_status is not None
+                        )
+                        if all(v is None for v in band_values) and not has_speaking_activity:
                             continue
 
                         ielts_details_map[student_id] = {
@@ -926,6 +935,13 @@ async def get_weekly_lessons_with_hw_status(
                             "reading_test_name": item.get("readingTestName"),
                             "writing_test_name": item.get("writingTestName"),
                             "speaking_test_name": item.get("speakingTestName"),
+                            # Speaking-examiner discriminator (IELTS contract 2026-07-27):
+                            # speakingSource is the single source of truth for which
+                            # kind of test produced the band (ai vs human instructor).
+                            "speaking_source": speaking_source,
+                            "speaking_examiner": item.get("speakingExaminer"),
+                            "speaking_session_at": item.get("speakingSessionAt"),
+                            "speaking_status": speaking_status,
                             "listening_feedback": item.get("listeningFeedback"),
                             "listening_feedback_ru": item.get("listeningFeedbackRu"),
                             "reading_feedback": item.get("readingFeedback"),
@@ -1068,6 +1084,10 @@ async def get_weekly_lessons_with_hw_status(
             "ielts_reading_test_name": ielts.get("reading_test_name"),
             "ielts_writing_test_name": ielts.get("writing_test_name"),
             "ielts_speaking_test_name": ielts.get("speaking_test_name"),
+            "ielts_speaking_source": ielts.get("speaking_source"),
+            "ielts_speaking_examiner": ielts.get("speaking_examiner"),
+            "ielts_speaking_session_at": ielts.get("speaking_session_at"),
+            "ielts_speaking_status": ielts.get("speaking_status"),
             "ielts_listening_feedback": ielts.get("listening_feedback"),
             "ielts_listening_feedback_ru": ielts.get("listening_feedback_ru"),
             "ielts_reading_feedback": ielts.get("reading_feedback"),
