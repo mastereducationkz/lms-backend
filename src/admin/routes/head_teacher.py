@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, or_
 from typing import List, Optional
 from datetime import datetime, timedelta, date
 from pydantic import BaseModel
@@ -167,9 +167,12 @@ def detect_and_log_missed_attendance(db: Session, teacher_id: int, group_ids: Li
         event_group_ids = [eg.group_id for eg in event.event_groups if eg.group_id in group_ids]
         
         for group_id in event_group_ids:
-            # Get expected students for this group
+            # Get expected students for this group, join-date-aware: a student added
+            # after this event's start didn't miss it, so they must not inflate the
+            # expected count (NULL created_at = legacy row, always a member).
             expected_count = db.query(func.count(GroupStudent.id)).filter(
-                GroupStudent.group_id == group_id
+                GroupStudent.group_id == group_id,
+                or_(GroupStudent.created_at.is_(None), GroupStudent.created_at <= event.start_datetime),
             ).scalar() or 0
             
             if expected_count == 0:
