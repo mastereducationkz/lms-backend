@@ -2508,6 +2508,21 @@ def get_teacher_pending_submissions(
     courses = db.query(Course).filter(Course.id.in_(course_ids_for_assignments)).all() if course_ids_for_assignments else []
     courses_map = {c.id: c for c in courses}
 
+    # Group name resolution: assignment.group_id is the canonical link for
+    # group-linked assignments; fall back to the student's group among the
+    # teacher's own groups when the assignment itself has no group_id.
+    groups_map = {g.id: g for g in teacher_groups}
+    extra_group_ids = {
+        a.group_id for a in assignments if a.group_id is not None and a.group_id not in groups_map
+    }
+    if extra_group_ids:
+        for g in db.query(Group).filter(Group.id.in_(extra_group_ids)).all():
+            groups_map[g.id] = g
+
+    student_to_group_id = {}
+    for gs in sorted(group_students, key=lambda x: x.group_id):
+        student_to_group_id.setdefault(gs.student_id, gs.group_id)
+
     submissions_data = []
     for submission in pending_submissions:
         assignment = assignments_map.get(submission.assignment_id)
@@ -2523,11 +2538,19 @@ def get_teacher_pending_submissions(
                     if course:
                         course_title = course.title
 
+        group_id = assignment.group_id if assignment and assignment.group_id else None
+        if group_id is None:
+            group_id = student_to_group_id.get(submission.user_id)
+        group = groups_map.get(group_id) if group_id is not None else None
+        group_name = group.name if group else None
+
         submissions_data.append({
             "id": submission.id,
             "assignment_id": submission.assignment_id,
             "assignment_title": assignment.title if assignment else "Unknown Assignment",
             "course_title": course_title,
+            "group_id": group_id,
+            "group_name": group_name,
             "user_id": submission.user_id,
             "student_name": student.name if student else "Unknown Student",
             "student_email": student.email if student else "",
@@ -2536,7 +2559,7 @@ def get_teacher_pending_submissions(
             "file_url": submission.file_url,
             "submitted_file_name": submission.submitted_file_name
         })
-    
+
     has_more = (offset + len(submissions_data)) < total_pending_count if limit is not None else False
     return {
         "pending_submissions": submissions_data,
@@ -2883,6 +2906,21 @@ def get_teacher_recent_submissions(
     courses = db.query(Course).filter(Course.id.in_(course_ids_for_assignments)).all() if course_ids_for_assignments else []
     courses_map = {c.id: c for c in courses}
 
+    # Group name resolution: assignment.group_id is the canonical link for
+    # group-linked assignments; fall back to the student's group among the
+    # teacher's own groups when the assignment itself has no group_id.
+    groups_map = {g.id: g for g in teacher_groups}
+    extra_group_ids = {
+        a.group_id for a in assignments if a.group_id is not None and a.group_id not in groups_map
+    }
+    if extra_group_ids:
+        for g in db.query(Group).filter(Group.id.in_(extra_group_ids)).all():
+            groups_map[g.id] = g
+
+    student_to_group_id = {}
+    for gs in sorted(group_students, key=lambda x: x.group_id):
+        student_to_group_id.setdefault(gs.student_id, gs.group_id)
+
     submissions_data = []
     for submission in recent_submissions:
         assignment = assignments_map.get(submission.assignment_id)
@@ -2900,11 +2938,19 @@ def get_teacher_recent_submissions(
 
         grader = graders_map.get(submission.graded_by) if submission.graded_by else None
 
+        group_id = assignment.group_id if assignment and assignment.group_id else None
+        if group_id is None:
+            group_id = student_to_group_id.get(submission.user_id)
+        group = groups_map.get(group_id) if group_id is not None else None
+        group_name = group.name if group else None
+
         submissions_data.append({
             "id": submission.id,
             "assignment_id": submission.assignment_id,
             "assignment_title": assignment.title if assignment else "Unknown Assignment",
             "course_title": course_title,
+            "group_id": group_id,
+            "group_name": group_name,
             "user_id": submission.user_id,
             "student_name": student.name if student else "Unknown Student",
             "student_email": student.email if student else "",
@@ -2918,7 +2964,7 @@ def get_teacher_recent_submissions(
             "file_url": submission.file_url,
             "submitted_file_name": submission.submitted_file_name
         })
-    
+
     return {"recent_submissions": submissions_data}
 
 

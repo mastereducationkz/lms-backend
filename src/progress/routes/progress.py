@@ -2287,55 +2287,76 @@ def get_ungraded_attempts(
     else:
         query = query.filter(QuizAttempt.is_graded == True)
     
+    # Track the caller's accessible groups (teacher: own groups only; other
+    # graders: unrestricted) so we can resolve a group_name/group_id per
+    # attempt below without per-row queries.
+    from src.schemas.models import GroupStudent, CourseGroupAccess
+
+    caller_group_ids = None  # None == unrestricted (admin/curator/head_curator)
+
     if current_user.role == "teacher":
         # Filter by teacher's groups - only show attempts from students in teacher's groups
-        from src.schemas.models import Group, GroupStudent, CourseGroupAccess
-        
-        # Get teacher's groups
-        teacher_group_ids = db.query(Group.id).filter(
+        teacher_groups = db.query(Group).filter(
             Group.teacher_id == current_user.id,
             Group.is_active == True
-        ).subquery()
-        
+        ).all()
+        caller_group_ids = [g.id for g in teacher_groups]
+
         # Get students from teacher's groups
         teacher_student_ids = db.query(GroupStudent.student_id).filter(
-            GroupStudent.group_id.in_(teacher_group_ids)
+            GroupStudent.group_id.in_(caller_group_ids)
         ).subquery()
-        
+
         # Get courses that teacher's groups have access to
         teacher_course_ids = db.query(CourseGroupAccess.course_id).filter(
-            CourseGroupAccess.group_id.in_(teacher_group_ids),
+            CourseGroupAccess.group_id.in_(caller_group_ids),
             CourseGroupAccess.is_active == True
         ).subquery()
-        
+
         # Filter attempts by teacher's students AND teacher's courses
         query = query.filter(
             QuizAttempt.user_id.in_(teacher_student_ids),
             QuizAttempt.course_id.in_(teacher_course_ids)
         )
-    
+
     attempts = query.order_by(QuizAttempt.created_at.desc()).all()
-    
+
     if not attempts:
         return []
-    
+
     # OPTIMIZATION: Batch fetch all related entities to avoid N+1 queries
     user_ids = list(set(a.user_id for a in attempts))
     step_ids = list(set(a.step_id for a in attempts))
     lesson_ids = list(set(a.lesson_id for a in attempts if a.lesson_id))
     course_ids = list(set(a.course_id for a in attempts))
-    
+
     users_map = {u.id: u for u in db.query(UserInDB).filter(UserInDB.id.in_(user_ids)).all()} if user_ids else {}
     steps_map = {s.id: s for s in db.query(Step).filter(Step.id.in_(step_ids)).all()} if step_ids else {}
     lessons_map = {l.id: l for l in db.query(Lesson).filter(Lesson.id.in_(lesson_ids)).all()} if lesson_ids else {}
     courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
-    
+
     # Also fetch lessons for steps that have lesson_ids not in attempts (fallback)
     step_lesson_ids = list(set(s.lesson_id for s in steps_map.values() if s.lesson_id and s.lesson_id not in lessons_map))
     if step_lesson_ids:
         extra_lessons = {l.id: l for l in db.query(Lesson).filter(Lesson.id.in_(step_lesson_ids)).all()}
         lessons_map.update(extra_lessons)
-    
+
+    # Resolve each attempt's user to a group: student's group membership,
+    # intersected with the caller's accessible groups (teacher: own groups;
+    # other graders: unrestricted). Ambiguous memberships resolve to the
+    # lowest group_id; no membership resolves to null. Batched, no N+1.
+    membership_query = db.query(GroupStudent).filter(GroupStudent.student_id.in_(user_ids)) if user_ids else None
+    if membership_query is not None and caller_group_ids is not None:
+        membership_query = membership_query.filter(GroupStudent.group_id.in_(caller_group_ids))
+    memberships = membership_query.order_by(GroupStudent.group_id.asc()).all() if membership_query is not None else []
+
+    student_to_group_id = {}
+    for gs in memberships:
+        student_to_group_id.setdefault(gs.student_id, gs.group_id)
+
+    resolved_group_ids = list({gid for gid in student_to_group_id.values()})
+    groups_map = {g.id: g for g in db.query(Group).filter(Group.id.in_(resolved_group_ids)).all()} if resolved_group_ids else {}
+
     # Enrich response with user and step info (using lookup maps)
     results = []
     for attempt in attempts:
@@ -2471,6 +2492,9 @@ def get_ungraded_attempts(
         # Only include attempts that need grading (have long text answers)
         # BUT return full context
         if has_long_text:
+            attempt_group_id = student_to_group_id.get(attempt.user_id)
+            attempt_group = groups_map.get(attempt_group_id) if attempt_group_id is not None else None
+
             results.append({
                 "id": attempt.id,
                 "user_id": attempt.user_id,
@@ -2482,6 +2506,8 @@ def get_ungraded_attempts(
                 "lesson_title": lesson.title if lesson else "Unknown Lesson",
                 "course_id": attempt.course_id,
                 "course_title": course.title if course else "Unknown Course",
+                "group_id": attempt_group_id,
+                "group_name": attempt_group.name if attempt_group else None,
                 "created_at": attempt.created_at,
                 "quiz_title": attempt.quiz_title,
                 "score_percentage": attempt.score_percentage,
