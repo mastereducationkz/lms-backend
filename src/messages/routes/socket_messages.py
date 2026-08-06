@@ -802,6 +802,11 @@ async def handle_group_message_send(sid, data):
         except ValueError as e:
             await sio.emit('message:error', {'detail': str(e)}, to=sid)
             return
+        # Group rooms are joined at connect time, so a user added to this conversation
+        # mid-session (or whose auto-join failed) is not in the room and would never see
+        # their own message echoed back. Re-entering is idempotent, and post_message
+        # succeeding already proves membership.
+        await sio.enter_room(sid, f"{GROUP_ROOM_PREFIX}{conv_id}")
         await sio.emit('group:message:new', msg, to=f"{GROUP_ROOM_PREFIX}{conv_id}")
         members = member_ids(db, conv_id)
         for mid in members:
