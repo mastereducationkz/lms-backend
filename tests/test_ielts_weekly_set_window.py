@@ -143,7 +143,6 @@ def test_stale_set_not_backfilled(db, monkeypatch):
 
     row = _week2_row(db, admin, group)
     assert row["ielts_overall_band"] is None
-    assert row["ielts_weekly_set_title"] is None
     assert row["ielts_listening_feedback"] is None
     assert row["mock_exam"] == 0
 
@@ -156,7 +155,6 @@ def test_current_week_set_shown(db, monkeypatch):
 
     row = _week2_row(db, admin, group)
     assert row["ielts_overall_band"] == 7.5
-    assert row["ielts_weekly_set_title"] == "13.06 - 14.06"
     assert row["ielts_listening_feedback"] == "current-week feedback"
     assert row["ielts_listening_feedback_ru"] == "current-week feedback (ru)"
     assert row["ielts_writing_feedback_ru"] is None
@@ -174,7 +172,7 @@ def test_in_week_curator_hour_date_is_not_a_pin(db, monkeypatch):
 
     row = _week2_row(db, admin, group)
     assert row["ielts_overall_band"] is None
-    assert row["ielts_weekly_set_title"] is None
+    assert row["ielts_listening_feedback"] is None
 
 
 def test_curator_hour_date_pins_out_of_week_set(db, monkeypatch):
@@ -189,7 +187,6 @@ def test_curator_hour_date_pins_out_of_week_set(db, monkeypatch):
 
     row = _week2_row(db, admin, group)
     assert row["ielts_overall_band"] == 6.0
-    assert row["ielts_weekly_set_title"] == "06.06 - 07.06"
     assert row["ielts_listening_feedback"] == "stale feedback"
 
 

@@ -840,7 +840,6 @@ async def get_weekly_lessons_with_hw_status(
     sat_results_map = {}  # user_id -> combined percentage score
     sat_section_scores_map = {}  # user_id -> math/verbal counts
     sat_feedback_map = {}  # user_id -> {math_feedback, verbal_feedback}
-    sat_weekly_set_map = {}  # user_id -> weekly set scaled scores (SAT or NUET)
     ielts_details_map = {}  # user_id -> band scores + examiner feedback
 
     if student_ids and week_start_date and week_end_date:
@@ -950,7 +949,6 @@ async def get_weekly_lessons_with_hw_status(
                             "writing_feedback_ru": item.get("writingFeedbackRu"),
                             "speaking_feedback": item.get("speakingFeedback"),
                             "speaking_feedback_ru": item.get("speakingFeedbackRu"),
-                            "weekly_set_title": payload.get("weeklySetTitle"),
                         }
 
                         overall = item.get("overallBand")
@@ -976,11 +974,11 @@ async def get_weekly_lessons_with_hw_status(
                     for item in (score_payload.get("results") or []):
                         email = (item.get("email") or "").lower()
                         student_id = email_to_id.get(email)
-                        if not student_id or student_id in sat_weekly_set_map:
+                        if not student_id or student_id in sat_section_scores_map:
                             continue
-                        weekly_set = SATService.extract_weekly_set(item)
-                        if weekly_set:
-                            sat_weekly_set_map[student_id] = weekly_set
+                        sat_section_scores_map[student_id] = SATService.extract_section_scores(
+                            item, exam_type="NUET"
+                        )
             elif is_sat_group:
                 # SAT tests are date-named → resolve by iterating the week's candidate dates.
                 # Try: configured date → all 7 days of the week (Fri/Sat/Sun often have tests)
@@ -1011,11 +1009,6 @@ async def get_weekly_lessons_with_hw_status(
 
                         section_scores = SATService.extract_section_scores(item)
                         sat_section_scores_map[student_id] = section_scores
-
-                        # Weekly Set scaled scores (SAT 200–800/section, NUET 0–120)
-                        weekly_set = SATService.extract_weekly_set(item)
-                        if weekly_set:
-                            sat_weekly_set_map[student_id] = weekly_set
 
                         # Store feedback texts
                         math_fb = item.get("mathFeedback") or {}
@@ -1096,7 +1089,6 @@ async def get_weekly_lessons_with_hw_status(
             "ielts_writing_feedback_ru": ielts.get("writing_feedback_ru"),
             "ielts_speaking_feedback": ielts.get("speaking_feedback"),
             "ielts_speaking_feedback_ru": ielts.get("speaking_feedback_ru"),
-            "ielts_weekly_set_title": ielts.get("weekly_set_title"),
             "sat_math_correct_count": sat_sections.get("math_correct"),
             "sat_math_total_count": sat_sections.get("math_total"),
             "sat_verbal_correct_count": sat_sections.get("verbal_correct"),
@@ -1109,7 +1101,6 @@ async def get_weekly_lessons_with_hw_status(
             "sat_verbal_test_name": sat_fb.get("verbal_test_name"),
             "sat_math_completed_at": sat_fb.get("math_completed_at"),
             "sat_verbal_completed_at": sat_fb.get("verbal_completed_at"),
-            "weekly_set": sat_weekly_set_map.get(student.id),
             "study_buddy": manual.study_buddy if manual else 0,
             "self_reflection_journal": manual.self_reflection_journal if manual else 0,
             "weekly_evaluation": manual.weekly_evaluation if manual else 0,

@@ -128,48 +128,30 @@ class SATService:
     SAT_VERBAL_TOTAL_DEFAULT = 27
 
     @staticmethod
-    def extract_section_scores(item: Dict[str, Any]) -> Dict[str, Optional[int]]:
+    def extract_section_scores(item: Dict[str, Any],
+                               exam_type: Optional[str] = None) -> Dict[str, Optional[int]]:
         """
         Normalize SAT section scores from different API response shapes.
-        Falls back to known fixed question counts: Math=22, Verbal=27.
+        Falls back to known fixed question counts: Math=22, Verbal=27. Those counts
+        are SAT-specific, so any other product (NUET) reports no total at all rather
+        than a wrong denominator — the UI renders the bare correct count in that case.
         """
+        is_sat = not exam_type or exam_type.upper() == "SAT"
         math_total = (
             item.get("mathTotalCount")
             or item.get("mathQuestionCount")
-            or SATService.SAT_MATH_TOTAL_DEFAULT
+            or (SATService.SAT_MATH_TOTAL_DEFAULT if is_sat else None)
         )
         verbal_total = (
             item.get("verbalTotalCount")
             or item.get("verbalQuestionCount")
-            or SATService.SAT_VERBAL_TOTAL_DEFAULT
+            or (SATService.SAT_VERBAL_TOTAL_DEFAULT if is_sat else None)
         )
         return {
             "math_correct": item.get("mathCorrectCount"),
             "verbal_correct": item.get("verbalCorrectCount"),
             "math_total": math_total,
             "verbal_total": verbal_total,
-        }
-
-    @staticmethod
-    def extract_weekly_set(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Normalize the `weeklySet` object returned by the scores-by-date endpoints
-        into snake_case. Returns None when no weekly set matches the date.
-        Scaled scores are null when the student hasn't taken that section.
-        """
-        ws = item.get("weeklySet")
-        if not ws:
-            return None
-        return {
-            "id": ws.get("id"),
-            "name": ws.get("name"),
-            "week_number": ws.get("weekNumber"),
-            "exam_type": ws.get("examType"),
-            "verbal_scaled": ws.get("verbalScaled"),
-            "math_scaled": ws.get("mathScaled"),
-            "total": ws.get("total"),
-            "completed": ws.get("completed"),
-            "completed_at": ws.get("completedAt"),
         }
 
     @staticmethod
