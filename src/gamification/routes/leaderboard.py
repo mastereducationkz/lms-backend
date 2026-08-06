@@ -606,6 +606,10 @@ async def get_weekly_lessons_with_hw_status(
         group = db.query(Group).filter(Group.id == group_id).first()
         if not group:
             raise HTTPException(status_code=404, detail="Group not found")
+    elif current_user.role == "teacher":
+        group = db.query(Group).filter(Group.id == group_id, Group.teacher_id == current_user.id).first()
+        if not group:
+            raise HTTPException(status_code=403, detail="Access denied to this group")
     elif current_user.role in ["admin", "head_curator"]:
         group = db.query(Group).filter(Group.id == group_id).first()
         if not group:
@@ -774,6 +778,7 @@ async def get_weekly_lessons_with_hw_status(
             "lesson_number": lesson_num,
             "event_id": event.id,
             "title": event.title,
+            "topic": getattr(event, "topic", None),
             # Stored naive-UTC; the "Z" tells browsers to convert to local tz
             "start_datetime": event.start_datetime.isoformat() + "Z",
             "homeworks": hw_meta,
@@ -799,11 +804,14 @@ async def get_weekly_lessons_with_hw_status(
     
     # 7. Get Attendance — from Attendance (single source of truth)
     event_ids = [e.id for e in events if hasattr(e, 'id') and e.id]
-    attendance_map = {}  # (user_id, event_id) -> status str
+    attendance_map = {}  # (user_id, event_id) -> {"status": str, "activity_score": float|None}
     if event_ids:
         raw_map = AttendanceService.get_attendance_map_for_events(db, event_ids, student_ids)
         for (uid, eid), att in raw_map.items():
-            attendance_map[(uid, eid)] = attendance_status_to_ui(att["status"])
+            attendance_map[(uid, eid)] = {
+                "status": attendance_status_to_ui(att["status"]),
+                "activity_score": att["activity_score"],
+            }
 
     
     # 8. Get HW Submissions
@@ -1112,7 +1120,8 @@ async def get_weekly_lessons_with_hw_status(
             # Default to "registered" if event exists? No, default absent if not in participant table?
             # Actually, EventParticipant is usually created when they register/attend.
             # If nothing, assumption: missed.
-            status = attendance_map.get((student.id, event.id), "missed") 
+            att = attendance_map.get((student.id, event.id))
+            status = att["status"] if att else "missed"
             
             # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
@@ -1156,6 +1165,7 @@ async def get_weekly_lessons_with_hw_status(
             lesson_data[str(lesson_num)] = {
                 "event_id": event.id,
                 "attendance_status": status,
+                "activity_score": att["activity_score"] if att else None,
                 "homework_statuses": hw_statuses,
                 "homework_status": hw_status
             }
@@ -1572,7 +1582,7 @@ async def get_leaderboard_full(
 
 
 @router.post("/curator/leaderboard-config")
-def update_leaderboard_config(
+def update_leaderboard_config_legacy(
     data: LeaderboardConfigUpdateSchema,
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
