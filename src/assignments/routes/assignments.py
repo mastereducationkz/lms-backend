@@ -2587,7 +2587,7 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
             )
 
         # Validate each task
-        valid_task_types = ["course_unit", "file_task", "text_task", "link_task", "pdf_text_task"]
+        valid_task_types = ["course_unit", "file_task", "text_task", "link_task", "pdf_text_task", "audio_task"]
         for i, task in enumerate(tasks):
             # Check required task fields
             if not isinstance(task, dict):
@@ -2644,6 +2644,12 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
                     raise HTTPException(
                         status_code=400, 
                         detail=f"Task {i+1} (pdf_text_task) must have 'question' in content"
+                    )
+            elif task_type == "audio_task":
+                if "question" not in task_content:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Task {i+1} (audio_task) must have 'question' in content"
                     )
 
 
@@ -2813,17 +2819,17 @@ def get_assignment_types():
             {
                 "type": "multi_task",
                 "name": "Multi-Task Homework",
-                "description": "Домашнее задание с несколькими задачами разных типов",
+                "description": "Домашнее задание с несколькими задачами разных типов. Задача audio_task — голосовая запись студента, оценивается только вручную (как отдельный тип audio)",
                 "schema": {
                     "tasks": [{
                         "id": "str",
-                        "task_type": "str (course_unit, file_task, text_task, link_task, pdf_text_task)",
+                        "task_type": "str (course_unit, file_task, text_task, link_task, pdf_text_task, audio_task)",
                         "title": "str",
                         "description": "str (optional)",
                         "order_index": "int",
                         "points": "int",
                         "is_optional": "bool (optional, default false) - marks task as bonus/optional",
-                        "content": "dict (task-specific)"
+                        "content": "dict (task-specific: link_task requires 'url'; file_task, text_task, pdf_text_task, audio_task require 'question'; course_unit requires 'course_id' + 'lesson_ids')"
                     }],
                     "total_points": "int",
                     "required_points": "int (sum of non-optional task points)",
