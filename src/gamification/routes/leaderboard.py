@@ -65,6 +65,12 @@ def get_curator_groups(
             Group.curator_id == current_user.id,
             Group.is_active == True,
         ).order_by(Group.created_at.desc()).all()
+    elif current_user.role == "teacher":
+        # Teachers see the leaderboard for their own groups (/attendance page).
+        groups = db.query(Group).filter(
+            Group.teacher_id == current_user.id,
+            Group.is_active == True,
+        ).order_by(Group.created_at.desc()).all()
     elif current_user.role == "head_teacher":
         # Head teachers see the leaderboard only for groups of their subject.
         from src.lesson_requests.services import get_group_ids_in_head_teacher_scope
@@ -77,7 +83,7 @@ def get_curator_groups(
             Group.is_active == True,
         ).order_by(Group.created_at.desc()).all()
     else:
-        raise HTTPException(status_code=403, detail="Only curators, head teachers and admins can access this endpoint")
+        raise HTTPException(status_code=403, detail="Only teachers, curators, head teachers and admins can access this endpoint")
     # We need to return GroupSchema. Since GroupSchema has many fields, we might need to populate them or use a simplified schema.
     # The frontend only uses id and name for the dropdown.
     # But for compatibility, let's use GroupSchema and fill basics.

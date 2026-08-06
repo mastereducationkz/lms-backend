@@ -17,6 +17,7 @@ from fastapi import HTTPException
 
 from src.schemas.models import Attendance, Event, EventGroup, Group, GroupStudent, UserInDB
 from src.gamification.routes.leaderboard import (
+    get_curator_groups,
     get_weekly_lessons_with_hw_status,
     update_leaderboard_entry,
     update_leaderboard_config,
@@ -119,6 +120,24 @@ def test_foreign_teacher_gets_403(db):
             group.id, week_number=1, current_user=outsider, db=db,
         ))
     assert exc.value.status_code == 403
+
+
+def test_teacher_gets_own_groups_with_week_meta(db):
+    """/leaderboard/curator/groups serves teachers their own groups with the
+    computed current_week/max_week/week1_start the week switcher needs."""
+    teacher = _make_teacher(db, "wl-teacher3@test.local", "WL Teacher3")
+    teacher, group, student, event = _make_group_with_lesson(db, teacher)
+    outsider = _make_teacher(db, "wl-outsider2@test.local", "WL Outsider2")
+
+    result = get_curator_groups(current_user=teacher, db=db)
+    ids = [g.id for g in result]
+    assert group.id in ids
+    mine = next(g for g in result if g.id == group.id)
+    # One event on 2026-03-02 → max_week is content-bound, not the 52 fallback
+    assert mine.max_week is not None and mine.max_week < 52
+    assert mine.week1_start is not None
+
+    assert [g.id for g in get_curator_groups(current_user=outsider, db=db)] == []
 
 
 def test_teacher_403_on_manual_scores_and_config(db):
