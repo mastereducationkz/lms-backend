@@ -732,23 +732,23 @@ async def get_weekly_lessons_with_hw_status(
     if not week_start_date:
          week_start_date = datetime.utcnow() # Warning: Should not happen if events exist
     
-    # 4. Get Assignments linked to lessons by lesson_number
-    lesson_homework_map = {}  # lesson_number -> assignment
-    
-    # Query assignments by group_id and lesson_number
+    # 4. Get Assignments linked to lessons by lesson_number.
+    # A lesson may have SEVERAL homeworks — keep them all (last-wins hid
+    # submitted homework behind an unsubmitted twin).
+    lesson_homework_map = {}  # lesson_number -> [assignments]
+
     assignments = db.query(Assignment).filter(
         Assignment.group_id == group_id,
         Assignment.lesson_number.isnot(None),
         Assignment.is_active == True
-    ).all()
-    
-    # Build lesson_number -> assignment map
+    ).order_by(Assignment.due_date, Assignment.id).all()
+
     for a in assignments:
         if a.lesson_number:
-            lesson_homework_map[a.lesson_number] = a
+            lesson_homework_map.setdefault(a.lesson_number, []).append(a)
 
     # Collect final assignment IDs for submission lookup
-    assignment_ids = list(set([a.id for a in lesson_homework_map.values()])) if lesson_homework_map else []
+    assignment_ids = [a.id for hws in lesson_homework_map.values() for a in hws]
     
     # 4.5. Calculate GLOBAL lesson_number for each event in this week
     # Get ALL events for this group to calculate correct lesson_number
@@ -768,18 +768,17 @@ async def get_weekly_lessons_with_hw_status(
     for idx, event in enumerate(events):
         # Use GLOBAL lesson_number, not local week index
         lesson_num = event_to_lesson_number.get(event.id, idx + 1)
-        hw = lesson_homework_map.get(lesson_num)
+        hws = lesson_homework_map.get(lesson_num, [])
+        hw_meta = [{"id": hw.id, "title": hw.title, "max_score": hw.max_score} for hw in hws]
         lessons_meta.append({
             "lesson_number": lesson_num,
             "event_id": event.id,
             "title": event.title,
             # Stored naive-UTC; the "Z" tells browsers to convert to local tz
             "start_datetime": event.start_datetime.isoformat() + "Z",
-            "homework": {
-                "id": hw.id,
-                "title": hw.title,
-                "max_score": hw.max_score
-            } if hw else None
+            "homeworks": hw_meta,
+            # Legacy single-homework field for older cached clients
+            "homework": hw_meta[0] if hw_meta else None
         })
         
     # 6. Get Students
@@ -1115,14 +1114,15 @@ async def get_weekly_lessons_with_hw_status(
             # If nothing, assumption: missed.
             status = attendance_map.get((student.id, event.id), "missed") 
             
-            # Homework - now by GLOBAL lesson_number
+            # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
-            hw = lesson_homework_map.get(lesson_num)
-            hw_status = None
-            if hw:
+            hw_statuses = []
+            for hw in lesson_homework_map.get(lesson_num, []):
                 sub = submission_map.get((student.id, hw.id))
                 if sub:
-                    hw_status = {
+                    hw_statuses.append({
+                        "assignment_id": hw.id,
+                        "title": hw.title,
                         "submitted": True,
                         "score": sub.score,
                         "max_score": sub.max_score,
@@ -1135,14 +1135,28 @@ async def get_weekly_lessons_with_hw_status(
                             sub.submitted_at, hw.due_date,
                             extension_map.get((student.id, hw.id)),
                         ),
-                    }
+                    })
                 else:
-                    hw_status = {"submitted": False, "score": None, "late": False}
-            
+                    hw_statuses.append({
+                        "assignment_id": hw.id,
+                        "title": hw.title,
+                        "submitted": False,
+                        "score": None,
+                        "max_score": hw.max_score,
+                        "late": False,
+                    })
+
+            # Legacy single status for older cached clients: prefer a submitted
+            # homework so it never shows "Не выполнено" over a submitted twin.
+            hw_status = None
+            if hw_statuses:
+                hw_status = next((s for s in hw_statuses if s["submitted"]), hw_statuses[0])
+
             # Use GLOBAL lesson_number as key to match lessons_meta
             lesson_data[str(lesson_num)] = {
                 "event_id": event.id,
                 "attendance_status": status,
+                "homework_statuses": hw_statuses,
                 "homework_status": hw_status
             }
             
@@ -1371,7 +1385,7 @@ def update_leaderboard_entry(
 
 
 @router.get("/curator/leaderboard-full/{group_id}")
-async def get_weekly_lessons_with_hw_status(
+async def get_leaderboard_full(
     group_id: int,
     week_number: int = Query(..., ge=1, le=52),
     current_user: UserInDB = Depends(get_current_user_dependency),

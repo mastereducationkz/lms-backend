@@ -1301,17 +1301,18 @@ def check_lesson_access(
                 print(f"DEBUG: Lesson {lesson_id} unlocked by redirect from completed lesson {source.id} ({source.title}) via StudentProgress")
                 return {"accessible": True}
                 
-            # Check steps completion
+            # Check steps completion (optional steps excluded, matching the modules list)
             source_steps = db.query(Step).filter(Step.lesson_id == source.id).all()
-            
+            required_source_steps = [s for s in source_steps if not s.is_optional] or source_steps
+
             # Get completed steps for this student
             completed_steps_count = db.query(StepProgress).filter(
                 StepProgress.user_id == current_user.id,
-                StepProgress.step_id.in_([s.id for s in source_steps]),
+                StepProgress.step_id.in_([s.id for s in required_source_steps]),
                 StepProgress.status == "completed"
             ).count()
-            
-            if source_steps and completed_steps_count == len(source_steps):
+
+            if required_source_steps and completed_steps_count == len(required_source_steps):
                 print(f"DEBUG: Lesson {lesson_id} unlocked by redirect from lesson {source.id} ({source.title}) - all steps completed")
                 return {"accessible": True}
     else:
@@ -1336,9 +1337,10 @@ def check_lesson_access(
     if is_already_completed:
         return {"accessible": True}
 
-    # Check 2: All steps completed
+    # Check 2: All required steps completed (optional steps excluded)
     target_lesson_steps = db.query(Step).filter(Step.lesson_id == lesson_id).all()
-    if target_lesson_steps and all(s.id in completed_step_ids for s in target_lesson_steps):
+    required_target_steps = [s for s in target_lesson_steps if not s.is_optional] or target_lesson_steps
+    if required_target_steps and all(s.id in completed_step_ids for s in required_target_steps):
          return {"accessible": True}
 
     print(f"DEBUG: Checking access for lesson {lesson_id} ({lesson.title})")
@@ -1373,10 +1375,11 @@ def check_lesson_access(
         # Previous lesson in same module
         prev_lesson = sorted(module.lessons, key=lambda x: x.order_index)[current_lesson_idx - 1]
         prev_lesson_steps = db.query(Step).filter(Step.lesson_id == prev_lesson.id).all()
-        
-        # Check if previous lesson is completed
+
+        # Check if previous lesson is completed (optional steps excluded, matching the modules list)
         if prev_lesson_steps:
-            all_prev_steps_completed = all(s.id in completed_step_ids for s in prev_lesson_steps)
+            required_prev_steps = [s for s in prev_lesson_steps if not s.is_optional] or prev_lesson_steps
+            all_prev_steps_completed = all(s.id in completed_step_ids for s in required_prev_steps)
             if not all_prev_steps_completed:
                 print(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} ({prev_lesson.title}) not completed")
                 return {

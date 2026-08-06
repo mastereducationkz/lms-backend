@@ -1,7 +1,6 @@
 """Business logic for lesson substitution, reschedule, and cancel requests."""
 from __future__ import annotations
 
-import calendar
 import json
 from datetime import datetime, timezone
 from typing import Optional
@@ -133,9 +132,8 @@ def create_lesson_request_record(
     skip_limits: bool = False,
 ) -> LessonRequest:
     """Validate and persist a new lesson request. ``skip_limits`` bypasses the
-    per-teacher monthly cap and the pending-duplicate guard — used when the request is
-    self-approved (the requester heads their own subject), so it isn't rate-limited like
-    a teacher asking someone else."""
+    pending-duplicate guard — used when the request is self-approved (the requester
+    heads their own subject)."""
     if data.request_type not in VALID_REQUEST_TYPES:
         raise HTTPException(
             status_code=400,
@@ -185,29 +183,6 @@ def create_lesson_request_record(
         raise HTTPException(status_code=400, detail="Cannot create requests for past lessons.")
 
     if not skip_limits:
-        req_year = original_dt.year
-        req_month = original_dt.month
-        _, last_day = calendar.monthrange(req_year, req_month)
-        month_start = datetime(req_year, req_month, 1, 0, 0, 0, tzinfo=timezone.utc)
-        month_end = datetime(req_year, req_month, last_day, 23, 59, 59, tzinfo=timezone.utc)
-
-        month_count = (
-            db.query(LessonRequest)
-            .filter(
-                LessonRequest.requester_id == requester.id,
-                LessonRequest.group_id == data.group_id,
-                LessonRequest.status.in_(["pending", "pending_teacher", "approved"]),
-                LessonRequest.original_datetime >= month_start,
-                LessonRequest.original_datetime <= month_end,
-            )
-            .count()
-        )
-        if month_count >= 2:
-            raise HTTPException(
-                status_code=400,
-                detail="Monthly limit reached: You can only request 2 lesson changes per group per month.",
-            )
-
         dup_query = db.query(LessonRequest).filter(
             LessonRequest.requester_id == requester.id,
             LessonRequest.group_id == data.group_id,

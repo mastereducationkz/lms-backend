@@ -88,10 +88,19 @@ def _missing_attendance_reminders(
         events_q = events_q.filter(EventGroup.group_id.in_(group_ids))
     past_event_ids_sq = events_q.distinct().subquery()
 
+    # Expected headcount is join-date-aware: a student added to the group AFTER an
+    # event's start must not inflate that event's expected count (they had no
+    # attendance rows for lessons that predate their membership). Legacy rows with
+    # a NULL GroupStudent.created_at (pre-dating the column's rollout / written by
+    # external sync) are treated as "always a member" to avoid under-counting.
     expected_q = (
         db.query(EventGroup.event_id, func.count(GroupStudent.student_id))
         .join(GroupStudent, GroupStudent.group_id == EventGroup.group_id)
-        .filter(EventGroup.event_id.in_(past_event_ids_sq))
+        .join(Event, Event.id == EventGroup.event_id)
+        .filter(
+            EventGroup.event_id.in_(past_event_ids_sq),
+            or_(GroupStudent.created_at.is_(None), GroupStudent.created_at <= Event.start_datetime),
+        )
     )
     if expected_within_groups and group_ids is not None:
         expected_q = expected_q.filter(EventGroup.group_id.in_(group_ids))
@@ -927,15 +936,18 @@ def get_head_curator_dashboard_stats(
     total_students = len(current_student_ids)
 
     # ── 3. Group → students mapping — 1 query ────────────────────────
+    # created_at is carried through so the missing-attendance section below can
+    # compute a join-date-aware expected headcount per event (a student added
+    # after an event must not count toward that event's expected students).
     gs_rows = (
-        db.query(GroupStudent.group_id, GroupStudent.student_id)
+        db.query(GroupStudent.group_id, GroupStudent.student_id, GroupStudent.created_at)
         .filter(GroupStudent.group_id.in_(current_group_ids))
         .all()
     ) if current_group_ids else []
 
     group_students_map = {}
     for gs in gs_rows:
-        group_students_map.setdefault(gs.group_id, []).append(gs.student_id)
+        group_students_map.setdefault(gs.group_id, []).append((gs.student_id, gs.created_at))
 
     # Curator → groups/students mapping (Python, no extra query)
     curator_group_ids_map = {}
@@ -947,7 +959,7 @@ def get_head_curator_dashboard_stats(
     for cid, gids in curator_group_ids_map.items():
         students = set()
         for gid in gids:
-            students.update(group_students_map.get(gid, []))
+            students.update(sid for sid, _created_at in group_students_map.get(gid, []))
         curator_student_ids_map[cid] = students
 
     # ── 4. Active students (2 queries, no per-student loop) ──────────
@@ -1307,7 +1319,13 @@ def get_head_curator_dashboard_stats(
                     continue
                 if grp_id not in active_group_ids:
                     continue  # group not marking attendance in 21d → skip
-                expected = len(group_students_map.get(grp_id, []))
+                # Join-date-aware: only students who were members by this event's
+                # start count as "expected" (NULL created_at = legacy row, always a
+                # member) — otherwise a newly added student flags every past lesson.
+                expected = sum(
+                    1 for _sid, created_at in group_students_map.get(grp_id, [])
+                    if created_at is None or created_at <= start_dt
+                )
                 recorded = att_map.get(eid, 0)
                 if recorded < expected:
                     missing_attendance_reminders.append({
@@ -1406,8 +1424,11 @@ def get_head_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardSt
 
         for event in past_events:
             event_group_ids = [eg.group_id for eg in event.event_groups]
+            # Join-date-aware: only count students who were members by this event's
+            # start (NULL created_at = legacy row, treated as always a member).
             expected_count = db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id.in_(event_group_ids)
+                GroupStudent.group_id.in_(event_group_ids),
+                or_(GroupStudent.created_at.is_(None), GroupStudent.created_at <= event.start_datetime),
             ).count()
 
             attendance_count = AttendanceService.count_for_event(
