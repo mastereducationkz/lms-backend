@@ -1935,10 +1935,10 @@ async def grade_submission(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Grade a submission (teachers, curators, and admins)"""
-    # Check role
-    if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
-        raise HTTPException(status_code=403, detail="Only teachers, curators, and admins can grade submissions")
+    """Grade a submission (teachers, head curators, and admins)"""
+    # Check role — curators are deliberately excluded from grading.
+    if current_user.role not in ["teacher", "admin", "head_curator"]:
+        raise HTTPException(status_code=403, detail="Only teachers, head curators, and admins can grade submissions")
     
     # Check if assignment exists
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
@@ -1974,24 +1974,7 @@ async def grade_submission(
         if group:
             if current_user.role == "teacher" and group.teacher_id == current_user.id:
                 has_access = True
-            elif current_user.role == "curator" and group.curator_id == current_user.id:
-                has_access = True
-    
-    # For curators: check if the student is in their group
-    if current_user.role == "curator" and not has_access:
-        from src.schemas.models import Group, GroupStudent
-        curator_groups = db.query(Group).filter(Group.curator_id == current_user.id).all()
-        curator_group_ids = [g.id for g in curator_groups]
-        
-        # Check if the student who submitted is in curator's group
-        student_in_group = db.query(GroupStudent).filter(
-            GroupStudent.group_id.in_(curator_group_ids),
-            GroupStudent.student_id == submission.user_id
-        ).first()
-        
-        if student_in_group:
-            has_access = True
-    
+
     if not has_access:
         raise HTTPException(status_code=403, detail="Access denied to this assignment")
     

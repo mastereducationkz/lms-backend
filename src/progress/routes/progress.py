@@ -1929,8 +1929,9 @@ def grade_quiz_attempt(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Grade a quiz attempt (for manual grading)"""
-    if current_user.role not in ["teacher", "admin", "curator", "head_curator"]:
+    """Grade a quiz attempt (for manual grading) — teachers, head curators, admins."""
+    # Curators are deliberately excluded from grading.
+    if current_user.role not in ["teacher", "admin", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
     attempt = db.query(QuizAttempt).filter(QuizAttempt.id == attempt_id).first()
@@ -2275,7 +2276,13 @@ def get_ungraded_attempts(
     db: Session = Depends(get_db),
     graded: Optional[bool] = None  # None = ungraded only (default), True = graded only, False = ungraded only
 ):
-    """Get quiz attempts for teachers/admins. By default returns ungraded only."""
+    """Get quiz attempts for teachers/curators/admins. By default returns ungraded only.
+
+    Scoping: teachers and curators see their own groups' students only; admins
+    and head curators see everything (head_curator is a platform-wide role — it
+    has no group-ownership column, and check_course_access grants it every
+    course). Curators keep read-only visibility here — they can no longer grade.
+    """
     if current_user.role not in ["teacher", "admin", "curator", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -2313,7 +2320,35 @@ def get_ungraded_attempts(
             QuizAttempt.user_id.in_(teacher_student_ids),
             QuizAttempt.course_id.in_(teacher_course_ids)
         )
-    
+    elif current_user.role == "curator":
+        # Same shape as the teacher branch, keyed on Group.curator_id — mirrors
+        # the curator arm of check_course_access (course access comes from the
+        # curator's own groups). Read-only: curators cannot grade.
+        from src.schemas.models import Group, GroupStudent, CourseGroupAccess
+
+        curator_group_ids = db.query(Group.id).filter(
+            Group.curator_id == current_user.id,
+            Group.is_active == True
+        ).subquery()
+
+        curator_student_ids = db.query(GroupStudent.student_id).filter(
+            GroupStudent.group_id.in_(curator_group_ids)
+        ).subquery()
+
+        curator_course_ids = db.query(CourseGroupAccess.course_id).filter(
+            CourseGroupAccess.group_id.in_(curator_group_ids),
+            CourseGroupAccess.is_active == True
+        ).subquery()
+
+        query = query.filter(
+            QuizAttempt.user_id.in_(curator_student_ids),
+            QuizAttempt.course_id.in_(curator_course_ids)
+        )
+
+    # Admins and head curators are intentionally unfiltered — both are
+    # platform-wide roles here, consistent with check_course_access and
+    # get_accessible_groups in src/utils/permissions.py.
+
     attempts = query.order_by(QuizAttempt.created_at.desc()).all()
     
     if not attempts:
