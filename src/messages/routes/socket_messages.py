@@ -31,6 +31,20 @@ _SOCKET_CORS_ORIGINS = [
 _SOCKET_CORS_ORIGINS += [o.strip() for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
 
 # Create Socket.IO server
+#
+# NOTE: no client_manager, so room membership is per-process. The Dockerfile runs uvicorn
+# with 4 workers, which means a room emit only reaches clients on the worker that handled
+# the event -- delivery to the OTHER party is dropped unless they happen to share a worker.
+# The REST fallback and polling backfill it, which is why this reads as "slow" rather than
+# "broken". Fixing it means client_manager=socketio.AsyncRedisManager(REDIS_URL).
+#
+# Do NOT make that change on its own. The web client decides send success by whether a
+# message is still pending when the ack arrives, which holds only because the echo is
+# emitted (and awaited) before the handler returns, over the same connection as the ack.
+# Under AsyncRedisManager the echo goes out via pub/sub while the ack stays local, so the
+# ack can win the race, every send looks failed, and retrying duplicates it. Adding the
+# manager therefore has to land together with a handler return value the client can read
+# (e.g. {"ok": True, "id": ...}) and the matching client change.
 sio = socketio.AsyncServer(
     async_mode='asgi',
     cors_allowed_origins=_SOCKET_CORS_ORIGINS,
