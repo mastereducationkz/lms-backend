@@ -239,7 +239,7 @@ def _collect_result_rows(
     # Ascending insert then reverse => newest first, and latest[...] is the newest.
     latest = {sid: rows_[-1] for sid, rows_ in attempts_by_student.items()}
 
-    group_names = _group_names_for_students(db, ids)
+    group_names = _group_names_for_students(db, ids, scope=visible_group_ids(user, db))
     today = date.today()
 
     rows: List[ExamResultRow] = []
@@ -300,8 +300,18 @@ def _collect_result_rows(
     return rows
 
 
-def _group_names_for_students(db: Session, student_ids: List[int]) -> dict:
-    """First live group per student, for display. Batched."""
+def _group_names_for_students(
+    db: Session,
+    student_ids: List[int],
+    scope: Optional[List[int]] = None,
+) -> dict:
+    """One live group per student, for display. Batched.
+
+    Prefers a group inside the caller's own scope. Students commonly belong to more
+    than one group, and picking an arbitrary one meant a teacher's correctly-scoped
+    list displayed OTHER teachers' group names - which reads exactly like a row-scope
+    leak even though the student set was right.
+    """
     rows = (
         db.query(GroupStudent.student_id, Group.id, Group.name)
         .join(Group, Group.id == GroupStudent.group_id)
@@ -312,9 +322,15 @@ def _group_names_for_students(db: Session, student_ids: List[int]) -> dict:
         )
         .all()
     )
-    out = {}
+    in_scope = set(scope) if scope else None
+    out: dict = {}
     for student_id, gid, gname in rows:
-        out.setdefault(student_id, (gid, gname))
+        current = out.get(student_id)
+        if current is None:
+            out[student_id] = (gid, gname)
+        elif in_scope is not None and gid in in_scope and current[0] not in in_scope:
+            # A group the caller owns beats one they merely happen to see.
+            out[student_id] = (gid, gname)
     return out
 
 
@@ -688,17 +704,15 @@ def update_planned_date(
     if scoped is not None and payload.student_id not in set(scoped):
         raise HTTPException(status_code=403, detail="Access denied for this student")
 
-    submission = (
-        db.query(AssignmentZeroSubmission)
-        .filter(AssignmentZeroSubmission.user_id == payload.student_id)
-        .first()
-    )
-    if submission is None:
-        raise HTTPException(
-            status_code=404,
-            detail="This student has no Assignment Zero record, so a planned date "
-                   "cannot be stored for them yet.",
-        )
+    student = db.query(UserInDB).filter(UserInDB.id == payload.student_id).first()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    # Creates a stub row when the student has no Assignment Zero record, so staff are
+    # never blocked from scheduling a date they already know - see the helper's docstring.
+    from src.assignments.routes.assignment_zero import _get_or_create_planned_date_row
+
+    submission = _get_or_create_planned_date_row(db, student)
 
     if payload.exam_type == "sat":
         submission.sat_planned_test_date = payload.planned_test_date
@@ -786,6 +800,76 @@ async def parse_bluebook_report(
         # Surfaced so staff can spot a report submitted on someone else's behalf. It
         # never blocks: Latin/Cyrillic spelling differences are routine here.
         "name_matches": name_matches,
+    }
+
+
+@router.get("/bluebook/report")
+def get_bluebook_report(
+    assignment_id: int = Query(...),
+    student_id: int = Query(...),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """The official College Board PDF a student submitted, for staff review.
+
+    Scores are parsed from this file and the student cannot edit them, so whoever
+    grades the work has to be able to see the source document - otherwise "the report
+    says 720" is unverifiable. Streamed through the API, never redirected to storage.
+    """
+    _require(current_user, _READ_ROLES)
+
+    row = (
+        db.query(BluebookResult)
+        .filter(
+            BluebookResult.assignment_id == assignment_id,
+            BluebookResult.student_id == student_id,
+        )
+        .first()
+    )
+    if row is None or not row.report_url:
+        raise HTTPException(status_code=404, detail="No report was submitted for this task")
+    if row.group_id is not None and not can_view_group(current_user, db, row.group_id):
+        raise HTTPException(status_code=403, detail="Access denied for this group")
+
+    return _serve_private_file(row.report_url, "bluebook-report")
+
+
+@router.get("/bluebook/result")
+def get_bluebook_result(
+    assignment_id: int = Query(...),
+    student_id: int = Query(...),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """The parsed Bluebook result for one submission, so the grader can see and
+    correct what was read from the report."""
+    _require(current_user, _READ_ROLES)
+
+    row = (
+        db.query(BluebookResult)
+        .filter(
+            BluebookResult.assignment_id == assignment_id,
+            BluebookResult.student_id == student_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="No Bluebook result for this submission")
+    if row.group_id is not None and not can_view_group(current_user, db, row.group_id):
+        raise HTTPException(status_code=403, detail="Access denied for this group")
+
+    return {
+        "id": row.id,
+        "test_number": row.test_number,
+        "verbal_score": row.verbal_score,
+        "math_score": row.math_score,
+        "total_score": row.total_score,
+        "report_date": row.report_date.isoformat() if row.report_date else None,
+        "report_student_name": row.report_student_name,
+        "report_name_matches": row.report_name_matches,
+        "has_report": bool(row.report_url),
+        "overridden_at": row.overridden_at.isoformat() if row.overridden_at else None,
+        "override_reason": row.override_reason,
     }
 
 

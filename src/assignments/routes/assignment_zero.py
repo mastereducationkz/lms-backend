@@ -498,6 +498,42 @@ def submit_assignment_zero(
     return AssignmentZeroSubmissionSchema.model_validate(submission)
 
 
+def _get_or_create_planned_date_row(db, user: UserInDB) -> AssignmentZeroSubmission:
+    """The student's Assignment Zero row, created as a stub if it does not exist.
+
+    "Completed Assignment Zero" has two sources of truth that can disagree: the
+    ``users.assignment_zero_completed`` flag the UI reads, and the existence of a
+    submission row. When they diverge, a student who really has finished is told to
+    "complete Assignment Zero first" and sent to a page that says they are already
+    done - a dead end with no way forward.
+
+    Planned dates deliberately live on Assignment Zero, so rather than starting a
+    second calendar we create the row and leave every unknown field genuinely empty.
+    """
+    submission = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == user.id
+    ).first()
+    if submission is not None:
+        return submission
+
+    submission = AssignmentZeroSubmission(
+        user_id=user.id,
+        # "" is this table's established placeholder for unknown values.
+        full_name=(getattr(user, "official_full_name", None) or user.name or ""),
+        phone_number="", parent_phone_number="", telegram_id="",
+        email=(user.email or ""),
+        college_board_email="", college_board_password="",
+        birthday_date=None,
+        city="", school_type="", group_name="",
+        sat_target_date="", recent_practice_test_score="",
+        bluebook_practice_test_5_score="",
+        is_draft=False,
+    )
+    db.add(submission)
+    db.flush()
+    return submission
+
+
 @router.patch("/planned-date", response_model=AssignmentZeroSubmissionSchema)
 def update_planned_exam_date(
     data: AssignmentZeroPlannedDateUpdateSchema,
@@ -508,11 +544,9 @@ def update_planned_exam_date(
         raise HTTPException(status_code=403, detail="Only students can update planned exam dates")
     _forbid_special_group_student_assignment_zero(current_user, db)
 
-    submission = db.query(AssignmentZeroSubmission).filter(
-        AssignmentZeroSubmission.user_id == current_user.id
-    ).first()
-    if not submission:
-        raise HTTPException(status_code=404, detail="Assignment Zero submission not found")
+    # Upserts, so a student whose completion flag and submission row disagree is not
+    # dead-ended when setting their exam date.
+    submission = _get_or_create_planned_date_row(db, current_user)
 
     exam_type = _normalize_exam_type(data.exam_type)
     if exam_type == "sat":

@@ -885,3 +885,57 @@ def test_proof_404s_when_the_object_is_gone_from_storage(db, world, monkeypatch)
     with pytest.raises(HTTPException) as exc:
         get_result_proof(own.id, current_user=world["c_a"], db=db)
     assert exc.value.status_code == 404
+
+
+# --------------------------------------------------------------------------------------
+# The Group column must show a group the caller can actually see
+# --------------------------------------------------------------------------------------
+
+def test_group_column_shows_the_callers_own_group_not_a_foreign_one(db, world):
+    """REGRESSION: the column picked an arbitrary live group per student. A student in
+    two groups made a correctly-scoped teacher list DISPLAY another teacher's group
+    name, which reads exactly like a row-scope leak."""
+    other_teacher = _user(db, "teacher", "gc-t@t.io")
+    shared = _group(db, "gc Someone Elses Group", teacher_id=other_teacher.id)
+    # The same student also sits in the other teacher's group.
+    _enrol(db, shared, world["s_a"])
+
+    rows = _list(world["t_a"], db)
+    row = next(r for r in rows if r.student.student_id == world["s_a"].id)
+    assert row.group_id == world["g_a"].id
+    assert row.group_name == world["g_a"].name
+
+
+def test_group_column_still_shows_something_for_unrestricted_roles(db, world):
+    admin = _user(db, "admin", "gc-admin@t.io")
+    rows = _list(admin, db)
+    assert all(r.group_name for r in rows if r.student.student_id in
+               (world["s_a"].id, world["s_b"].id))
+
+
+# --------------------------------------------------------------------------------------
+# A planned date must not require a complete Assignment Zero
+# --------------------------------------------------------------------------------------
+
+def test_planned_date_works_for_a_student_with_no_assignment_zero_row(db, world):
+    """REGRESSION: the student was told to "complete Assignment Zero first" and sent to
+    a page saying they were already done. The completion flag and the submission row are
+    two sources of truth that can disagree."""
+    from src.schemas.models import AssignmentZeroSubmission
+
+    assert db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == world["s_a"].id).count() == 0
+
+    out = update_planned_date(
+        PlannedDateUpdate(student_id=world["s_a"].id, exam_type="ielts",
+                          planned_test_date=date(2026, 12, 6)),
+        current_user=world["c_a"], db=db,
+    )
+    assert out.planned_test_date == date(2026, 12, 6)
+
+    created = db.query(AssignmentZeroSubmission).filter(
+        AssignmentZeroSubmission.user_id == world["s_a"].id).one()
+    assert created.ielts_planned_test_date == date(2026, 12, 6)
+    # The stub is honest about what it does not know rather than inventing values.
+    assert created.birthday_date is None
+    assert created.city == ""

@@ -128,7 +128,9 @@ class AssignmentZeroSubmission(Base):
     email = Column(String, nullable=False)
     college_board_email = Column(String, nullable=False)
     college_board_password = Column(String, nullable=False)
-    birthday_date = Column(Date, nullable=False)
+    # Nullable: a stub row created purely to hold a planned exam date has no birthday,
+    # and inventing one to satisfy NOT NULL would be fabricated data.
+    birthday_date = Column(Date, nullable=True)
     city = Column(String, nullable=False)
     school_type = Column(String, nullable=False)
     group_name = Column(String, nullable=False)
