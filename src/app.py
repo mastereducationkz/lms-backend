@@ -97,7 +97,10 @@ _MUTATION_INVALIDATION_RULES: dict[str, tuple[str, ...]] = {
     "lessons": ("courses:*", "progress:*", "analytics:*"),
     "steps": ("courses:*", "progress:*", "analytics:*"),
     "assignments": ("assignments:*", "progress:*", "dashboard:*", "admin:*", "analytics:*"),
-    "assignment-zero": ("assignment-zero:*", "dashboard:*", "analytics:*"),
+    # Assignment Zero owns planned exam dates, which the exams grid reads, so a
+    # planned-date change must invalidate exam reads too.
+    "assignment-zero": ("assignment-zero:*", "dashboard:*", "analytics:*", "exams:*"),
+    "exams": ("exams:*", "assignment-zero:*", "dashboard:*", "analytics:*"),
     "progress": ("progress:*", "dashboard:*", "courses:*", "analytics:*"),
     "quizzes": ("progress:*", "courses:*", "analytics:*"),
     "events": ("events:*", "dashboard:*"),

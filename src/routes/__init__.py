@@ -22,6 +22,7 @@ def register_routes(app: FastAPI):
     from src.curator.routes import curator_tasks_router, student_journal_router
     from src.lesson_requests.routes import router as lesson_requests_router
     from src.routes.crm_internal import router as crm_internal_router
+    from src.exams.routes import router as exams_router
     from src.trials.routes import trials_router
     from src.routes.support_api import router as support_api_router
 
@@ -55,5 +56,6 @@ def register_routes(app: FastAPI):
     app.include_router(student_journal_router, prefix="/student-journal", tags=["Student Journal"])
     app.include_router(sat_schedules_router, prefix="/sat", tags=["SAT Schedules"])
     app.include_router(crm_internal_router, prefix="/internal/crm", tags=["CRM Internal"])
+    app.include_router(exams_router, prefix="/exams", tags=["Exams"])
     app.include_router(trials_router, prefix="/trials", tags=["Trials"])
     app.include_router(support_api_router, prefix="/support-api", tags=["Support API"])

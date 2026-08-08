@@ -1,0 +1,453 @@
+"""Row-level authorization for the exam-results and Bluebook endpoints.
+
+Covers every surface that can leak a row: list, export, create, update, grid and grid
+export. Export is tested explicitly because an export that re-derives scope differently
+from the screen is the classic way row-level security is bypassed.
+
+Route functions are called directly with an injected ``current_user``, matching the
+established style in this repo (there is no conftest, no TestClient auth, no JWT
+minting in permission tests).
+"""
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+
+import pytest
+from fastapi import HTTPException
+
+# The shim must be imported before any domain model module: importing a domain model
+# first re-enters the partially-initialized src.models package and raises ImportError.
+from src.schemas.models import ExamResult  # noqa: F401  (import-order guard)
+from src.exams.routes import (
+    create_exam_result,
+    export_bluebook_grid,
+    export_exam_results,
+    get_bluebook_grid,
+    list_exam_results,
+    list_sat_official_dates,
+    update_exam_result,
+)
+from src.exams.schemas import ExamResultCreate, ExamResultUpdate
+from src.schemas.models import (
+    Course,
+    CourseGroupAccess,
+    CourseHeadTeacher,
+    Group,
+    GroupStudent,
+    UserInDB,
+)
+
+
+@pytest.fixture
+def db():
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session as SASession
+    from src.config import engine
+    try:
+        connection = engine.connect()
+    except OperationalError:
+        pytest.skip("No database available (requires Postgres); skipping")
+    trans = connection.begin()
+    session = SASession(bind=connection)
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart_savepoint(sess, transaction):
+        if transaction.nested and not transaction._parent.nested:
+            sess.begin_nested()
+
+    try:
+        yield session
+    finally:
+        event.remove(session, "after_transaction_end", _restart_savepoint)
+        session.close()
+        trans.rollback()
+        connection.close()
+
+
+def _user(db, role, email, name=None):
+    u = UserInDB(email=email, name=name or f"{role} {email}", hashed_password="x",
+                 role=role, is_active=True)
+    db.add(u)
+    db.flush()
+    return u
+
+
+def _group(db, name, *, teacher_id=None, curator_id=None):
+    g = Group(name=name, teacher_id=teacher_id, curator_id=curator_id,
+              is_active=True, is_over=False, program_type="sat")
+    db.add(g)
+    db.flush()
+    return g
+
+
+def _enrol(db, group, student):
+    db.add(GroupStudent(group_id=group.id, student_id=student.id))
+    db.flush()
+
+
+def _result(db, student, *, test_date=None, total=1450):
+    r = ExamResult(
+        student_id=student.id, exam_type="sat",
+        test_date=test_date or date(2026, 6, 6),
+        total_score=Decimal(total), verbal_score=700, math_score=750,
+        status="reported", source="staff",
+        recorded_at=datetime.now(timezone.utc), is_superseded=False,
+    )
+    db.add(r)
+    db.flush()
+    return r
+
+
+@pytest.fixture
+def world(db):
+    """Two disjoint groups with their own staff and students."""
+    t_a = _user(db, "teacher", "rb-ta@t.io")
+    t_b = _user(db, "teacher", "rb-tb@t.io")
+    c_a = _user(db, "curator", "rb-ca@t.io")
+    c_b = _user(db, "curator", "rb-cb@t.io")
+
+    g_a = _group(db, "rb Group A", teacher_id=t_a.id, curator_id=c_a.id)
+    g_b = _group(db, "rb Group B", teacher_id=t_b.id, curator_id=c_b.id)
+
+    s_a = _user(db, "student", "rb-sa@t.io", name="rb Student A")
+    s_b = _user(db, "student", "rb-sb@t.io", name="rb Student B")
+    _enrol(db, g_a, s_a)
+    _enrol(db, g_b, s_b)
+
+    _result(db, s_a, total=1450)
+    _result(db, s_b, total=1300)
+
+    return dict(t_a=t_a, t_b=t_b, c_a=c_a, c_b=c_b,
+                g_a=g_a, g_b=g_b, s_a=s_a, s_b=s_b)
+
+
+def _ids(rows):
+    return {r.student.student_id for r in rows}
+
+
+def _list(user, db, **kw):
+    params = dict(exam_type="sat", group_id=None, date_field="planned",
+                  date_from=None, date_to=None, exact_date=None,
+                  status=None, search=None, limit=200, offset=0,
+                  current_user=user, db=db)
+    params.update(kw)
+    return list_exam_results(**params)
+
+
+# --------------------------------------------------------------------------------------
+# Role gate
+# --------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("role", ["student", "parent"])
+def test_non_staff_roles_are_denied_the_results_list(db, world, role):
+    u = _user(db, role, f"rb-deny-{role}@t.io")
+    with pytest.raises(HTTPException) as exc:
+        _list(u, db)
+    assert exc.value.status_code == 403
+
+
+def test_unknown_role_is_denied(db, world):
+    u = _user(db, "marketing", "rb-deny-mkt@t.io")
+    with pytest.raises(HTTPException) as exc:
+        _list(u, db)
+    assert exc.value.status_code == 403
+
+
+def test_teacher_may_read_but_not_write(db, world):
+    """Teachers see results; recording an official score is curator-owned."""
+    _list(world["t_a"], db)  # no raise
+
+    with pytest.raises(HTTPException) as exc:
+        create_exam_result(
+            ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                             test_date=date(2026, 5, 2), verbal_score=600, math_score=600),
+            current_user=world["t_a"], db=db,
+        )
+    assert exc.value.status_code == 403
+
+
+# --------------------------------------------------------------------------------------
+# Row scope - list
+# --------------------------------------------------------------------------------------
+
+def test_teacher_sees_only_own_group_students(db, world):
+    rows = _list(world["t_a"], db)
+    assert world["s_a"].id in _ids(rows)
+    assert world["s_b"].id not in _ids(rows)
+
+
+def test_curator_sees_only_own_group_students(db, world):
+    rows = _list(world["c_a"], db)
+    assert world["s_a"].id in _ids(rows)
+    assert world["s_b"].id not in _ids(rows)
+
+
+def test_admin_sees_both_groups(db, world):
+    admin = _user(db, "admin", "rb-admin@t.io")
+    ids = _ids(_list(admin, db))
+    assert world["s_a"].id in ids
+    assert world["s_b"].id in ids
+
+
+def test_head_curator_sees_both_groups(db, world):
+    hc = _user(db, "head_curator", "rb-hc@t.io")
+    ids = _ids(_list(hc, db))
+    assert world["s_a"].id in ids
+    assert world["s_b"].id in ids
+
+
+def test_staff_with_no_groups_sees_nothing_not_everything(db, world):
+    """The classic row-scope failure: an empty scope list is falsy, and code that
+    checks truthiness instead of the UNRESTRICTED sentinel silently degrades to
+    'no filter' - handing a brand-new curator every student in the LMS."""
+    lonely = _user(db, "curator", "rb-lonely@t.io")
+    assert _list(lonely, db) == []
+
+
+def test_staff_with_no_groups_cannot_create_a_result(db, world):
+    lonely = _user(db, "curator", "rb-lonely2@t.io")
+    with pytest.raises(HTTPException) as exc:
+        create_exam_result(
+            ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                             test_date=date(2026, 5, 2), verbal_score=600, math_score=600),
+            current_user=lonely, db=db,
+        )
+    assert exc.value.status_code == 403
+
+
+def test_staff_with_no_groups_exports_an_empty_workbook_not_everything(db, world):
+    lonely = _user(db, "curator", "rb-lonely3@t.io")
+    resp = export_exam_results(
+        exam_type="sat", group_id=None, date_field="planned",
+        date_from=None, date_to=None, exact_date=None, status=None, search=None,
+        current_user=lonely, db=db,
+    )
+    assert resp.body[:2] == b"PK"
+    # A workbook with only the header row - no student data reached it.
+    from io import BytesIO
+    from openpyxl import load_workbook
+    ws = load_workbook(BytesIO(resp.body)).active
+    assert ws.max_row == 1
+
+
+def test_requesting_a_foreign_group_is_403_not_an_empty_list(db, world):
+    """A silent empty result would hide the authorization failure from the operator."""
+    with pytest.raises(HTTPException) as exc:
+        _list(world["t_a"], db, group_id=world["g_b"].id)
+    assert exc.value.status_code == 403
+
+
+def test_teacher_may_filter_to_their_own_group(db, world):
+    rows = _list(world["t_a"], db, group_id=world["g_a"].id)
+    assert _ids(rows) == {world["s_a"].id}
+
+
+# --------------------------------------------------------------------------------------
+# Row scope - export must match the screen exactly
+# --------------------------------------------------------------------------------------
+
+def test_export_cannot_reach_rows_the_grid_hides(db, world):
+    """The export re-derives scope from the user, so a foreign group_id is refused."""
+    with pytest.raises(HTTPException) as exc:
+        export_exam_results(
+            exam_type="sat", group_id=world["g_b"].id, date_field="planned",
+            date_from=None, date_to=None, exact_date=None, status=None, search=None,
+            current_user=world["t_a"], db=db,
+        )
+    assert exc.value.status_code == 403
+
+
+def test_export_is_denied_for_non_staff(db, world):
+    student = _user(db, "student", "rb-exp-stu@t.io")
+    with pytest.raises(HTTPException) as exc:
+        export_exam_results(
+            exam_type="sat", group_id=None, date_field="planned",
+            date_from=None, date_to=None, exact_date=None, status=None, search=None,
+            current_user=student, db=db,
+        )
+    assert exc.value.status_code == 403
+
+
+def test_export_produces_a_workbook_for_an_authorized_user(db, world):
+    resp = export_exam_results(
+        exam_type="sat", group_id=None, date_field="planned",
+        date_from=None, date_to=None, exact_date=None, status=None, search=None,
+        current_user=world["c_a"], db=db,
+    )
+    # XLSX files are ZIP archives; check the magic bytes rather than trusting status.
+    assert resp.body[:2] == b"PK"
+    assert "attachment" in resp.headers["Content-Disposition"]
+
+
+# --------------------------------------------------------------------------------------
+# Row scope - create / update
+# --------------------------------------------------------------------------------------
+
+def test_curator_cannot_create_a_result_for_a_foreign_student(db, world):
+    with pytest.raises(HTTPException) as exc:
+        create_exam_result(
+            ExamResultCreate(student_id=world["s_b"].id, exam_type="sat",
+                             test_date=date(2026, 5, 2), verbal_score=600, math_score=600),
+            current_user=world["c_a"], db=db,
+        )
+    assert exc.value.status_code == 403
+
+
+def test_curator_can_create_for_own_student(db, world):
+    out = create_exam_result(
+        ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                         test_date=date(2026, 5, 2), verbal_score=600, math_score=610),
+        current_user=world["c_a"], db=db,
+    )
+    assert out.total_score == Decimal("1210")
+    assert out.status == "reported"
+
+
+def test_duplicate_attempt_for_same_date_is_rejected(db, world):
+    with pytest.raises(HTTPException) as exc:
+        create_exam_result(
+            ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                             test_date=date(2026, 6, 6), verbal_score=600, math_score=600),
+            current_user=world["c_a"], db=db,
+        )
+    assert exc.value.status_code == 409
+
+
+def test_multiple_attempts_on_different_dates_are_allowed(db, world):
+    """The whole point of the new table: a retake must not overwrite the first score."""
+    create_exam_result(
+        ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                         test_date=date(2026, 5, 2), verbal_score=600, math_score=610),
+        current_user=world["c_a"], db=db,
+    )
+    kept = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).count()
+    assert kept == 2
+
+
+def test_curator_cannot_update_a_foreign_students_result(db, world):
+    foreign = db.query(ExamResult).filter(ExamResult.student_id == world["s_b"].id).first()
+    with pytest.raises(HTTPException) as exc:
+        update_exam_result(foreign.id, ExamResultUpdate(status="verified"),
+                           current_user=world["c_a"], db=db)
+    assert exc.value.status_code == 403
+
+
+def test_verifying_records_the_actor(db, world):
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    out = update_exam_result(own.id, ExamResultUpdate(status="verified"),
+                             current_user=world["c_a"], db=db)
+    assert out.status == "verified"
+    refreshed = db.query(ExamResult).filter(ExamResult.id == own.id).first()
+    assert refreshed.verified_by == world["c_a"].id
+    assert refreshed.verified_at is not None
+
+
+# --------------------------------------------------------------------------------------
+# Bluebook grid scope
+# --------------------------------------------------------------------------------------
+
+def test_teacher_cannot_open_another_groups_bluebook_grid(db, world):
+    with pytest.raises(HTTPException) as exc:
+        get_bluebook_grid(world["g_b"].id, cohort_date=None,
+                          current_user=world["t_a"], db=db)
+    assert exc.value.status_code == 403
+
+
+def test_teacher_can_open_own_bluebook_grid(db, world):
+    grid = get_bluebook_grid(world["g_a"].id, cohort_date=None,
+                             current_user=world["t_a"], db=db)
+    assert grid.group_id == world["g_a"].id
+    assert [r.student_id for r in grid.rows] == [world["s_a"].id]
+
+
+def test_bluebook_grid_export_enforces_the_same_scope(db, world):
+    with pytest.raises(HTTPException) as exc:
+        export_bluebook_grid(world["g_b"].id, cohort_date=None,
+                             current_user=world["t_a"], db=db)
+    assert exc.value.status_code == 403
+
+
+def test_head_teacher_without_course_link_cannot_see_a_sat_group(db, world):
+    """Course-link scope, not program_type scope: managing nothing means seeing
+    nothing, even for a group of a program they nominally head."""
+    ht = _user(db, "head_teacher", "rb-ht@t.io")
+    with pytest.raises(HTTPException) as exc:
+        get_bluebook_grid(world["g_a"].id, cohort_date=None, current_user=ht, db=db)
+    assert exc.value.status_code == 403
+
+
+def test_head_teacher_with_course_link_can_see_the_linked_group(db, world):
+    ht = _user(db, "head_teacher", "rb-ht2@t.io")
+    course = Course(title="rb Course", description="d", teacher_id=ht.id)
+    db.add(course)
+    db.flush()
+    db.add(CourseHeadTeacher(course_id=course.id, head_teacher_id=ht.id))
+    db.add(CourseGroupAccess(course_id=course.id, group_id=world["g_a"].id,
+                             granted_by=ht.id, is_active=True))
+    db.flush()
+
+    grid = get_bluebook_grid(world["g_a"].id, cohort_date=None, current_user=ht, db=db)
+    assert grid.group_id == world["g_a"].id
+
+
+# --------------------------------------------------------------------------------------
+# Payload minimization
+# --------------------------------------------------------------------------------------
+
+def test_result_rows_never_expose_college_board_credentials(db, world):
+    """The existing AssignmentZeroSubmissionSchema declares these fields and is
+    inherited by CuratorUpcomingExamRow. Nothing in this domain may reuse it."""
+    rows = _list(world["c_a"], db)
+    assert rows
+    for row in rows:
+        blob = row.model_dump_json()
+        assert "college_board" not in blob
+        assert "password" not in blob.lower()
+
+
+def test_result_rows_do_not_leak_the_proof_storage_key(db, world):
+    """Proof of an official exam is a score report - a list payload exposes only
+    whether one exists."""
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    own.proof_url = "exam_proof/secret-key-123.pdf"
+    db.flush()
+
+    rows = _list(world["c_a"], db)
+    for row in rows:
+        blob = row.model_dump_json()
+        assert "secret-key-123" not in blob
+
+
+# --------------------------------------------------------------------------------------
+# SAT dates endpoint
+# --------------------------------------------------------------------------------------
+
+def test_sat_dates_excludes_anticipated_by_default(db, world):
+    payload = list_sat_official_dates(include_anticipated=False, include_past=True,
+                                      current_user=world["t_a"], db=db)
+    assert all(d["status"] == "confirmed" for d in payload["dates"])
+
+
+def test_sat_dates_labels_anticipated_when_requested(db, world):
+    payload = list_sat_official_dates(include_anticipated=True, include_past=True,
+                                      current_user=world["t_a"], db=db)
+    statuses = {d["status"] for d in payload["dates"]}
+    assert "anticipated" in statuses
+    anticipated = [d for d in payload["dates"] if d["status"] == "anticipated"]
+    assert {d["test_date"] for d in anticipated} >= {"2027-08-28", "2028-06-03"}
+
+
+def test_sat_dates_carry_provenance(db, world):
+    payload = list_sat_official_dates(include_anticipated=False, include_past=True,
+                                      current_user=world["t_a"], db=db)
+    assert payload["source_url"].startswith("https://satsuite.collegeboard.org")
+    assert payload["verified_at"]
+
+
+def test_sat_dates_include_registration_deadlines(db, world):
+    payload = list_sat_official_dates(include_anticipated=False, include_past=True,
+                                      current_user=world["t_a"], db=db)
+    aug = next(d for d in payload["dates"] if d["test_date"] == "2026-08-22")
+    assert aug["registration_deadline"] == "2026-08-07"
+    assert aug["change_deadline"] == "2026-08-11"

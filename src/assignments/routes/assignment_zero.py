@@ -680,7 +680,10 @@ def get_exam_countdown(
             if submission and submission.sat_planned_test_date:
                 td, source = submission.sat_planned_test_date, "planned"
             else:
-                td, source = get_nearest_sat_date(today), "nearest_official"
+                # None once the confirmed official list is exhausted; report "no known
+                # date" rather than a source pointing at nothing.
+                nearest = get_nearest_sat_date(today)
+                td, source = (nearest, "nearest_official") if nearest else (None, None)
         else:  # ielts — no official calendar to fall back to
             if submission and submission.ielts_planned_test_date:
                 td, source = submission.ielts_planned_test_date, "planned"

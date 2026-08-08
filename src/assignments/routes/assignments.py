@@ -26,6 +26,8 @@ from src.services.event_service import EventService
 from src.routes.gamification import award_points
 from src.utils.course_access import student_can_see_homework_for_course
 from src.services import storage_service
+from src.exams.models import BLUEBOOK_MAX_TEST_NUMBER, BLUEBOOK_MIN_TEST_NUMBER
+from src.exams.projection import project_bluebook_answers
 
 
 def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
@@ -1622,7 +1624,26 @@ def submit_assignment(
     db.add(submission)
     db.commit()
     db.refresh(submission)
-    
+
+    # Mirror any Bluebook task answers into the queryable projection that backs the
+    # group grid. Non-blocking by design: the submission of record is already stored,
+    # and a projection failure must not cost the student their homework.
+    if assignment.assignment_type == "multi_task":
+        try:
+            task_answers = submission_data.answers.get('tasks', submission_data.answers)
+            written = project_bluebook_answers(
+                db,
+                assignment=assignment,
+                submission=submission,
+                answers=task_answers if isinstance(task_answers, dict) else {},
+                assignment_content=json.loads(assignment.content) if assignment.content else {},
+            )
+            if written:
+                db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"Bluebook projection failed (non-blocking): {e}")
+
     # Award points for completion
     try:
         award_points(db, current_user.id, 10, 'homework', f'Completed assignment: {assignment.title}')
@@ -2570,7 +2591,7 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
             )
 
         # Validate each task
-        valid_task_types = ["course_unit", "file_task", "text_task", "link_task", "pdf_text_task", "audio_task"]
+        valid_task_types = ["course_unit", "file_task", "text_task", "link_task", "pdf_text_task", "audio_task", "bluebook_task"]
         for i, task in enumerate(tasks):
             # Check required task fields
             if not isinstance(task, dict):
@@ -2633,6 +2654,24 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
                     raise HTTPException(
                         status_code=400,
                         detail=f"Task {i+1} (audio_task) must have 'question' in content"
+                    )
+            elif task_type == "bluebook_task":
+                # Enforced here as well as in the UI selector: the selector is a
+                # convenience, not a security boundary, and a crafted request must not
+                # be able to create "Bluebook Test #99".
+                test_number = task_content.get("test_number")
+                if isinstance(test_number, bool) or not isinstance(test_number, int):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Task {i+1} (bluebook_task) must have an integer 'test_number' in content",
+                    )
+                if not (BLUEBOOK_MIN_TEST_NUMBER <= test_number <= BLUEBOOK_MAX_TEST_NUMBER):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Task {i+1} (bluebook_task) 'test_number' must be between "
+                            f"{BLUEBOOK_MIN_TEST_NUMBER} and {BLUEBOOK_MAX_TEST_NUMBER}"
+                        ),
                     )
 
 

@@ -2549,7 +2549,9 @@ def get_teacher_pending_submissions(
 # (listen to the recording / read the uploaded file). A multi_task containing ANY of
 # these is NOT auto-gradable; everything else (course unit, link/resource visit, text)
 # is completion-style and can be full-marked in bulk.
-_NEEDS_REVIEW_TASK_TYPES = {"audio", "audio_task", "file_task"}
+# bluebook_task carries a self-reported score plus a screenshot that a human must
+# actually look at; bulk full-marking it would rubber-stamp unverified scores.
+_NEEDS_REVIEW_TASK_TYPES = {"audio", "audio_task", "file_task", "bluebook_task"}
 
 
 def _is_auto_gradable_multitask(assignment) -> bool:

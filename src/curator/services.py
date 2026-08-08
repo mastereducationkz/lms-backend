@@ -110,7 +110,14 @@ def _student_tracks(groups: list[Group], submission: AssignmentZeroSubmission | 
 def _resolve_sat_planned_date(
     submission: AssignmentZeroSubmission | None,
     today: date_type,
-) -> date_type:
+) -> date_type | None:
+    """Best-known planned SAT date for a student, or None when it cannot be determined.
+
+    Returns None once the official confirmed date list is exhausted and the student has
+    no stored planned date. Callers must skip task creation rather than inventing a
+    date - scheduling a "collect the result" task against a made-up date produces
+    tasks that are due in the past.
+    """
     if submission is None:
         return get_nearest_sat_date(today)
 
@@ -222,9 +229,10 @@ def generate_exam_result_collection_tasks(db, reference_date: date_type | None =
         )
         sat_track, ielts_track = _student_tracks(groups, submission)
 
-        if sat_track:
-            sat_planned_date = _resolve_sat_planned_date(submission, today=today)
-
+        # A None planned date means we genuinely don't know when this student sits the
+        # exam (no stored date and no confirmed official date left). Skip rather than
+        # scheduling against a fabricated date.
+        if sat_track and (sat_planned_date := _resolve_sat_planned_date(submission, today=today)) is not None:
             if submission and submission.sat_planned_test_date is None:
                 submission.sat_planned_test_date = sat_planned_date
                 has_backfill_updates = True
