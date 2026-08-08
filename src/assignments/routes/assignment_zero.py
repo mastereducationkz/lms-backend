@@ -714,22 +714,17 @@ def get_exam_countdown(
         AssignmentZeroSubmission.user_id == current_user.id
     ).first()
 
-    group_students = db.query(GroupStudent).filter(
-        GroupStudent.student_id == current_user.id
-    ).all()
-    group_ids = [gs.group_id for gs in group_students]
-    program_types: set[str] = set()
-    names: list[str] = []
-    if group_ids:
-        groups = db.query(Group).filter(Group.id.in_(group_ids)).all()
-        program_types = {(g.program_type or "").lower() for g in groups}
-        names = [g.name.lower() for g in groups if g.name]
+    # Shared with the platform tiles (GET /exams/my-tracks). This used to be its own
+    # group query with looser filters - it counted ended and special groups and matched
+    # "sat" as a substring - so the countdown and the tiles disagreed about the same
+    # student on the same screen.
+    from src.exams.tracks import resolve_student_tracks
 
-    # Applicability is driven ONLY by SAT/IELTS group membership. A student in
-    # just a NUET or General English group (or any non-SAT/IELTS group) gets no
-    # countdown, even if they filled SAT/IELTS fields in Assignment Zero.
-    is_sat = "sat" in program_types or any("sat" in n for n in names)
-    is_ielts = "ielts" in program_types or any("ielts" in n for n in names)
+    tracks = resolve_student_tracks(db, current_user)
+    # NUET has no official date list and no planned-date column, so it cannot be
+    # counted down to yet even though it is a real track.
+    is_sat = "sat" in tracks
+    is_ielts = "ielts" in tracks
 
     today = date.today()
     can_edit = submission is not None

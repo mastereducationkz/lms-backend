@@ -43,6 +43,7 @@ from src.exams.schemas import (
     PlannedDateUpdate,
 )
 from src.exams import services as exam_services
+from src.exams.tracks import resolve_student_tracks
 from src.exams.exports import build_bluebook_grid_workbook, build_exam_results_workbook
 from src.routes.auth import get_current_user_dependency
 from src.services import storage_service
@@ -132,6 +133,23 @@ def list_sat_official_dates(
         "source_url": SAT_DATES_SOURCE_URL,
         "verified_at": SAT_DATES_VERIFIED_AT.isoformat(),
     }
+
+
+@router.get("/my-tracks")
+def get_my_tracks(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """The exam tracks the signed-in student is on.
+
+    Single source of truth for track entitlement, shared with the dashboard countdown.
+    The platform tiles previously derived this in the frontend from a different group
+    query with different filters, so the same student could be a SAT student to the
+    countdown and not to the tiles - visibly contradicting itself on one screen.
+    """
+    if (current_user.role or "").strip().lower() != "student":
+        return {"tracks": []}
+    return {"tracks": resolve_student_tracks(db, current_user)}
 
 
 # --------------------------------------------------------------------------------------
