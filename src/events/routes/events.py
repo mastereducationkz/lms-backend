@@ -1178,7 +1178,11 @@ def get_my_substitutions(
 
     events = (
         db.query(Event)
-        .options(joinedload(Event.event_groups).joinedload(EventGroup.group))
+        .options(
+            joinedload(Event.event_groups)
+            .joinedload(EventGroup.group)
+            .joinedload(Group.teacher)
+        )
         .filter(
             Event.event_type == "class",
             Event.is_active == True,  # noqa: E712
@@ -1190,14 +1194,23 @@ def get_my_substitutions(
         .all()
     )
 
+    subs = [ev for ev in events if ev.is_substitution and ev.event_groups and ev.event_groups[0].group]
+
+    # One batch query: which of these lessons already have attendance recorded.
+    from src.events.models import Attendance
+    sub_event_ids = [ev.id for ev in subs]
+    marked_event_ids = set()
+    if sub_event_ids:
+        marked_event_ids = {
+            eid for (eid,) in db.query(Attendance.event_id)
+            .filter(Attendance.event_id.in_(sub_event_ids))
+            .distinct()
+            .all()
+        }
+
     result = []
-    for ev in events:
-        # is_substitution compares teacher_id against the FIRST linked group's owner
-        if not ev.is_substitution:
-            continue
+    for ev in subs:
         first_group = ev.event_groups[0].group
-        if not first_group:
-            continue
         result.append(SubstitutionLessonSchema(
             event_id=ev.id,
             title=ev.title,
@@ -1209,6 +1222,9 @@ def get_my_substitutions(
             is_online=bool(ev.is_online),
             location=ev.location,
             meeting_url=ev.meeting_url,
+            # The group's regular teacher = who the current user is covering for.
+            original_teacher_name=first_group.teacher.name if first_group.teacher else None,
+            marked=ev.id in marked_event_ids,
         ))
     return result
 

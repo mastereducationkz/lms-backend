@@ -147,6 +147,10 @@ class SubstitutionLessonSchema(BaseModel):
     is_online: bool = True
     location: Optional[str] = None
     meeting_url: Optional[str] = None
+    # The group's regular teacher — i.e. who the current user is covering for.
+    original_teacher_name: Optional[str] = None
+    # Whether any attendance record already exists for this lesson.
+    marked: bool = False
 
 
 class LessonScheduleSchema(BaseModel):

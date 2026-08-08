@@ -90,6 +90,31 @@ def test_returns_only_genuine_substitutions(db):
     row = next(r for r in res if r.event_id == sub_ev.id)
     assert row.group_id == group.id
     assert row.group_name == "MS Group"
+    # Original teacher = the group's regular teacher (who sub is covering for).
+    assert row.original_teacher_name == "ms_owner"
+    # No attendance recorded yet.
+    assert row.marked is False
+
+
+def test_marked_reflects_attendance(db):
+    from src.events.models import Attendance
+
+    owner = _user(db, "ms3_owner@test.local")
+    sub = _user(db, "ms3_sub@test.local")
+    student = _user(db, "ms3_student@test.local", role="student")
+    group = Group(name="MS3 Group", teacher_id=owner.id)
+    db.add(group)
+    db.flush()
+
+    marked_ev = _class_event(db, group.id, owner.id, teacher_id=sub.id)
+    unmarked_ev = _class_event(db, group.id, owner.id, teacher_id=sub.id,
+                               start=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=1))
+    db.add(Attendance(event_id=marked_ev.id, user_id=student.id, status="present"))
+    db.flush()
+
+    res = {r.event_id: r for r in get_my_substitutions(current_user=sub, db=db)}
+    assert res[marked_ev.id].marked is True
+    assert res[unmarked_ev.id].marked is False
 
 
 def test_excludes_non_class_and_out_of_window(db):
