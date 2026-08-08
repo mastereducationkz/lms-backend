@@ -1673,7 +1673,11 @@ def update_attendance_bulk(
     Update multiple attendance records in a single transaction.
     Supports event-based updates (preferred) and legacy schedule-based updates.
     """
-    if current_user.role not in ["curator", "admin", "teacher", "head_teacher", "head_curator"]:
+    # Curators are READ-ONLY on attendance. Marking attendance is the teacher's
+    # record of their own lesson; a curator editing it silently rewrites someone
+    # else's register. Mirrors the earlier removal of curator grading rights
+    # (tests/test_curator_grading_removed.py). head_curator deliberately keeps it.
+    if current_user.role not in ["admin", "teacher", "head_teacher", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
 
     from src.services.event_service import EventService
@@ -1831,7 +1835,8 @@ def update_attendance(
     """
     
     # Auth
-    if current_user.role not in ["curator", "admin", "head_curator", "teacher", "head_teacher"]:
+    # Curators are READ-ONLY on attendance - see update_attendance_bulk.
+    if current_user.role not in ["admin", "head_curator", "teacher", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
     group = db.query(Group).filter(Group.id == data.group_id).first()

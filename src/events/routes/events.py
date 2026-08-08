@@ -1578,6 +1578,17 @@ def update_event_attendance(
     current_user: UserInDB = Depends(require_teacher_curator_or_admin())
 ):
     """Bulk update attendance for an event"""
+    # Curators are READ-ONLY on attendance. The shared dependency above still admits
+    # them (it guards several read paths too), so the role is rejected explicitly here.
+    # This is the third of three attendance write paths - the two on the curator
+    # leaderboard are the others - and closing only the visible one would leave the
+    # capability reachable through the events API.
+    if (current_user.role or "").strip().lower() == "curator":
+        raise HTTPException(
+            status_code=403,
+            detail="Curators cannot mark attendance",
+        )
+
     # 1. Verify event exists
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:

@@ -23,6 +23,7 @@ from src.exams.routes import (
     export_exam_results,
     get_bluebook_grid,
     list_bluebook_groups,
+    list_exam_groups,
     list_exam_results,
     list_sat_official_dates,
     update_exam_result,
@@ -565,3 +566,44 @@ def test_group_search_still_respects_row_scope(db, world):
     """Search must never widen scope - a teacher searching for another group gets none."""
     rows = list_bluebook_groups(search="Group B", current_user=world["t_a"], db=db)
     assert rows == []
+
+
+# --------------------------------------------------------------------------------------
+# /exams/groups - the exam-results group filter (all programs, not just SAT)
+# --------------------------------------------------------------------------------------
+
+def test_exam_groups_include_non_sat_programs(db, world):
+    """Unlike the Bluebook picker, this one must not be SAT-only - IELTS results are
+    filtered by group too."""
+    admin = _user(db, "admin", "eg-admin@t.io")
+    ielts = Group(name="eg IELTS squad", is_active=True, is_over=False, program_type="ielts")
+    db.add(ielts)
+    db.flush()
+    ids = {r["id"] for r in list_exam_groups(program=None, search=None,
+                                             current_user=admin, db=db)}
+    assert ielts.id in ids
+    assert world["g_a"].id in ids
+
+
+def test_exam_groups_can_be_narrowed_to_one_program(db, world):
+    admin = _user(db, "admin", "eg-admin2@t.io")
+    ielts = Group(name="eg IELTS only", is_active=True, is_over=False, program_type="ielts")
+    db.add(ielts)
+    db.flush()
+    ids = {r["id"] for r in list_exam_groups(program="ielts", search=None,
+                                             current_user=admin, db=db)}
+    assert ielts.id in ids
+    assert world["g_a"].id not in ids
+
+
+def test_exam_groups_respect_row_scope(db, world):
+    ids = {r["id"] for r in list_exam_groups(program=None, search=None,
+                                             current_user=world["t_a"], db=db)}
+    assert ids == {world["g_a"].id}
+
+
+def test_exam_groups_are_denied_to_students(db, world):
+    student = _user(db, "student", "eg-stu@t.io")
+    with pytest.raises(HTTPException) as exc:
+        list_exam_groups(program=None, search=None, current_user=student, db=db)
+    assert exc.value.status_code == 403

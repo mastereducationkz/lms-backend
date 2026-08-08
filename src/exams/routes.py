@@ -438,31 +438,25 @@ def update_exam_result(
 # Bluebook grid
 # --------------------------------------------------------------------------------------
 
-@router.get("/bluebook/groups")
-def list_bluebook_groups(
-    search: Optional[str] = Query(
-        None,
-        description="Free text matched against group name AND teacher name.",
-    ),
-    current_user: UserInDB = Depends(get_current_user_dependency),
-    db: Session = Depends(get_db),
-):
-    """SAT groups the caller may open a Bluebook grid for.
+def _scoped_group_options(
+    db: Session,
+    user: UserInDB,
+    *,
+    programs: Optional[List[str]],
+    search: Optional[str],
+) -> List[dict]:
+    """Live groups in the caller's scope, optionally narrowed by program.
 
-    Scope comes from the central row-scope service, so this is correct for every staff
-    role. It deliberately does NOT reuse ``GET /users/groups/me``: that endpoint only
-    implements student, teacher and curator branches and returns an empty list for
-    admin, head_teacher and head_curator, which made the grid look empty for them.
+    Shared by the exam-results and Bluebook group pickers so both resolve scope the
+    same way. Never reuse ``GET /users/groups/me`` for this: it implements only the
+    student, teacher and curator branches and returns [] for admin, head_teacher and
+    head_curator.
 
-    Bluebook is a College Board SAT product - NUET students do not sit it - so only SAT
-    groups are listed. The name fallback mirrors the frontend's groupPicker for groups
-    whose program_type was never set, using a word boundary so "Saturday" does not match.
+    The name fallback exists because the backfill migration never set ``nuet``, so
+    legacy groups can still carry ``general_english``. The word boundary keeps a
+    "Saturday" group from being read as SAT.
     """
-    _require(current_user, _READ_ROLES)
-
-    scope = visible_group_ids(current_user, db)
-    # Left-join the teacher so a search can match on their name in the same query
-    # rather than filtering in Python after the fact.
+    scope = visible_group_ids(user, db)
     teacher = aliased(UserInDB)
     query = (
         db.query(Group, teacher)
@@ -470,12 +464,16 @@ def list_bluebook_groups(
         .filter(
             Group.is_active == True,  # noqa: E712
             Group.is_over == False,  # noqa: E712
-            or_(
-                func.lower(Group.program_type) == "sat",
-                Group.name.op("~*")(r"\ysat\y"),
-            ),
         )
     )
+
+    if programs:
+        clauses = []
+        for program in programs:
+            clauses.append(func.lower(Group.program_type) == program)
+            clauses.append(Group.name.op("~*")(rf"\y{program}\y"))
+        query = query.filter(or_(*clauses))
+
     if scope is not UNRESTRICTED:
         if not scope:
             return []
@@ -490,22 +488,52 @@ def list_bluebook_groups(
         ))
 
     pairs = query.order_by(Group.name).all()
-    groups = [g for g, _ in pairs]
-    teachers = {g.id: t for g, t in pairs if t is not None}
-
     return [
         {
             "id": g.id,
             "name": g.name,
             "program_type": g.program_type,
             "teacher_id": g.teacher_id,
-            "teacher_name": (
-                (teachers[g.id].official_full_name or teachers[g.id].name)
-                if g.id in teachers else None
-            ),
+            "teacher_name": (t.official_full_name or t.name) if t else None,
         }
-        for g in groups
+        for g, t in pairs
     ]
+
+
+@router.get("/groups")
+def list_exam_groups(
+    program: Optional[str] = Query(
+        None,
+        description="Restrict to one program (sat|ielts|nuet). Omit for all programs.",
+    ),
+    search: Optional[str] = Query(
+        None, description="Free text matched against group name AND teacher name."
+    ),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Groups the caller may filter exam results by, across all programs."""
+    _require(current_user, _READ_ROLES)
+    programs = [program.strip().lower()] if program and program.strip() else None
+    return _scoped_group_options(db, current_user, programs=programs, search=search)
+
+
+@router.get("/bluebook/groups")
+def list_bluebook_groups(
+    search: Optional[str] = Query(
+        None,
+        description="Free text matched against group name AND teacher name.",
+    ),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """SAT groups the caller may open a Bluebook grid for.
+
+    Bluebook is a College Board SAT product - NUET students do not sit it - so only SAT
+    groups are listed. Scope resolution is shared with the exam-results picker.
+    """
+    _require(current_user, _READ_ROLES)
+    return _scoped_group_options(db, current_user, programs=["sat"], search=search)
 
 
 @router.get("/bluebook/groups/{group_id}/grid")
