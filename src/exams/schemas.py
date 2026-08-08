@@ -196,14 +196,31 @@ class StudentContactOut(BaseModel):
     parent_phone: Optional[str] = None
 
 
+class PlannedDateUpdate(BaseModel):
+    """Reschedule a student's expected exam date."""
+
+    student_id: int
+    exam_type: ExamType
+    planned_test_date: date
+
+
 class ExamResultRow(BaseModel):
-    """One row of the authorized exam-results grid."""
+    """One row of the authorized exam-results grid.
+
+    ``result`` is the current best-known outcome; ``attempts`` is the full history,
+    newest first, so a retake never hides what came before it.
+    """
 
     student: StudentContactOut
     group_id: Optional[int] = None
     group_name: Optional[str] = None
     planned_test_date: Optional[date] = None
+    # Derived triage fields, so the daily "who do I chase" workflow lives on the same
+    # screen as the reporting one instead of in a separate page.
+    ask_result_on: Optional[date] = None
+    triage_status: Optional[Literal["pending", "due", "overdue", "completed", "unscheduled"]] = None
     result: Optional[ExamResultOut] = None
+    attempts: List[ExamResultOut] = []
 
 
 class BluebookResultInput(BaseModel):

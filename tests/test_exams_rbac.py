@@ -28,7 +28,8 @@ from src.exams.routes import (
     list_sat_official_dates,
     update_exam_result,
 )
-from src.exams.schemas import ExamResultCreate, ExamResultUpdate
+from src.exams.routes import get_result_proof, update_planned_date, upload_result_proof
+from src.exams.schemas import ExamResultCreate, ExamResultUpdate, PlannedDateUpdate
 from src.schemas.models import (
     Course,
     CourseGroupAccess,
@@ -607,3 +608,225 @@ def test_exam_groups_are_denied_to_students(db, world):
     with pytest.raises(HTTPException) as exc:
         list_exam_groups(program=None, search=None, current_user=student, db=db)
     assert exc.value.status_code == 403
+
+
+# --------------------------------------------------------------------------------------
+# Proof upload / retrieval
+# --------------------------------------------------------------------------------------
+
+def _png_bytes():
+    return b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+class _FakeUpload:
+    """Minimal UploadFile stand-in: the handler only calls .read()."""
+    def __init__(self, data): self._data = data
+    async def read(self): return self._data
+
+
+def _run(coro):
+    """Drive an async handler from a sync test.
+
+    asyncio.run(), not get_event_loop(): another test in the suite closes the ambient
+    loop, so get_event_loop() raises "no current event loop" when the full suite runs
+    even though these tests pass in isolation.
+    """
+    import asyncio
+    return asyncio.run(coro)
+
+
+def test_proof_upload_is_denied_to_readers(db, world):
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    with pytest.raises(HTTPException) as exc:
+        _run(upload_result_proof(own.id, file=_FakeUpload(_png_bytes()),
+                                 current_user=world["t_a"], db=db))
+    assert exc.value.status_code == 403
+
+
+def test_proof_upload_rejects_a_disguised_executable(db, world):
+    """Content-Type is client-supplied; the magic bytes decide."""
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    with pytest.raises(HTTPException) as exc:
+        _run(upload_result_proof(own.id, file=_FakeUpload(b"MZ\x90\x00 not an image"),
+                                 current_user=world["c_a"], db=db))
+    assert exc.value.status_code == 400
+
+
+def test_proof_upload_rejects_empty_file(db, world):
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    with pytest.raises(HTTPException) as exc:
+        _run(upload_result_proof(own.id, file=_FakeUpload(b""),
+                                 current_user=world["c_a"], db=db))
+    assert exc.value.status_code == 400
+
+
+def test_proof_upload_rejects_oversize(db, world):
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    huge = b"\x89PNG\r\n\x1a\n" + b"\x00" * (11 * 1024 * 1024)
+    with pytest.raises(HTTPException) as exc:
+        _run(upload_result_proof(own.id, file=_FakeUpload(huge),
+                                 current_user=world["c_a"], db=db))
+    assert exc.value.status_code == 400
+
+
+def test_curator_cannot_attach_proof_to_a_foreign_students_result(db, world):
+    foreign = db.query(ExamResult).filter(ExamResult.student_id == world["s_b"].id).first()
+    with pytest.raises(HTTPException) as exc:
+        _run(upload_result_proof(foreign.id, file=_FakeUpload(_png_bytes()),
+                                 current_user=world["c_a"], db=db))
+    assert exc.value.status_code == 403
+
+
+def test_proof_lands_under_the_private_prefix(db, world):
+    """exam_proof must be private; assignment_zero screenshots are public-class and
+    protected only by an unguessable filename."""
+    from src.services.storage_service import is_public
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    out = _run(upload_result_proof(own.id, file=_FakeUpload(_png_bytes()),
+                                   current_user=world["c_a"], db=db))
+    assert out.has_proof is True
+    refreshed = db.query(ExamResult).filter(ExamResult.id == own.id).first()
+    assert "exam_proof/" in refreshed.proof_url
+    assert is_public(refreshed.proof_url) is False
+
+
+def test_proof_retrieval_denied_across_group_boundary(db, world):
+    foreign = db.query(ExamResult).filter(ExamResult.student_id == world["s_b"].id).first()
+    foreign.proof_url = "/uploads/exam_proof/x.png"
+    db.flush()
+    with pytest.raises(HTTPException) as exc:
+        get_result_proof(foreign.id, current_user=world["t_a"], db=db)
+    assert exc.value.status_code == 403
+
+
+def test_proof_retrieval_404s_when_nothing_uploaded(db, world):
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    own.proof_url = None
+    db.flush()
+    with pytest.raises(HTTPException) as exc:
+        get_result_proof(own.id, current_user=world["c_a"], db=db)
+    assert exc.value.status_code == 404
+
+
+# --------------------------------------------------------------------------------------
+# Planned date + Assignment Zero mirroring
+# --------------------------------------------------------------------------------------
+
+def _az(db, student, **kw):
+    from src.schemas.models import AssignmentZeroSubmission
+    row = AssignmentZeroSubmission(
+        user_id=student.id, full_name=student.name, phone_number="", parent_phone_number="",
+        telegram_id="", email=student.email, college_board_email="", college_board_password="",
+        birthday_date=date(2008, 1, 1), city="Almaty", school_type="NIS", group_name="g",
+        sat_target_date="October", recent_practice_test_score="0",
+        bluebook_practice_test_5_score="0", **kw,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def test_recording_a_result_mirrors_into_assignment_zero(db, world):
+    """The curator task scheduler closes its task by reading sat_result_score, so a
+    result written only to exam_results would leave the task open forever."""
+    az = _az(db, world["s_a"])
+    # Later than the 2026-06-06 attempt the fixture seeds, so this is the newest.
+    create_exam_result(
+        ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                         test_date=date(2026, 8, 1), verbal_score=600, math_score=610),
+        current_user=world["c_a"], db=db,
+    )
+    db.refresh(az)
+    assert az.sat_result_score == "1210"
+    assert az.sat_result_test_date == date(2026, 8, 1)
+
+
+def test_mirroring_follows_the_newest_attempt(db, world):
+    az = _az(db, world["s_a"])
+    create_exam_result(
+        ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                         test_date=date(2026, 3, 14), verbal_score=400, math_score=400),
+        current_user=world["c_a"], db=db)
+    create_exam_result(
+        ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                         test_date=date(2026, 8, 1), verbal_score=700, math_score=700),
+        current_user=world["c_a"], db=db)
+    db.refresh(az)
+    assert az.sat_result_score == "1400"   # the latest sitting, not an earlier one
+
+
+def test_rescheduling_does_not_destroy_an_existing_result(db, world):
+    """The legacy Assignment Zero endpoint nulls the result on reschedule. With attempt
+    history that is data loss - a past sitting really happened."""
+    az = _az(db, world["s_a"], sat_result_score="1450",
+             sat_result_test_date=date(2026, 6, 6))
+    update_planned_date(
+        PlannedDateUpdate(student_id=world["s_a"].id, exam_type="sat",
+                          planned_test_date=date(2026, 10, 3)),
+        current_user=world["c_a"], db=db,
+    )
+    db.refresh(az)
+    assert az.sat_planned_test_date == date(2026, 10, 3)
+    assert az.sat_result_score == "1450"          # preserved
+    assert az.sat_result_test_date == date(2026, 6, 6)
+
+
+def test_rescheduling_is_denied_for_a_foreign_student(db, world):
+    _az(db, world["s_b"])
+    with pytest.raises(HTTPException) as exc:
+        update_planned_date(
+            PlannedDateUpdate(student_id=world["s_b"].id, exam_type="sat",
+                              planned_test_date=date(2026, 10, 3)),
+            current_user=world["c_a"], db=db)
+    assert exc.value.status_code == 403
+
+
+def test_rescheduling_is_denied_to_readers(db, world):
+    _az(db, world["s_a"])
+    with pytest.raises(HTTPException) as exc:
+        update_planned_date(
+            PlannedDateUpdate(student_id=world["s_a"].id, exam_type="sat",
+                              planned_test_date=date(2026, 10, 3)),
+            current_user=world["t_a"], db=db)
+    assert exc.value.status_code == 403
+
+
+# --------------------------------------------------------------------------------------
+# Attempts + triage on the row
+# --------------------------------------------------------------------------------------
+
+def test_rows_carry_full_attempt_history_newest_first(db, world):
+    create_exam_result(
+        ExamResultCreate(student_id=world["s_a"].id, exam_type="sat",
+                         test_date=date(2026, 3, 14), verbal_score=400, math_score=400),
+        current_user=world["c_a"], db=db)
+    row = next(r for r in _list(world["c_a"], db)
+               if r.student.student_id == world["s_a"].id)
+    assert len(row.attempts) == 2
+    assert row.attempts[0].test_date > row.attempts[1].test_date
+    assert row.result.test_date == row.attempts[0].test_date
+
+
+def test_triage_marks_a_student_with_a_result_completed(db, world):
+    row = next(r for r in _list(world["c_a"], db)
+               if r.student.student_id == world["s_a"].id)
+    assert row.triage_status == "completed"
+
+
+def test_triage_marks_a_student_without_a_planned_date_unscheduled(db, world):
+    db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).delete()
+    db.flush()
+    row = next(r for r in _list(world["c_a"], db)
+               if r.student.student_id == world["s_a"].id)
+    assert row.triage_status == "unscheduled"
+    assert row.ask_result_on is None
+
+
+def test_ask_date_is_thirteen_days_after_the_planned_date(db, world):
+    db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).delete()
+    _az(db, world["s_a"], sat_planned_test_date=date(2026, 6, 6))
+    db.flush()
+    row = next(r for r in _list(world["c_a"], db)
+               if r.student.student_id == world["s_a"].id)
+    assert row.ask_result_on == date(2026, 6, 19)
+    assert row.triage_status == "overdue"   # 2026-06-19 is in the past

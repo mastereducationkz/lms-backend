@@ -47,7 +47,10 @@ _LOCAL_ROOT = Path("uploads")
 # avatars, chat) -> public. ``videos`` (self-hosted HLS) is private and, unlike the
 # other private prefixes, is *streamed* through the backend rather than redirected —
 # HLS playlists reference their segments by relative path, which presigned URLs break.
-PRIVATE_PREFIXES = ("courses", "materials", "step_attachments", "sat_images", "question_media", "steps", "videos")
+# exam_proof holds College Board / IELTS score reports - a student's name, photo-grade
+# identity data and their result. It must never fall into the public-URL class the way
+# assignment_zero screenshots do, where the only protection is an unguessable filename.
+PRIVATE_PREFIXES = ("courses", "materials", "step_attachments", "sat_images", "question_media", "steps", "videos", "exam_proof")
 
 # Content types for streamed HLS assets (mimetypes doesn't know .m3u8/.ts/.m4s).
 _HLS_CONTENT_TYPES = {

@@ -11,10 +11,13 @@ Response models are purpose-built (:mod:`src.exams.schemas`). None of them inher
 ``AssignmentZeroSubmissionSchema``, which declares ``college_board_email`` /
 ``college_board_password``; nothing in this module may return those fields.
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+import uuid
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, aliased
 
@@ -22,8 +25,10 @@ from src.assignments.exam_dates import (
     SAT_DATES_SOURCE_URL,
     SAT_DATES_VERIFIED_AT,
     SAT_TEST_DATES,
+    format_sat_label,
     get_nearest_sat_date,
 )
+from src.assignments.models import AssignmentZeroSubmission
 from src.auth.models import UserInDB
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
@@ -33,10 +38,12 @@ from src.exams.schemas import (
     ExamResultOut,
     ExamResultRow,
     ExamResultUpdate,
+    PlannedDateUpdate,
 )
 from src.exams import services as exam_services
 from src.exams.exports import build_bluebook_grid_workbook, build_exam_results_workbook
 from src.routes.auth import get_current_user_dependency
+from src.services import storage_service
 from src.utils.scope import UNRESTRICTED, can_view_group, visible_group_ids
 
 router = APIRouter()
@@ -46,6 +53,11 @@ _READ_ROLES = {"teacher", "curator", "head_teacher", "head_curator", "admin"}
 # Who may CREATE or CORRECT an official result. Teachers are read-only here:
 # an official exam score is a record of fact, owned by the curator team.
 _WRITE_ROLES = {"curator", "head_curator", "admin"}
+
+# Exam boards release scores about two weeks after the sitting, so a result is chased
+# from planned_date + 13d. Same offset the curator task scheduler applies, kept as a
+# named constant here instead of the magic 13 that was duplicated in three places.
+ASK_RESULT_AFTER_DAYS = 13
 
 
 def _require(user: UserInDB, allowed: set) -> None:
@@ -214,11 +226,14 @@ def _collect_result_rows(
         if date_to is not None:
             result_query = result_query.filter(ExamResult.test_date <= date_to)
 
-    latest: dict = {}
+    attempts_by_student: dict = {}
     for r in result_query.order_by(ExamResult.test_date.asc()).all():
-        latest[r.student_id] = r
+        attempts_by_student.setdefault(r.student_id, []).append(r)
+    # Ascending insert then reverse => newest first, and latest[...] is the newest.
+    latest = {sid: rows_[-1] for sid, rows_ in attempts_by_student.items()}
 
     group_names = _group_names_for_students(db, ids)
+    today = date.today()
 
     rows: List[ExamResultRow] = []
     for s in students:
@@ -242,15 +257,38 @@ def _collect_result_rows(
             continue
 
         group_id_value, group_name = group_names.get(s.id, (None, None))
+        student_attempts = attempts_by_student.get(s.id, [])
+
+        # Triage, so the daily "who do I chase" workflow lives on this screen rather
+        # than a separate page. Results are collected ~13 days after the exam, which is
+        # when scores are released; the same offset the curator task scheduler uses.
+        ask_on = planned_date + timedelta(days=ASK_RESULT_AFTER_DAYS) if planned_date else None
+        if result is not None:
+            triage = "completed"
+        elif planned_date is None:
+            triage = "unscheduled"
+        elif ask_on is not None and today > ask_on:
+            triage = "overdue"
+        elif ask_on is not None and today >= ask_on:
+            triage = "due"
+        else:
+            triage = "pending"
+
         rows.append(ExamResultRow(
             student=contact,
             group_id=group_id_value,
             group_name=group_name,
             planned_test_date=planned_date,
+            ask_result_on=ask_on,
+            triage_status=triage,
             result=(
                 ExamResultOut.model_validate(exam_services._with_proof_flag(result))
                 if result else None
             ),
+            attempts=[
+                ExamResultOut.model_validate(exam_services._with_proof_flag(a))
+                for a in reversed(student_attempts)
+            ],
         ))
     return rows
 
@@ -388,9 +426,58 @@ def create_exam_result(
         recorded_at=datetime.now(timezone.utc),
     )
     db.add(result)
+    db.flush()
+
+    # Mirror the newest attempt into the Assignment Zero scalars.
+    #
+    # Those columns remain the "latest result" cache that older screens read, and the
+    # curator task scheduler closes its "collect the result" task by checking
+    # sat_result_score / ielts_result_score. Writing only to exam_results would leave
+    # those tasks open forever and make the old screens look empty.
+    _mirror_latest_to_assignment_zero(db, payload.student_id, payload.exam_type)
+
     db.commit()
     db.refresh(result)
     return ExamResultOut.model_validate(exam_services._with_proof_flag(result))
+
+
+def _mirror_latest_to_assignment_zero(db: Session, student_id: int, exam_type: str) -> None:
+    """Keep the Assignment Zero scalars in step with the newest live attempt."""
+    if exam_type not in ("sat", "ielts"):
+        return  # Assignment Zero has no NUET columns
+
+    submission = (
+        db.query(AssignmentZeroSubmission)
+        .filter(AssignmentZeroSubmission.user_id == student_id)
+        .first()
+    )
+    if submission is None:
+        return
+
+    newest = (
+        db.query(ExamResult)
+        .filter(
+            ExamResult.student_id == student_id,
+            ExamResult.exam_type == exam_type,
+            ExamResult.is_superseded == False,  # noqa: E712
+            ExamResult.status != "rejected",
+        )
+        .order_by(ExamResult.test_date.desc())
+        .first()
+    )
+    if newest is None:
+        return
+
+    # Stored as a plain number so the legacy backfill regex and the old screens can
+    # both read it back unambiguously.
+    score_text = str(int(newest.total_score)) if newest.total_score == int(newest.total_score) \
+        else str(newest.total_score)
+    if exam_type == "sat":
+        submission.sat_result_score = score_text
+        submission.sat_result_test_date = newest.test_date
+    else:
+        submission.ielts_result_score = score_text
+        submission.ielts_result_test_date = newest.test_date
 
 
 @router.patch("/results/{result_id}", response_model=ExamResultOut)
@@ -432,6 +519,173 @@ def update_exam_result(
     db.commit()
     db.refresh(result)
     return ExamResultOut.model_validate(exam_services._with_proof_flag(result))
+
+
+# --------------------------------------------------------------------------------------
+# Proof of result (private evidence)
+# --------------------------------------------------------------------------------------
+
+# A score report is either a screenshot or a PDF export from the exam board.
+_ALLOWED_PROOF_MIMES = frozenset({
+    "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp", "application/pdf",
+})
+_PROOF_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _sniff_proof_mime(contents: bytes) -> Optional[str]:
+    """Detect the real type from magic bytes.
+
+    Content-Type is client-supplied and trivially spoofed, and extension checks are
+    worse. This mirrors the Assignment Zero screenshot validator - the only upload in
+    this codebase that actually sniffs - and adds PDF.
+    """
+    if len(contents) >= 3 and contents[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(contents) >= 8 and contents[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(contents) >= 6 and contents[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(contents) >= 12 and contents[:4] == b"RIFF" and contents[8:12] == b"WEBP":
+        return "image/webp"
+    if len(contents) >= 5 and contents[:5] == b"%PDF-":
+        return "application/pdf"
+    return None
+
+
+def _load_result_in_scope(db: Session, user: UserInDB, result_id: int) -> ExamResult:
+    """Fetch a result, 404 if missing and 403 if the caller may not see the student."""
+    result = db.query(ExamResult).filter(ExamResult.id == result_id).first()
+    if result is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    scoped = _scoped_student_ids(db, user, group_id=None)
+    if scoped is not None and result.student_id not in set(scoped):
+        raise HTTPException(status_code=403, detail="Access denied for this student")
+    return result
+
+
+@router.post("/results/{result_id}/proof", response_model=ExamResultOut)
+async def upload_result_proof(
+    result_id: int,
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Attach a score report to a result.
+
+    Stored under the PRIVATE ``exam_proof/`` prefix with a uuid filename, so it is never
+    served by the unauthenticated /uploads route the way assignment_zero screenshots are.
+    Retrieval goes through GET .../proof, which re-checks row scope.
+    """
+    _require(current_user, _WRITE_ROLES)
+    result = _load_result_in_scope(db, current_user, result_id)
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(contents) > _PROOF_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="File too large (max 10 MB)")
+
+    sniffed = _sniff_proof_mime(contents)
+    if sniffed not in _ALLOWED_PROOF_MIMES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload a JPEG, PNG, GIF, WEBP or PDF.",
+        )
+
+    ext = ".pdf" if sniffed == "application/pdf" else "." + sniffed.split("/")[1]
+    if ext == ".jpeg":
+        ext = ".jpg"
+    # uuid, not the client filename: the client name is attacker-controlled and several
+    # existing endpoints interpolate it straight into a storage key.
+    key = f"exam_proof/{result.student_id}_{uuid.uuid4().hex}{ext}"
+    storage_service.save(key, contents, content_type=sniffed)
+
+    result.proof_url = storage_service.stored_path(key)
+    result.proof_uploaded_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(result)
+    return ExamResultOut.model_validate(exam_services._with_proof_flag(result))
+
+
+@router.get("/results/{result_id}/proof")
+def get_result_proof(
+    result_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Short-lived link to the score report, re-authorized on every request.
+
+    Read roles may open proof for students in their own scope, so a teacher sees their
+    own students' reports and nobody else's. The storage key itself is never returned in
+    list payloads - only this endpoint hands one out, and only after a scope check.
+    """
+    _require(current_user, _READ_ROLES)
+    result = _load_result_in_scope(db, current_user, result_id)
+    if not result.proof_url:
+        raise HTTPException(status_code=404, detail="No proof uploaded for this result")
+
+    return RedirectResponse(url=storage_service.url_for(result.proof_url), status_code=307)
+
+
+# --------------------------------------------------------------------------------------
+# Planned / expected exam date
+# --------------------------------------------------------------------------------------
+
+@router.patch("/planned-date", response_model=ExamResultRow)
+def update_planned_date(
+    payload: PlannedDateUpdate,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Reschedule a student's expected exam date.
+
+    Writes to Assignment Zero, which owns planned dates - this domain never keeps a
+    second calendar. Unlike the legacy Assignment Zero endpoint, rescheduling does NOT
+    null an existing result: with attempt history a past result stays valid evidence of
+    what happened, and destroying it to move a future date loses real data.
+    """
+    _require(current_user, _WRITE_ROLES)
+
+    scoped = _scoped_student_ids(db, current_user, group_id=None)
+    if scoped is not None and payload.student_id not in set(scoped):
+        raise HTTPException(status_code=403, detail="Access denied for this student")
+
+    submission = (
+        db.query(AssignmentZeroSubmission)
+        .filter(AssignmentZeroSubmission.user_id == payload.student_id)
+        .first()
+    )
+    if submission is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This student has no Assignment Zero record, so a planned date "
+                   "cannot be stored for them yet.",
+        )
+
+    if payload.exam_type == "sat":
+        submission.sat_planned_test_date = payload.planned_test_date
+        # Keep the legacy human-readable string in step, since other screens read it.
+        submission.sat_target_date = format_sat_label(payload.planned_test_date)
+    elif payload.exam_type == "ielts":
+        submission.ielts_planned_test_date = payload.planned_test_date
+        submission.ielts_target_date = format_sat_label(payload.planned_test_date)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Planned dates are only tracked for SAT and IELTS.",
+        )
+
+    db.commit()
+
+    rows = _collect_result_rows(
+        db, current_user, exam_type=payload.exam_type, group_id=None,
+        date_field="planned", date_from=None, date_to=None, exact_date=None,
+        status=None, search=None, limit=1000, offset=0,
+    )
+    for row in rows:
+        if row.student.student_id == payload.student_id:
+            return row
+    raise HTTPException(status_code=404, detail="Student not found after update")
 
 
 # --------------------------------------------------------------------------------------
