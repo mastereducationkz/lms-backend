@@ -830,3 +830,58 @@ def test_ask_date_is_thirteen_days_after_the_planned_date(db, world):
                if r.student.student_id == world["s_a"].id)
     assert row.ask_result_on == date(2026, 6, 19)
     assert row.triage_status == "overdue"   # 2026-06-19 is in the past
+
+
+# --------------------------------------------------------------------------------------
+# Private files must be STREAMED, never redirected
+# --------------------------------------------------------------------------------------
+
+def test_proof_is_streamed_not_redirected(db, world, monkeypatch):
+    """REGRESSION: this endpoint used to 307 to a presigned S3 URL. The client fetches
+    it with XHR (it must, to send the Authorization header), the browser follows the
+    redirect to s3.amazonaws.com, and S3 sends no Access-Control-Allow-Origin - so the
+    request died with a CORS error despite the presigned URL being perfectly valid.
+    Serving the bytes from this origin keeps it inside the API's CORS allow-list.
+    """
+    from starlette.responses import RedirectResponse
+    from src.services import storage_service
+
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    own.proof_url = "/uploads/exam_proof/x.pdf"
+    db.flush()
+    monkeypatch.setattr(storage_service, "read", lambda key: b"%PDF-1.4 fake")
+
+    resp = get_result_proof(own.id, current_user=world["c_a"], db=db)
+    assert not isinstance(resp, RedirectResponse), "must not redirect to storage"
+    assert resp.status_code == 200
+    assert resp.body == b"%PDF-1.4 fake"
+    assert "amazonaws" not in str(resp.headers)
+
+
+def test_proof_response_opens_inline_and_is_not_cached(db, world, monkeypatch):
+    from src.services import storage_service
+
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    own.proof_url = "/uploads/exam_proof/x.pdf"
+    db.flush()
+    monkeypatch.setattr(storage_service, "read", lambda key: b"%PDF-1.4 fake")
+
+    resp = get_result_proof(own.id, current_user=world["c_a"], db=db)
+    assert resp.headers["content-type"].startswith("application/pdf")
+    assert "inline" in resp.headers["content-disposition"]
+    # Private material must not sit in a shared cache.
+    assert "no-store" in resp.headers["cache-control"]
+
+
+def test_proof_404s_when_the_object_is_gone_from_storage(db, world, monkeypatch):
+    """A dangling key must be a clean 404, not a 200 with an empty body."""
+    from src.services import storage_service
+
+    own = db.query(ExamResult).filter(ExamResult.student_id == world["s_a"].id).first()
+    own.proof_url = "/uploads/exam_proof/missing.pdf"
+    db.flush()
+    monkeypatch.setattr(storage_service, "read", lambda key: None)
+
+    with pytest.raises(HTTPException) as exc:
+        get_result_proof(own.id, current_user=world["c_a"], db=db)
+    assert exc.value.status_code == 404

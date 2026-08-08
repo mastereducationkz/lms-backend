@@ -14,10 +14,10 @@ Response models are purpose-built (:mod:`src.exams.schemas`). None of them inher
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, aliased
@@ -614,6 +614,37 @@ async def upload_result_proof(
     return ExamResultOut.model_validate(exam_services._with_proof_flag(result))
 
 
+def _serve_private_file(key: str, label: str) -> Response:
+    """Stream a private object through the API rather than redirecting to storage.
+
+    A 307 to a presigned S3 URL looks tempting and works for a top-level navigation,
+    but the client fetches these with XHR (it has to, to send the Authorization
+    header), and the browser follows the redirect to s3.amazonaws.com, which sends no
+    Access-Control-Allow-Origin. The request then dies with a CORS error even though
+    the presigned URL itself is valid.
+
+    Serving the bytes from this origin keeps the response inside the API's existing
+    CORS allow-list. Same reason HLS video is streamed here instead of redirected.
+    Both file types are size-capped on upload (10 MB proof, 8 MB photo), so reading
+    them into memory is bounded.
+    """
+    data = storage_service.read(key)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"The {label} file could not be found in storage")
+
+    media_type = storage_service.content_type_for(key)
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            # inline so a PDF or image opens in the tab instead of downloading.
+            "Content-Disposition": f'inline; filename="{label}{os.path.splitext(key)[1]}"',
+            # Private material: never let a shared cache hold on to it.
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.get("/results/{result_id}/proof")
 def get_result_proof(
     result_id: int,
@@ -631,7 +662,7 @@ def get_result_proof(
     if not result.proof_url:
         raise HTTPException(status_code=404, detail="No proof uploaded for this result")
 
-    return RedirectResponse(url=storage_service.url_for(result.proof_url), status_code=307)
+    return _serve_private_file(result.proof_url, "proof")
 
 
 # --------------------------------------------------------------------------------------

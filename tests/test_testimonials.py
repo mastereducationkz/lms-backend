@@ -280,3 +280,25 @@ def test_rejecting_records_the_reason(db, world):
                              current_user=world["admin"], db=db)
     assert out.status == "rejected"
     assert out.rejected_reason == "photo too blurry"
+
+
+def test_photo_is_streamed_not_redirected(db, world, monkeypatch):
+    """Same CORS regression as the exam proof: a 307 to a presigned S3 URL is followed
+    by the browser during an XHR, and S3 sends no Access-Control-Allow-Origin."""
+    from starlette.responses import RedirectResponse
+    from src.exams.testimonials import get_testimonial_photo
+    from src.services import storage_service
+
+    row = upsert_testimonial(_payload(world["student"].id),
+                             current_user=world["curator"], db=db)
+    stored = db.query(StudentTestimonial).filter(StudentTestimonial.id == row.id).one()
+    stored.photo_url = "/uploads/testimonial_media/x.png"
+    db.flush()
+    monkeypatch.setattr(storage_service, "read", lambda key: b"\x89PNG\r\n\x1a\n data")
+
+    resp = get_testimonial_photo(row.id, current_user=world["curator"], db=db)
+    assert not isinstance(resp, RedirectResponse), "must not redirect to storage"
+    assert resp.status_code == 200
+    assert resp.body.startswith(b"\x89PNG")
+    assert resp.headers["content-type"].startswith("image/png")
+    assert "amazonaws" not in str(resp.headers)

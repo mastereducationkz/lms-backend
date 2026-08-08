@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -241,13 +240,22 @@ def get_testimonial_photo(
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
-    """Short-lived link to the photo, re-authorized per request."""
+    """The photo bytes, re-authorized on every request.
+
+    Served from this origin rather than redirected to a presigned storage URL: the
+    client fetches with XHR to send its auth header, and following a redirect to S3
+    fails CORS.
+    """
     _require(current_user, _EDIT_ROLES | _APPROVE_ROLES)
     row = db.query(StudentTestimonial).filter(StudentTestimonial.id == testimonial_id).first()
     if row is None or not row.photo_url:
         raise HTTPException(status_code=404, detail="No photo for this testimonial")
     _scoped_or_403(db, current_user, row.student_id)
-    return RedirectResponse(url=storage_service.url_for(row.photo_url), status_code=307)
+
+    # Streamed through the API, not redirected to storage - see _serve_private_file.
+    from src.exams.routes import _serve_private_file
+
+    return _serve_private_file(row.photo_url, "photo")
 
 
 class ModerationAction(BaseModel):
