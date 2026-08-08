@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from src.assignments.exam_dates import (
@@ -436,6 +437,59 @@ def update_exam_result(
 # --------------------------------------------------------------------------------------
 # Bluebook grid
 # --------------------------------------------------------------------------------------
+
+@router.get("/bluebook/groups")
+def list_bluebook_groups(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """SAT groups the caller may open a Bluebook grid for.
+
+    Scope comes from the central row-scope service, so this is correct for every staff
+    role. It deliberately does NOT reuse ``GET /users/groups/me``: that endpoint only
+    implements student, teacher and curator branches and returns an empty list for
+    admin, head_teacher and head_curator, which made the grid look empty for them.
+
+    Bluebook is a College Board SAT product - NUET students do not sit it - so only SAT
+    groups are listed. The name fallback mirrors the frontend's groupPicker for groups
+    whose program_type was never set, using a word boundary so "Saturday" does not match.
+    """
+    _require(current_user, _READ_ROLES)
+
+    scope = visible_group_ids(current_user, db)
+    query = db.query(Group).filter(
+        Group.is_active == True,  # noqa: E712
+        Group.is_over == False,  # noqa: E712
+        or_(
+            func.lower(Group.program_type) == "sat",
+            Group.name.op("~*")(r"\ysat\y"),
+        ),
+    )
+    if scope is not UNRESTRICTED:
+        if not scope:
+            return []
+        query = query.filter(Group.id.in_(scope))
+
+    groups = query.order_by(Group.name).all()
+    teacher_ids = {g.teacher_id for g in groups if g.teacher_id}
+    teachers = {
+        t.id: t for t in db.query(UserInDB).filter(UserInDB.id.in_(teacher_ids)).all()
+    } if teacher_ids else {}
+
+    return [
+        {
+            "id": g.id,
+            "name": g.name,
+            "program_type": g.program_type,
+            "teacher_id": g.teacher_id,
+            "teacher_name": (
+                (teachers[g.teacher_id].official_full_name or teachers[g.teacher_id].name)
+                if g.teacher_id in teachers else None
+            ),
+        }
+        for g in groups
+    ]
+
 
 @router.get("/bluebook/groups/{group_id}/grid")
 def get_bluebook_grid(

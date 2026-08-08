@@ -22,6 +22,7 @@ from src.exams.routes import (
     export_bluebook_grid,
     export_exam_results,
     get_bluebook_grid,
+    list_bluebook_groups,
     list_exam_results,
     list_sat_official_dates,
     update_exam_result,
@@ -346,6 +347,87 @@ def test_verifying_records_the_actor(db, world):
 # --------------------------------------------------------------------------------------
 # Bluebook grid scope
 # --------------------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------------------
+# Bluebook group selector - the list that populates the grid's dropdown
+# --------------------------------------------------------------------------------------
+
+def _group_ids(rows):
+    return {r["id"] for r in rows}
+
+
+def test_admin_sees_sat_groups_in_the_selector(db, world):
+    """REGRESSION: the page originally used GET /users/groups/me, which has no admin
+    branch and returns [], so an admin saw 'You have no SAT groups'."""
+    admin = _user(db, "admin", "bg-admin@t.io")
+    rows = list_bluebook_groups(current_user=admin, db=db)
+    assert world["g_a"].id in _group_ids(rows)
+    assert world["g_b"].id in _group_ids(rows)
+
+
+def test_head_curator_sees_sat_groups_in_the_selector(db, world):
+    """Same regression: /users/groups/me has no head_curator branch either."""
+    hc = _user(db, "head_curator", "bg-hc@t.io")
+    assert world["g_a"].id in _group_ids(list_bluebook_groups(current_user=hc, db=db))
+
+
+def test_head_teacher_sees_only_course_linked_groups_in_the_selector(db, world):
+    """Same regression for head_teacher, and it must still respect course-link scope."""
+    ht = _user(db, "head_teacher", "bg-ht@t.io")
+    assert list_bluebook_groups(current_user=ht, db=db) == []
+
+    course = Course(title="bg Course", description="d", teacher_id=ht.id)
+    db.add(course)
+    db.flush()
+    db.add(CourseHeadTeacher(course_id=course.id, head_teacher_id=ht.id))
+    db.add(CourseGroupAccess(course_id=course.id, group_id=world["g_a"].id,
+                             granted_by=ht.id, is_active=True))
+    db.flush()
+
+    ids = _group_ids(list_bluebook_groups(current_user=ht, db=db))
+    assert world["g_a"].id in ids
+    assert world["g_b"].id not in ids
+
+
+def test_teacher_sees_only_own_groups_in_the_selector(db, world):
+    ids = _group_ids(list_bluebook_groups(current_user=world["t_a"], db=db))
+    assert ids == {world["g_a"].id}
+
+
+def test_nuet_groups_are_excluded_because_bluebook_is_sat_only(db, world):
+    """Bluebook is a College Board SAT product; NUET students do not sit it."""
+    admin = _user(db, "admin", "bg-admin2@t.io")
+    nuet = Group(name="bg NUET squad", is_active=True, is_over=False, program_type="nuet")
+    db.add(nuet)
+    db.flush()
+    assert nuet.id not in _group_ids(list_bluebook_groups(current_user=admin, db=db))
+
+
+def test_general_english_group_named_saturday_is_not_matched_as_sat(db, world):
+    """The name fallback uses a word boundary, so 'Saturday' must not read as 'SAT'."""
+    admin = _user(db, "admin", "bg-admin3@t.io")
+    sat_urday = Group(name="bg Saturday morning club", is_active=True, is_over=False,
+                      program_type="general_english")
+    db.add(sat_urday)
+    db.flush()
+    assert sat_urday.id not in _group_ids(list_bluebook_groups(current_user=admin, db=db))
+
+
+def test_legacy_group_without_program_type_is_matched_by_name(db, world):
+    admin = _user(db, "admin", "bg-admin4@t.io")
+    legacy = Group(name="bg SAT August intake", is_active=True, is_over=False,
+                   program_type="general_english")
+    db.add(legacy)
+    db.flush()
+    assert legacy.id in _group_ids(list_bluebook_groups(current_user=admin, db=db))
+
+
+def test_selector_is_denied_for_students(db, world):
+    student = _user(db, "student", "bg-stu@t.io")
+    with pytest.raises(HTTPException) as exc:
+        list_bluebook_groups(current_user=student, db=db)
+    assert exc.value.status_code == 403
+
 
 def test_teacher_cannot_open_another_groups_bluebook_grid(db, world):
     with pytest.raises(HTTPException) as exc:
