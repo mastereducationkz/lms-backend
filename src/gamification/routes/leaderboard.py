@@ -1151,6 +1151,13 @@ async def get_weekly_lessons_with_hw_status(
                 if event.start_datetime < datetime.combine(join_naive.date(), datetime.min.time()):
                     enrolled = False
 
+            # Whether a real attendance row exists (of ANY status — the map isn't
+            # filtered, so 'cancelled' counts as marked). Lets the grid tell an
+            # unmarked lesson apart from a real ABSENT: an unmarked past lesson
+            # (status defaulted to "missed") renders as "Не отмечено" and drops
+            # out of the % denominator instead of scoring like an absence.
+            marked = att is not None
+
             # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
             hw_statuses = []
@@ -1199,6 +1206,8 @@ async def get_weekly_lessons_with_hw_status(
                 # False = lesson predates the student's join date (see above).
                 # Older clients ignore this and keep the legacy ABSENT behaviour.
                 "enrolled": enrolled,
+                # False = no attendance record yet (unmarked); see `marked` above.
+                "marked": marked,
             }
             
         student_rows.append({

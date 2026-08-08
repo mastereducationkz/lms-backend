@@ -149,3 +149,42 @@ def test_real_attendance_on_pre_join_lesson_survives(db):
     # Real attendance is never hidden — stays enrolled and shows the mark.
     assert lessons["1"]["enrolled"] is True
     assert lessons["1"]["attendance_status"] == "attended"
+
+
+def test_marked_flag_distinguishes_unmarked_from_absent(db):
+    admin = _user(db, "marked_admin@test.local", "admin")
+    teacher = _user(db, "marked_teacher@test.local", "teacher")
+    group = Group(name="GE Marked", program_type="general_english",
+                  teacher_id=teacher.id)
+    db.add(group)
+    db.flush()
+
+    # Three lessons in week 1: unmarked, real absent, cancelled.
+    starts = [datetime(2026, 6, 1, 10, 0, 0),
+              datetime(2026, 6, 3, 10, 0, 0),
+              datetime(2026, 6, 5, 10, 0, 0)]
+    evs = []
+    for i, s in enumerate(starts):
+        e = Event(title=f"l{i+1}", event_type="class", start_datetime=s,
+                  end_datetime=s + timedelta(hours=1), created_by=teacher.id,
+                  is_active=True, is_recurring=False)
+        db.add(e)
+        db.flush()
+        db.add(EventGroup(event_id=e.id, group_id=group.id))
+        evs.append(e)
+
+    student = _user(db, "marked_student@test.local", "student")
+    db.add(GroupStudent(group_id=group.id, student_id=student.id,
+                        created_at=datetime(2026, 5, 1, 0, 0, 0)))
+    # Lesson 1: no record (unmarked). Lesson 2: real absent. Lesson 3: cancelled.
+    db.add(Attendance(event_id=evs[1].id, user_id=student.id, status="absent"))
+    db.add(Attendance(event_id=evs[2].id, user_id=student.id, status="cancelled"))
+    db.flush()
+
+    res = _maybe_run(_weekly_lessons_endpoint()(
+        group.id, week_number=1, current_user=admin, db=db))
+    lessons = _lessons_by_number(res, student.id)
+
+    assert lessons["1"]["marked"] is False   # no record → unmarked
+    assert lessons["2"]["marked"] is True     # real absent → marked
+    assert lessons["3"]["marked"] is True     # cancelled is still a record → marked
