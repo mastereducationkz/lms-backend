@@ -638,9 +638,38 @@ def get_ielts_date_prompt_status(
             "reason": "assignment_zero_submission_required",
         }
 
+    # Do not ask for a date we already hold.
+    #
+    # This check-in only ever looked at the 14-day cadence, so a student who had just
+    # set their date was still told "We do not have your exact IELTS date yet" - directly
+    # contradicting the countdown rendered underneath it, which was showing that date.
+    # An exact future date means there is nothing to ask; changing it is a click away on
+    # the countdown itself. A date that has PASSED is worth re-asking about, because the
+    # student has either sat the exam or rebooked.
+    today = date.today()
+    planned = submission.ielts_planned_test_date
+    has_future_date = planned is not None and planned >= today
+    if has_future_date:
+        return {
+            "is_ielts_student": True,
+            "should_prompt": False,
+            "has_exact_date": True,
+            "planned_test_date": planned.isoformat(),
+            "reason": "exact_date_known",
+        }
+
+    date_has_passed = planned is not None and planned < today
+
     last_prompted = submission.ielts_last_date_prompted_at
     if last_prompted is None:
-        return {"is_ielts_student": True, "should_prompt": True, "days_until_next_prompt": 0}
+        return {
+            "is_ielts_student": True,
+            "should_prompt": True,
+            "days_until_next_prompt": 0,
+            "has_exact_date": planned is not None,
+            "planned_test_date": planned.isoformat() if planned else None,
+            "date_has_passed": date_has_passed,
+        }
 
     now = _align_datetime_kind(last_prompted, _utc_now())
     next_prompt_at = last_prompted + timedelta(days=14)
@@ -650,6 +679,9 @@ def get_ielts_date_prompt_status(
         "is_ielts_student": True,
         "should_prompt": should_prompt,
         "days_until_next_prompt": 0 if should_prompt else remaining_days,
+        "has_exact_date": planned is not None,
+        "planned_test_date": planned.isoformat() if planned else None,
+        "date_has_passed": date_has_passed,
         "last_prompted_at": last_prompted,
         "next_prompt_at": next_prompt_at,
     }
