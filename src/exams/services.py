@@ -4,6 +4,7 @@ Contact resolution and grid assembly both run over whole groups, so every lookup
 is batched. A per-student query would turn the Bluebook grid into an N+1 across every
 row on every render.
 """
+import json
 from collections import defaultdict
 from datetime import date
 from statistics import mean, median
@@ -14,7 +15,12 @@ from sqlalchemy.orm import Session
 from src.assignments.models import Assignment, AssignmentZeroSubmission
 from src.auth.models import UserInDB
 from src.courses.models import Group, GroupStudent
-from src.exams.models import BluebookResult, ExamResult
+from src.exams.models import (
+    BLUEBOOK_MAX_TEST_NUMBER,
+    BLUEBOOK_MIN_TEST_NUMBER,
+    BluebookResult,
+    ExamResult,
+)
 from src.exams.schemas import (
     BluebookCell,
     BluebookColumn,
@@ -200,6 +206,49 @@ def _trend(current: int, previous: Optional[int]) -> tuple[Optional[int], Option
     return 0, "same"
 
 
+def _bluebook_assignments_for_group(db: Session, group_id: int) -> Dict[int, Assignment]:
+    """Map test number -> the assignment that assigned it to this group.
+
+    Bluebook tasks live inside ``multi_task`` content, which is a JSON blob in a Text
+    column, so the test number cannot be filtered in SQL. The LIKE narrows the scan to
+    candidate rows before parsing; a group has tens of assignments, not thousands.
+
+    When the same test is assigned more than once, the LATEST assignment wins, so the
+    grid shows the most recent attempt for that test rather than a stale one.
+    """
+    candidates = (
+        db.query(Assignment)
+        .filter(
+            Assignment.group_id == group_id,
+            Assignment.assignment_type == "multi_task",
+            Assignment.is_active == True,  # noqa: E712
+            Assignment.content.like("%bluebook_task%"),
+        )
+        .all()
+    )
+
+    def _due_key(a: Assignment) -> date:
+        return a.due_date.date() if a.due_date else date.min
+
+    by_test: Dict[int, Assignment] = {}
+    for assignment in sorted(candidates, key=_due_key):
+        try:
+            content = json.loads(assignment.content) if assignment.content else {}
+        except (TypeError, ValueError):
+            continue
+        tasks = content.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict) or task.get("task_type") != "bluebook_task":
+                continue
+            number = (task.get("content") or {}).get("test_number")
+            if isinstance(number, int) and not isinstance(number, bool):
+                if BLUEBOOK_MIN_TEST_NUMBER <= number <= BLUEBOOK_MAX_TEST_NUMBER:
+                    by_test[number] = assignment  # later due date overwrites
+    return by_test
+
+
 def build_bluebook_grid(
     db: Session,
     group: Group,
@@ -207,12 +256,19 @@ def build_bluebook_grid(
     include_official: bool = True,
     cohort_date: Optional[date] = None,
 ) -> BluebookGridOut:
-    """Assemble the students x chronological-tests grid for one group.
+    """Assemble the students x Bluebook-tests grid for one group.
 
-    Columns are one per Bluebook assignment ordered by due date, preceded by the
-    Assignment Zero baseline column when any student in the group has one. That
-    matches the reference sheet, whose first column is "Bluebook 5" dated at the
-    group's start, followed by biweekly "Неделя N" columns.
+    Every Bluebook test 4-11 is always rendered as a column, whether or not it has been
+    assigned, so staff can see coverage at a glance. Each column reports its own state:
+
+    ``assigned``      a Bluebook homework exists for that test in this group
+    ``not_assigned``  no homework has been created for it yet
+
+    and each cell distinguishes a real score from "assigned but not submitted" and from
+    "never assigned". Collapsing those three into an empty cell hides whether the gap is
+    the student's or the teacher's.
+
+    The Assignment Zero baseline ("Bluebook 5") is prepended when any student has one.
     """
     student_rows = (
         db.query(UserInDB)
@@ -225,62 +281,64 @@ def build_bluebook_grid(
 
     results = (
         db.query(BluebookResult)
-        .filter(BluebookResult.student_id.in_(student_ids or [-1]))
+        .filter(BluebookResult.student_id.in_(student_ids))
         .all()
     ) if student_ids else []
 
-    # Bluebook assignments targeted at this group, in column order.
-    assignment_ids = {r.assignment_id for r in results if r.assignment_id}
-    assignments = (
-        db.query(Assignment)
-        .filter(Assignment.id.in_(assignment_ids))
-        .all()
-    ) if assignment_ids else []
+    assignment_by_test = _bluebook_assignments_for_group(db, group.id)
 
-    # Assignment -> test number, resolved once instead of scanning `results` per column.
-    test_number_by_assignment = {
-        r.assignment_id: r.test_number for r in results if r.assignment_id
-    }
-
-    def _due(a: Assignment) -> date:
-        # Assignments with no due date sort last rather than crashing the sort.
-        return a.due_date.date() if a.due_date else date.max
-
-    ordered_assignments = sorted(assignments, key=_due)
-
+    # ---- columns: baseline (if present) then every test 4-11 -----------------------
     columns: List[BluebookColumn] = []
     has_baseline = any(r.assignment_id is None for r in results)
     if has_baseline:
         columns.append(BluebookColumn(
             key="baseline",
-            label="Bluebook 5",
+            label="Bluebook 5 (baseline)",
             test_number=5,
-            # Assignment Zero stores no date for this score. The reference sheet dates
-            # the column at the group's start, so we do the same and mark it a baseline
-            # rather than implying we know the day it was taken.
+            # Assignment Zero records no date for this score; the reference sheet dates
+            # it at the group's start, so we do the same and mark it a baseline rather
+            # than implying we know the day it was taken.
             due_date=group.created_at.date() if group.created_at else None,
             is_baseline=True,
+            is_assigned=True,
         ))
 
-    for a in ordered_assignments:
+    for number in range(BLUEBOOK_MIN_TEST_NUMBER, BLUEBOOK_MAX_TEST_NUMBER + 1):
+        assignment = assignment_by_test.get(number)
         columns.append(BluebookColumn(
-            key=f"a{a.id}",
-            label=a.title or f"Bluebook",
-            test_number=test_number_by_assignment.get(a.id),
-            due_date=a.due_date.date() if a.due_date else None,
-            week_number=a.lesson_number,
+            key=f"t{number}",
+            label=f"Bluebook #{number}",
+            test_number=number,
+            assignment_id=assignment.id if assignment else None,
+            due_date=assignment.due_date.date() if (assignment and assignment.due_date) else None,
+            week_number=assignment.lesson_number if assignment else None,
+            is_baseline=False,
+            is_assigned=assignment is not None,
         ))
 
+    # ---- index results by (student, column) ----------------------------------------
+    assignment_id_to_test = {a.id: n for n, a in assignment_by_test.items()}
     by_student: Dict[int, Dict[str, BluebookResult]] = defaultdict(dict)
     for r in results:
-        key = "baseline" if r.assignment_id is None else f"a{r.assignment_id}"
-        by_student[r.student_id][key] = r
+        if r.assignment_id is None:
+            key = "baseline"
+        else:
+            # Prefer the column the assignment maps to; fall back to the number stored
+            # on the row so a result still lands somewhere if its assignment was
+            # deleted or edited to a different test.
+            number = assignment_id_to_test.get(r.assignment_id, r.test_number)
+            key = f"t{number}"
+        # A later submission for the same cell wins.
+        existing = by_student[r.student_id].get(key)
+        if existing is None or (r.updated_at or r.created_at or 0) >= (existing.updated_at or existing.created_at or 0):
+            by_student[r.student_id][key] = r
 
     official = (
         latest_results_by_student(db, student_ids, "sat", cohort_date=cohort_date)
         if include_official and student_ids else {}
     )
 
+    # ---- rows -----------------------------------------------------------------------
     rows: List[BluebookStudentRow] = []
     for student in student_rows:
         cells: Dict[str, BluebookCell] = {}
@@ -291,9 +349,14 @@ def build_bluebook_grid(
         for col in columns:
             r = by_student.get(student.id, {}).get(col.key)
             if r is None:
+                # Distinguish "we never asked" from "asked and got nothing".
+                cells[col.key] = BluebookCell(
+                    state="not_assigned" if not col.is_assigned else "not_submitted",
+                )
                 continue
             delta, trend = _trend(r.total_score, previous_total)
             cells[col.key] = BluebookCell(
+                state="submitted",
                 verbal_score=r.verbal_score,
                 math_score=r.math_score,
                 total_score=r.total_score,
@@ -309,26 +372,39 @@ def build_bluebook_grid(
                 baseline_total = r.total_score
 
         latest_total = totals[-1] if totals else None
+        assigned_non_baseline = [c for c in columns if c.is_assigned and not c.is_baseline]
+        submitted_non_baseline = sum(
+            1 for c in assigned_non_baseline if cells[c.key].state == "submitted"
+        )
+        official_row = official.get(student.id)
+
         rows.append(BluebookStudentRow(
             student_id=student.id,
             full_name=(student.official_full_name or student.name or "").strip(),
             display_id=student.student_id,
+            email=student.email,
             cells={k: v.model_dump() for k, v in cells.items()},
+            submitted_count=submitted_non_baseline,
+            assigned_count=len(assigned_non_baseline),
             best_total=max(totals) if totals else None,
             latest_total=latest_total,
+            average_total=round(mean(totals), 1) if totals else None,
+            baseline_total=baseline_total,
             improvement_from_baseline=(
                 latest_total - baseline_total
                 if latest_total is not None and baseline_total is not None else None
             ),
             official_result=(
-                ExamResultOut.model_validate(_with_proof_flag(official[student.id]))
-                if student.id in official else None
+                ExamResultOut.model_validate(_with_proof_flag(official_row))
+                if official_row else None
             ),
         ))
 
     column_stats = _column_statistics(columns, rows, expected_count=len(student_rows))
-
-    teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
+    teacher = (
+        db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first()
+        if group.teacher_id else None
+    )
 
     return BluebookGridOut(
         group_id=group.id,
@@ -339,6 +415,48 @@ def build_bluebook_grid(
         columns=columns,
         rows=rows,
         column_stats={k: v.model_dump() for k, v in column_stats.items()},
+        group_stats=_group_statistics(columns, rows).model_dump(),
+    )
+
+
+def _group_statistics(
+    columns: Sequence[BluebookColumn],
+    rows: Sequence[BluebookStudentRow],
+) -> "BluebookGroupStats":
+    """Whole-group aggregates.
+
+    Completion counts only assigned, non-baseline columns: the Assignment Zero baseline
+    is diagnostic data, not homework, and tests nobody was asked to sit must not be
+    scored against the group.
+    """
+    from src.exams.schemas import BluebookGroupStats
+
+    assigned = [c for c in columns if c.is_assigned and not c.is_baseline]
+    expected = len(assigned) * len(rows)
+    submitted = sum(r.submitted_count for r in rows)
+
+    latest_totals = [r.latest_total for r in rows if r.latest_total is not None]
+    best_totals = [r.best_total for r in rows if r.best_total is not None]
+    improvements = [
+        r.improvement_from_baseline for r in rows if r.improvement_from_baseline is not None
+    ]
+
+    return BluebookGroupStats(
+        student_count=len(rows),
+        tests_assigned=len(assigned),
+        tests_available=sum(1 for c in columns if not c.is_baseline),
+        submitted_count=submitted,
+        expected_count=expected,
+        completion_rate=round(submitted / expected, 4) if expected else 0.0,
+        average_latest_total=round(mean(latest_totals), 1) if latest_totals else None,
+        median_latest_total=round(median(latest_totals), 1) if latest_totals else None,
+        average_best_total=round(mean(best_totals), 1) if best_totals else None,
+        highest_total=max(best_totals) if best_totals else None,
+        lowest_latest_total=min(latest_totals) if latest_totals else None,
+        average_improvement=round(mean(improvements), 1) if improvements else None,
+        improved_count=sum(1 for i in improvements if i > 0),
+        declined_count=sum(1 for i in improvements if i < 0),
+        students_with_no_results=sum(1 for r in rows if r.latest_total is None),
     )
 
 
@@ -370,19 +488,24 @@ def _column_statistics(
         maths: List[int] = []
         for row in rows:
             cell = row.cells.get(col.key)
-            if not cell:
+            # Only cells with a real submission contribute to averages; a
+            # not_submitted / not_assigned cell carries no scores.
+            if not cell or cell.get("state") != "submitted":
                 continue
             totals.append(cell["total_score"])
             verbals.append(cell["verbal_score"])
             maths.append(cell["math_score"])
 
         submitted = len(totals)
+        # An unassigned test has no expectation attached to it, so it is not scored
+        # against the group's completion.
+        counts_toward_completion = col.is_assigned and not col.is_baseline
         stats[col.key] = BluebookColumnStats(
             submitted_count=submitted,
-            expected_count=0 if col.is_baseline else expected_count,
+            expected_count=expected_count if counts_toward_completion else 0,
             completion_rate=(
-                0.0 if col.is_baseline or expected_count == 0
-                else round(submitted / expected_count, 4)
+                round(submitted / expected_count, 4)
+                if counts_toward_completion and expected_count else 0.0
             ),
             mean_total=round(mean(totals), 1) if totals else None,
             median_total=round(median(totals), 1) if totals else None,

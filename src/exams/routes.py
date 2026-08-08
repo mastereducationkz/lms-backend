@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from src.assignments.exam_dates import (
     SAT_DATES_SOURCE_URL,
@@ -440,6 +440,10 @@ def update_exam_result(
 
 @router.get("/bluebook/groups")
 def list_bluebook_groups(
+    search: Optional[str] = Query(
+        None,
+        description="Free text matched against group name AND teacher name.",
+    ),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
@@ -457,24 +461,37 @@ def list_bluebook_groups(
     _require(current_user, _READ_ROLES)
 
     scope = visible_group_ids(current_user, db)
-    query = db.query(Group).filter(
-        Group.is_active == True,  # noqa: E712
-        Group.is_over == False,  # noqa: E712
-        or_(
-            func.lower(Group.program_type) == "sat",
-            Group.name.op("~*")(r"\ysat\y"),
-        ),
+    # Left-join the teacher so a search can match on their name in the same query
+    # rather than filtering in Python after the fact.
+    teacher = aliased(UserInDB)
+    query = (
+        db.query(Group, teacher)
+        .outerjoin(teacher, teacher.id == Group.teacher_id)
+        .filter(
+            Group.is_active == True,  # noqa: E712
+            Group.is_over == False,  # noqa: E712
+            or_(
+                func.lower(Group.program_type) == "sat",
+                Group.name.op("~*")(r"\ysat\y"),
+            ),
+        )
     )
     if scope is not UNRESTRICTED:
         if not scope:
             return []
         query = query.filter(Group.id.in_(scope))
 
-    groups = query.order_by(Group.name).all()
-    teacher_ids = {g.teacher_id for g in groups if g.teacher_id}
-    teachers = {
-        t.id: t for t in db.query(UserInDB).filter(UserInDB.id.in_(teacher_ids)).all()
-    } if teacher_ids else {}
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        query = query.filter(or_(
+            Group.name.ilike(like),
+            teacher.name.ilike(like),
+            teacher.official_full_name.ilike(like),
+        ))
+
+    pairs = query.order_by(Group.name).all()
+    groups = [g for g, _ in pairs]
+    teachers = {g.id: t for g, t in pairs if t is not None}
 
     return [
         {
@@ -483,8 +500,8 @@ def list_bluebook_groups(
             "program_type": g.program_type,
             "teacher_id": g.teacher_id,
             "teacher_name": (
-                (teachers[g.teacher_id].official_full_name or teachers[g.teacher_id].name)
-                if g.teacher_id in teachers else None
+                (teachers[g.id].official_full_name or teachers[g.id].name)
+                if g.id in teachers else None
             ),
         }
         for g in groups

@@ -158,11 +158,21 @@ def build_bluebook_grid_workbook(grid: BluebookGridOut) -> BytesIO:
         _text_cell(ws, idx, 2, row.display_id or "")
         col = 3
         for column in grid.columns:
-            cell = row.cells.get(column.key)
-            if cell:
+            cell = row.cells.get(column.key) or {}
+            state = cell.get("state")
+            if state == "submitted":
                 ws.cell(row=idx, column=col, value=cell["verbal_score"])
                 ws.cell(row=idx, column=col + 1, value=cell["math_score"])
                 ws.cell(row=idx, column=col + 2, value=cell["total_score"])
+            else:
+                # Spell the reason out rather than leaving a blank: a reader cannot
+                # tell "did not submit" from "was never assigned" otherwise.
+                note = "not assigned" if state == "not_assigned" else "not submitted"
+                merged = ws.cell(row=idx, column=col, value=note)
+                merged.alignment = Alignment(horizontal="center")
+                merged.font = Font(italic=True, color="FF808080")
+                ws.merge_cells(start_row=idx, start_column=col,
+                               end_row=idx, end_column=col + 2)
             col += 3
         if row.official_result:
             ws.cell(row=idx, column=official_col, value=float(row.official_result.total_score))

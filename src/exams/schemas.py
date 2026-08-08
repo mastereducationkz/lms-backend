@@ -238,14 +238,20 @@ class BluebookResultInput(BaseModel):
 
 
 class BluebookCell(BaseModel):
-    """One Verbal | Math | Score cell group in the grid."""
+    """One Verbal | Math | Score cell group in the grid.
 
-    verbal_score: int
-    math_score: int
-    total_score: int
+    ``state`` distinguishes the three reasons a cell can be empty. Collapsing them into
+    a blank hides whether the gap is the student's (assigned, not submitted) or the
+    teacher's (never assigned).
+    """
+
+    state: Literal["submitted", "not_submitted", "not_assigned"] = "not_assigned"
+    verbal_score: Optional[int] = None
+    math_score: Optional[int] = None
+    total_score: Optional[int] = None
     taken_at: Optional[date] = None
     screenshot_url: Optional[str] = None
-    source: str = "homework"
+    source: Optional[str] = None
     # Change vs the previous non-empty column for this student: up | down | same.
     # Paired with an arrow in the UI so the signal is never colour-only.
     delta: Optional[int] = None
@@ -253,14 +259,37 @@ class BluebookCell(BaseModel):
 
 
 class BluebookColumn(BaseModel):
-    """A column group: one Bluebook assignment, ordered by due date."""
+    """One Bluebook test. Tests 4-11 are always present, assigned or not."""
 
     key: str
     label: str
     test_number: Optional[int] = None
+    assignment_id: Optional[int] = None
     due_date: Optional[date] = None
     week_number: Optional[int] = None
     is_baseline: bool = False
+    # False when no Bluebook homework exists for this test in this group.
+    is_assigned: bool = False
+
+
+class BluebookGroupStats(BaseModel):
+    """Whole-group aggregates shown above the grid."""
+
+    student_count: int
+    tests_assigned: int
+    tests_available: int
+    submitted_count: int
+    expected_count: int
+    completion_rate: float
+    average_latest_total: Optional[float] = None
+    median_latest_total: Optional[float] = None
+    average_best_total: Optional[float] = None
+    highest_total: Optional[int] = None
+    lowest_latest_total: Optional[int] = None
+    average_improvement: Optional[float] = None
+    improved_count: int = 0
+    declined_count: int = 0
+    students_with_no_results: int = 0
 
 
 class BluebookColumnStats(BaseModel):
@@ -277,9 +306,16 @@ class BluebookStudentRow(BaseModel):
     student_id: int
     full_name: str
     display_id: Optional[str] = None
+    email: Optional[str] = None
     cells: dict
+    # Per-student statistics. submitted/assigned exclude the Assignment Zero baseline,
+    # which is diagnostic data rather than homework.
+    submitted_count: int = 0
+    assigned_count: int = 0
     best_total: Optional[int] = None
     latest_total: Optional[int] = None
+    average_total: Optional[float] = None
+    baseline_total: Optional[int] = None
     improvement_from_baseline: Optional[int] = None
     official_result: Optional[ExamResultOut] = None
 
@@ -293,3 +329,4 @@ class BluebookGridOut(BaseModel):
     columns: List[BluebookColumn]
     rows: List[BluebookStudentRow]
     column_stats: dict
+    group_stats: dict

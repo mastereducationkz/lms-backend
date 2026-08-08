@@ -360,7 +360,7 @@ def test_admin_sees_sat_groups_in_the_selector(db, world):
     """REGRESSION: the page originally used GET /users/groups/me, which has no admin
     branch and returns [], so an admin saw 'You have no SAT groups'."""
     admin = _user(db, "admin", "bg-admin@t.io")
-    rows = list_bluebook_groups(current_user=admin, db=db)
+    rows = list_bluebook_groups(search=None, current_user=admin, db=db)
     assert world["g_a"].id in _group_ids(rows)
     assert world["g_b"].id in _group_ids(rows)
 
@@ -368,13 +368,13 @@ def test_admin_sees_sat_groups_in_the_selector(db, world):
 def test_head_curator_sees_sat_groups_in_the_selector(db, world):
     """Same regression: /users/groups/me has no head_curator branch either."""
     hc = _user(db, "head_curator", "bg-hc@t.io")
-    assert world["g_a"].id in _group_ids(list_bluebook_groups(current_user=hc, db=db))
+    assert world["g_a"].id in _group_ids(list_bluebook_groups(search=None, current_user=hc, db=db))
 
 
 def test_head_teacher_sees_only_course_linked_groups_in_the_selector(db, world):
     """Same regression for head_teacher, and it must still respect course-link scope."""
     ht = _user(db, "head_teacher", "bg-ht@t.io")
-    assert list_bluebook_groups(current_user=ht, db=db) == []
+    assert list_bluebook_groups(search=None, current_user=ht, db=db) == []
 
     course = Course(title="bg Course", description="d", teacher_id=ht.id)
     db.add(course)
@@ -384,13 +384,13 @@ def test_head_teacher_sees_only_course_linked_groups_in_the_selector(db, world):
                              granted_by=ht.id, is_active=True))
     db.flush()
 
-    ids = _group_ids(list_bluebook_groups(current_user=ht, db=db))
+    ids = _group_ids(list_bluebook_groups(search=None, current_user=ht, db=db))
     assert world["g_a"].id in ids
     assert world["g_b"].id not in ids
 
 
 def test_teacher_sees_only_own_groups_in_the_selector(db, world):
-    ids = _group_ids(list_bluebook_groups(current_user=world["t_a"], db=db))
+    ids = _group_ids(list_bluebook_groups(search=None, current_user=world["t_a"], db=db))
     assert ids == {world["g_a"].id}
 
 
@@ -400,7 +400,7 @@ def test_nuet_groups_are_excluded_because_bluebook_is_sat_only(db, world):
     nuet = Group(name="bg NUET squad", is_active=True, is_over=False, program_type="nuet")
     db.add(nuet)
     db.flush()
-    assert nuet.id not in _group_ids(list_bluebook_groups(current_user=admin, db=db))
+    assert nuet.id not in _group_ids(list_bluebook_groups(search=None, current_user=admin, db=db))
 
 
 def test_general_english_group_named_saturday_is_not_matched_as_sat(db, world):
@@ -410,7 +410,7 @@ def test_general_english_group_named_saturday_is_not_matched_as_sat(db, world):
                       program_type="general_english")
     db.add(sat_urday)
     db.flush()
-    assert sat_urday.id not in _group_ids(list_bluebook_groups(current_user=admin, db=db))
+    assert sat_urday.id not in _group_ids(list_bluebook_groups(search=None, current_user=admin, db=db))
 
 
 def test_legacy_group_without_program_type_is_matched_by_name(db, world):
@@ -419,13 +419,13 @@ def test_legacy_group_without_program_type_is_matched_by_name(db, world):
                    program_type="general_english")
     db.add(legacy)
     db.flush()
-    assert legacy.id in _group_ids(list_bluebook_groups(current_user=admin, db=db))
+    assert legacy.id in _group_ids(list_bluebook_groups(search=None, current_user=admin, db=db))
 
 
 def test_selector_is_denied_for_students(db, world):
     student = _user(db, "student", "bg-stu@t.io")
     with pytest.raises(HTTPException) as exc:
-        list_bluebook_groups(current_user=student, db=db)
+        list_bluebook_groups(search=None, current_user=student, db=db)
     assert exc.value.status_code == 403
 
 
@@ -533,3 +533,35 @@ def test_sat_dates_include_registration_deadlines(db, world):
     aug = next(d for d in payload["dates"] if d["test_date"] == "2026-08-22")
     assert aug["registration_deadline"] == "2026-08-07"
     assert aug["change_deadline"] == "2026-08-11"
+
+
+def test_group_search_matches_group_name(db, world):
+    admin = _user(db, "admin", "bg-search1@t.io")
+    rows = list_bluebook_groups(search="Group A", current_user=admin, db=db)
+    ids = _group_ids(rows)
+    assert world["g_a"].id in ids
+    assert world["g_b"].id not in ids
+
+
+def test_group_search_matches_teacher_name(db, world):
+    """Searching by teacher must work, not just by group name."""
+    admin = _user(db, "admin", "bg-search2@t.io")
+    teacher = db.query(UserInDB).filter(UserInDB.id == world["g_a"].teacher_id).one()
+    teacher.name = "Azamat Abduraimov"
+    db.flush()
+
+    ids = _group_ids(list_bluebook_groups(search="Abduraimov", current_user=admin, db=db))
+    assert world["g_a"].id in ids
+    assert world["g_b"].id not in ids
+
+
+def test_group_search_is_case_insensitive(db, world):
+    admin = _user(db, "admin", "bg-search3@t.io")
+    assert world["g_a"].id in _group_ids(
+        list_bluebook_groups(search="gROUP a", current_user=admin, db=db))
+
+
+def test_group_search_still_respects_row_scope(db, world):
+    """Search must never widen scope - a teacher searching for another group gets none."""
+    rows = list_bluebook_groups(search="Group B", current_user=world["t_a"], db=db)
+    assert rows == []
