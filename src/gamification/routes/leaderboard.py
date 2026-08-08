@@ -795,7 +795,16 @@ async def get_weekly_lessons_with_hw_status(
     # 6. Get Students
     group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group_id).all()
     student_ids = [gs.student_id for gs in group_students]
-    
+
+    # Effective join date per student. The CRM writes the manager-picked
+    # "joined_from" into GroupStudent.created_at and backfills attendance only
+    # from that date forward, so lessons that ended BEFORE it have no record and
+    # would otherwise render as ABSENT and drag the student's % down. We flag such
+    # lessons `enrolled=False` (see the per-lesson loop below). A NULL created_at
+    # (legacy / external row) is treated as "always a member", matching the
+    # dashboard's missing-attendance reminder.
+    join_by_student = {gs.student_id: gs.created_at for gs in group_students}
+
     if not student_ids:
         return {
             "week_number": week_number, 
@@ -1128,7 +1137,20 @@ async def get_weekly_lessons_with_hw_status(
             # If nothing, assumption: missed.
             att = attendance_map.get((student.id, event.id))
             status = att["status"] if att else "missed"
-            
+
+            # A lesson that ended before the student's effective join date isn't
+            # theirs — flag it so the grid renders it blank and drops it from the
+            # % denominator. Never override a real attendance record if one exists
+            # (e.g. a trial lesson they actually attended before joining). The
+            # date-midnight boundary mirrors the CRM backfill (start >= midnight of
+            # the join date), so a lesson on the join day counts as enrolled.
+            enrolled = True
+            join_dt = join_by_student.get(student.id)
+            if att is None and join_dt is not None:
+                join_naive = join_dt.replace(tzinfo=None) if join_dt.tzinfo else join_dt
+                if event.start_datetime < datetime.combine(join_naive.date(), datetime.min.time()):
+                    enrolled = False
+
             # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
             hw_statuses = []
@@ -1173,7 +1195,10 @@ async def get_weekly_lessons_with_hw_status(
                 "attendance_status": status,
                 "activity_score": att["activity_score"] if att else None,
                 "homework_statuses": hw_statuses,
-                "homework_status": hw_status
+                "homework_status": hw_status,
+                # False = lesson predates the student's join date (see above).
+                # Older clients ignore this and keep the legacy ABSENT behaviour.
+                "enrolled": enrolled,
             }
             
         student_rows.append({
