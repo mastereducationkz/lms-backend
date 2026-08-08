@@ -31,10 +31,10 @@ def test_dangerous_sigils_are_neutralised(payload):
 
 
 @pytest.mark.parametrize("payload", [
-    "Alimkhan Yergebayev",
-    "Аманқос Айдана",
+    "Alikhan Nurlanov",
+    "Айгерім Жақсылық",   # non-Latin names must survive unchanged
     "May 9 - SAT August",
-    "+77071064065",          # a phone number is not a formula once guarded
+    "+70000000000",          # a phone number is not a formula once guarded
     "student@example.com",
 ])
 def test_ordinary_values_survive_recognisably(payload):
@@ -44,14 +44,14 @@ def test_ordinary_values_survive_recognisably(payload):
 
 
 def test_plain_names_are_not_modified():
-    assert sanitize_spreadsheet_value("Alimkhan Yergebayev") == "Alimkhan Yergebayev"
+    assert sanitize_spreadsheet_value("Alikhan Nurlanov") == "Alikhan Nurlanov"
 
 
 def test_leading_plus_phone_is_guarded_but_readable():
     """A leading + is a formula sigil in Excel, so it must be guarded - but the
     number must remain legible, not mangled or stripped."""
-    out = sanitize_spreadsheet_value("+77071064065")
-    assert out == "'+77071064065"
+    out = sanitize_spreadsheet_value("+70000000000")
+    assert out == "'+70000000000"
 
 
 def test_none_passes_through():

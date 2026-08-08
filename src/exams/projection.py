@@ -78,12 +78,21 @@ def project_bluebook_answers(
             if not isinstance(answer, dict):
                 continue
 
-            verbal = _coerce_section(answer.get("verbal_score"))
-            math = _coerce_section(answer.get("math_score"))
-            if verbal is None or math is None:
-                # Incomplete or invalid: leave the cell empty rather than storing a
-                # half-row that would distort the group's averages.
+            # Scores come ONLY from the official College Board PDF, re-parsed here from
+            # the stored file. The client sends a storage key, never a score, so a
+            # tampered submission payload cannot change what is recorded.
+            report_key = answer.get("report_key")
+            if not isinstance(report_key, str) or not report_key:
+                # No official report: nothing to record. Manual entry is no longer
+                # accepted for Bluebook.
                 continue
+
+            parsed = _parse_stored_report(report_key)
+            if parsed is None:
+                continue
+
+            verbal = parsed.verbal_score
+            math = parsed.math_score
 
             task_content = task.get("content") or {}
             test_number = task_content.get("test_number")
@@ -91,9 +100,16 @@ def project_bluebook_answers(
                 continue
             if not (BLUEBOOK_MIN_TEST_NUMBER <= test_number <= BLUEBOOK_MAX_TEST_NUMBER):
                 continue
+            # The report must be for the test that was actually assigned.
+            if parsed.test_number != test_number:
+                logger.warning(
+                    "Bluebook report is for test %s but assignment %s asks for %s; skipping",
+                    parsed.test_number, assignment.id, test_number,
+                )
+                continue
 
             screenshot_url = _first_file_url(answer)
-            taken_at = _parse_date(answer.get("taken_at"))
+            taken_at = parsed.report_date or _parse_date(answer.get("taken_at"))
 
             existing = (
                 db.query(BluebookResult)
@@ -123,12 +139,44 @@ def project_bluebook_answers(
             existing.taken_at = taken_at or (
                 assignment.due_date.date() if assignment.due_date else None
             )
+            # Provenance: which file the scores came from, and whose name is on it.
+            existing.report_url = report_key
+            existing.report_student_name = parsed.student_name
+            existing.report_date = parsed.report_date
+            existing.report_name_matches = _name_matches(parsed.student_name, submission)
             written += 1
     except Exception:  # pragma: no cover - defensive
         logger.exception("Bluebook projection failed for submission %s",
                          getattr(submission, "id", None))
         return 0
     return written
+
+
+def _parse_stored_report(report_key: str):
+    """Re-parse the stored PDF. Returns None if it is missing or unreadable."""
+    from src.exams.bluebook_pdf import BluebookReportError, parse_report_pdf
+    from src.services import storage_service
+
+    data = storage_service.read(report_key)
+    if not data:
+        logger.warning("Bluebook report missing from storage: %s", report_key)
+        return None
+    try:
+        return parse_report_pdf(data)
+    except BluebookReportError as exc:
+        logger.warning("Stored Bluebook report failed to re-parse (%s): %s", report_key, exc)
+        return None
+
+
+def _name_matches(pdf_name: Optional[str], submission) -> Optional[bool]:
+    """Flag, never block - see bluebook_pdf.names_are_similar."""
+    from src.exams.bluebook_pdf import names_are_similar
+
+    user = getattr(submission, "user", None)
+    account_name = (getattr(user, "official_full_name", None) or getattr(user, "name", None)) if user else None
+    if not pdf_name or not account_name:
+        return None
+    return names_are_similar(pdf_name, account_name)
 
 
 def _first_file_url(answer: Dict[str, Any]) -> Optional[str]:

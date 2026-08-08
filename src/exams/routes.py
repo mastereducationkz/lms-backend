@@ -18,6 +18,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, aliased
 
@@ -32,7 +33,8 @@ from src.assignments.models import AssignmentZeroSubmission
 from src.auth.models import UserInDB
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
-from src.exams.models import ExamResult
+from src.exams.bluebook_pdf import BluebookReportError, names_are_similar, parse_report_pdf
+from src.exams.models import BluebookResult, ExamResult
 from src.exams.schemas import (
     ExamResultCreate,
     ExamResultOut,
@@ -47,6 +49,11 @@ from src.services import storage_service
 from src.utils.scope import UNRESTRICTED, can_view_group, visible_group_ids
 
 router = APIRouter()
+
+# Testimonials live in their own module but mount under the same /exams prefix, so the
+# whole exam-results workflow - results, evidence and marketing material - is one API.
+from src.exams.testimonials import router as _testimonials_router  # noqa: E402
+router.include_router(_testimonials_router)
 
 # Who may READ exam data, subject to row scope.
 _READ_ROLES = {"teacher", "curator", "head_teacher", "head_curator", "admin"}
@@ -686,6 +693,124 @@ def update_planned_date(
         if row.student.student_id == payload.student_id:
             return row
     raise HTTPException(status_code=404, detail="Student not found after update")
+
+
+# --------------------------------------------------------------------------------------
+# Bluebook: official PDF report
+# --------------------------------------------------------------------------------------
+
+@router.post("/bluebook/parse-report")
+async def parse_bluebook_report(
+    file: UploadFile = File(...),
+    expected_test_number: Optional[int] = Query(
+        None, description="The test number the homework asked for, if known."
+    ),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Validate and read a College Board Bluebook practice score report.
+
+    Students submit the official PDF; the scores come from the parse, never from
+    anything typed into the form. The PDF is stored under the private
+    ``bluebook_report/`` prefix and its key returned, so the submission references the
+    file rather than carrying scores the client could alter. The submit handler
+    RE-PARSES that stored file, so even a tampered submission payload cannot change a
+    recorded score.
+
+    Parsing is pure regex over the PDF's text layer - deterministic, no AI. A report
+    that cannot be read with certainty is refused rather than guessed at.
+    """
+    data = await file.read()
+    try:
+        report = parse_report_pdf(data)
+    except BluebookReportError as exc:
+        # The parser's messages are written for students; pass them through as-is.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if expected_test_number is not None and report.test_number != expected_test_number:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This report is for SAT Practice {report.test_number}, but the homework "
+                f"asks for Bluebook Test #{expected_test_number}. Upload the report for "
+                f"the assigned test."
+            ),
+        )
+
+    name_matches = names_are_similar(
+        report.student_name, current_user.official_full_name or current_user.name
+    )
+
+    key = f"bluebook_report/{current_user.id}_{uuid.uuid4().hex}.pdf"
+    storage_service.save(key, data, content_type="application/pdf")
+
+    return {
+        "report_key": storage_service.stored_path(key),
+        "test_number": report.test_number,
+        "verbal_score": report.verbal_score,
+        "math_score": report.math_score,
+        "total_score": report.total_score,
+        "report_date": report.report_date.isoformat() if report.report_date else None,
+        "student_name": report.student_name,
+        # Surfaced so staff can spot a report submitted on someone else's behalf. It
+        # never blocks: Latin/Cyrillic spelling differences are routine here.
+        "name_matches": name_matches,
+    }
+
+
+class BluebookOverride(BaseModel):
+    """Staff correction of a parsed Bluebook score."""
+
+    verbal_score: int
+    math_score: int
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+@router.patch("/bluebook/results/{result_id}")
+def override_bluebook_result(
+    result_id: int,
+    payload: BluebookOverride,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Correct a parsed Bluebook score.
+
+    Students cannot edit a parsed score at all, so this is the escape hatch for a
+    genuine parse failure. It records who changed it, when, and why - without that the
+    override would be indistinguishable from the parsed value it replaced.
+    """
+    _require(current_user, {"teacher", "curator", "head_curator", "head_teacher", "admin"})
+
+    row = db.query(BluebookResult).filter(BluebookResult.id == result_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    if row.group_id is not None and not can_view_group(current_user, db, row.group_id):
+        raise HTTPException(status_code=403, detail="Access denied for this group")
+
+    for label, value in (("verbal_score", payload.verbal_score), ("math_score", payload.math_score)):
+        if not (200 <= value <= 800) or value % 10 != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} must be between 200 and 800 in steps of 10.",
+            )
+
+    row.verbal_score = payload.verbal_score
+    row.math_score = payload.math_score
+    # Always derived, exactly as on the report.
+    row.total_score = payload.verbal_score + payload.math_score
+    row.overridden_by = current_user.id
+    row.overridden_at = datetime.now(timezone.utc)
+    row.override_reason = payload.reason
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": row.id,
+        "verbal_score": row.verbal_score,
+        "math_score": row.math_score,
+        "total_score": row.total_score,
+        "overridden_at": row.overridden_at.isoformat() if row.overridden_at else None,
+        "override_reason": row.override_reason,
+    }
 
 
 # --------------------------------------------------------------------------------------

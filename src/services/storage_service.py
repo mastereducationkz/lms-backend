@@ -50,7 +50,7 @@ _LOCAL_ROOT = Path("uploads")
 # exam_proof holds College Board / IELTS score reports - a student's name, photo-grade
 # identity data and their result. It must never fall into the public-URL class the way
 # assignment_zero screenshots do, where the only protection is an unguessable filename.
-PRIVATE_PREFIXES = ("courses", "materials", "step_attachments", "sat_images", "question_media", "steps", "videos", "exam_proof")
+PRIVATE_PREFIXES = ("courses", "materials", "step_attachments", "sat_images", "question_media", "steps", "videos", "exam_proof", "testimonial_media", "bluebook_report")
 
 # Content types for streamed HLS assets (mimetypes doesn't know .m3u8/.ts/.m4s).
 _HLS_CONTENT_TYPES = {
@@ -168,6 +168,28 @@ def url_for(key: str) -> str:
         Params={"Bucket": AWS_S3_BUCKET, "Key": _s3_key(nkey)},
         ExpiresIn=ttl,
     )
+
+
+def read(key: str) -> Optional[bytes]:
+    """Read an object's full bytes, whichever backend is active.
+
+    Used where the server must re-verify a stored file rather than trust what the
+    client said about it (see the Bluebook report re-parse). Returns None when the
+    object is missing rather than raising, so callers can degrade instead of 500ing.
+    """
+    nkey = _norm_key(key)
+    if use_s3():
+        try:
+            obj = _client().get_object(Bucket=AWS_S3_BUCKET, Key=_s3_key(nkey))
+            return obj["Body"].read()
+        except Exception as e:
+            logger.warning("S3 read failed for %s: %s", nkey, e)
+            return None
+    p = _LOCAL_ROOT / nkey
+    try:
+        return p.read_bytes()
+    except (FileNotFoundError, OSError):
+        return None
 
 
 def local_path(key: str) -> Optional[Path]:

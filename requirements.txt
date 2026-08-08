@@ -85,3 +85,6 @@ wsproto==1.2.0
 # Self-hosted video ingest (YouTube -> HLS). Unpinned floor on purpose: yt-dlp needs
 # frequent updates as YouTube changes; bump via image rebuild when downloads break.
 yt-dlp>=2024.10.7
+# Deterministic parsing of College Board Bluebook practice score reports
+# (src/exams/bluebook_pdf.py). Text extraction only - no OCR, no AI.
+pypdf==6.15.0

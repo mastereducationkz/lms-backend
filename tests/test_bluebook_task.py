@@ -5,6 +5,7 @@ and runs without Postgres, which matters because a third of this suite skips sil
 when no database is reachable.
 """
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -165,9 +166,37 @@ def _project(db, scenario, answer):
     )
 
 
-def test_projection_writes_a_row_with_derived_total(db, scenario):
+def _stub_report(monkeypatch, *, verbal, math, test_number=7, report_date=None,
+                 student_name="Test Student"):
+    """Stand in for the stored-PDF re-parse.
+
+    Bluebook scores now come only from the official College Board report, which the
+    server re-parses from storage. These tests exercise the projection's behaviour, not
+    pypdf, so the parse result is stubbed; the parser itself is covered exhaustively in
+    tests/test_bluebook_pdf.py against real captured reports.
+    """
+    from src.exams import projection as proj
+
+    class _Parsed:
+        pass
+
+    _Parsed.test_number = test_number
+    _Parsed.verbal_score = verbal
+    _Parsed.math_score = math
+    _Parsed.total_score = verbal + math
+    _Parsed.report_date = report_date
+    _Parsed.student_name = student_name
+
+    monkeypatch.setattr(proj, "_parse_stored_report", lambda key: _Parsed())
+
+
+REPORT_KEY = "/uploads/bluebook_report/report.pdf"
+
+
+def test_projection_writes_a_row_from_the_official_report(db, scenario, monkeypatch):
     from src.exams.models import BluebookResult
-    assert _project(db, scenario, {"verbal_score": 640, "math_score": 780}) == 1
+    _stub_report(monkeypatch, verbal=640, math=780)
+    assert _project(db, scenario, {"report_key": REPORT_KEY}) == 1
     db.flush()
 
     row = db.query(BluebookResult).filter(
@@ -177,39 +206,57 @@ def test_projection_writes_a_row_with_derived_total(db, scenario):
     assert row.total_score == 1420          # matches the reference sheet
     assert row.group_id == scenario["group"].id
     assert row.source == "homework"
+    assert row.report_url == REPORT_KEY
 
 
-def test_projection_ignores_a_client_supplied_total(db, scenario):
+def test_projection_derives_the_total_and_ignores_any_client_total(db, scenario, monkeypatch):
     from src.exams.models import BluebookResult
-    _project(db, scenario, {"verbal_score": 600, "math_score": 600, "total_score": 9999})
+    _stub_report(monkeypatch, verbal=600, math=600)
+    _project(db, scenario, {"report_key": REPORT_KEY, "total_score": 9999})
     db.flush()
     row = db.query(BluebookResult).filter(
         BluebookResult.student_id == scenario["student"].id).one()
     assert row.total_score == 1200
 
 
-def test_projection_dates_the_row_from_the_assignment_due_date(db, scenario):
+def test_projection_dates_the_row_from_the_report_when_it_has_one(db, scenario, monkeypatch):
+    """The report's own date beats the homework due date - it is when the test was
+    actually sat."""
     from src.exams.models import BluebookResult
-    _project(db, scenario, {"verbal_score": 600, "math_score": 600})
-    db.flush()
-    row = db.query(BluebookResult).filter(
-        BluebookResult.student_id == scenario["student"].id).one()
-    assert row.taken_at == date(2026, 7, 6)
-
-
-def test_projection_prefers_an_explicit_taken_at(db, scenario):
-    from src.exams.models import BluebookResult
-    _project(db, scenario, {"verbal_score": 600, "math_score": 600, "taken_at": "2026-07-01"})
+    _stub_report(monkeypatch, verbal=600, math=600, report_date=date(2026, 7, 1))
+    _project(db, scenario, {"report_key": REPORT_KEY})
     db.flush()
     row = db.query(BluebookResult).filter(
         BluebookResult.student_id == scenario["student"].id).one()
     assert row.taken_at == date(2026, 7, 1)
 
 
-def test_projection_captures_the_screenshot_url(db, scenario):
+def test_projection_falls_back_to_the_due_date_when_the_report_has_none(db, scenario, monkeypatch):
     from src.exams.models import BluebookResult
+    _stub_report(monkeypatch, verbal=600, math=600, report_date=None)
+    _project(db, scenario, {"report_key": REPORT_KEY})
+    db.flush()
+    row = db.query(BluebookResult).filter(
+        BluebookResult.student_id == scenario["student"].id).one()
+    assert row.taken_at == date(2026, 7, 6)
+
+
+def test_projection_records_the_name_printed_on_the_report(db, scenario, monkeypatch):
+    """Stored so staff can spot a report submitted on someone else's behalf."""
+    from src.exams.models import BluebookResult
+    _stub_report(monkeypatch, verbal=600, math=600, student_name="Someone Else")
+    _project(db, scenario, {"report_key": REPORT_KEY})
+    db.flush()
+    row = db.query(BluebookResult).filter(
+        BluebookResult.student_id == scenario["student"].id).one()
+    assert row.report_student_name == "Someone Else"
+
+
+def test_projection_still_captures_an_attached_screenshot(db, scenario, monkeypatch):
+    from src.exams.models import BluebookResult
+    _stub_report(monkeypatch, verbal=600, math=600)
     _project(db, scenario, {
-        "verbal_score": 600, "math_score": 600,
+        "report_key": REPORT_KEY,
         "files": [{"file_url": "/uploads/x/shot.png", "file_name": "shot.png"}],
     })
     db.flush()
@@ -218,36 +265,33 @@ def test_projection_captures_the_screenshot_url(db, scenario):
     assert row.screenshot_url == "/uploads/x/shot.png"
 
 
-@pytest.mark.parametrize("answer", [
-    {"verbal_score": 640},                              # missing math
-    {"math_score": 780},                                # missing verbal
-    {"verbal_score": 0, "math_score": 780},             # below range
-    {"verbal_score": 640, "math_score": 900},           # above range
-    {"verbal_score": 645, "math_score": 780},           # not a multiple of 10
-    {"verbal_score": "abc", "math_score": "def"},       # non-numeric
-    {},                                                  # empty
-])
-def test_projection_skips_invalid_or_incomplete_answers(db, scenario, answer):
-    """A half-row would silently distort the group's averages."""
-    from src.exams.models import BluebookResult
-    assert _project(db, scenario, answer) == 0
-    db.flush()
-    assert db.query(BluebookResult).filter(
-        BluebookResult.student_id == scenario["student"].id).count() == 0
-
-
-def test_projection_is_idempotent_on_resubmission(db, scenario):
+def test_projection_is_idempotent_on_resubmission(db, scenario, monkeypatch):
     """Re-submitting must update the existing cell, not add a second column."""
     from src.exams.models import BluebookResult
-    _project(db, scenario, {"verbal_score": 600, "math_score": 600})
+    _stub_report(monkeypatch, verbal=600, math=600)
+    _project(db, scenario, {"report_key": REPORT_KEY})
     db.flush()
-    _project(db, scenario, {"verbal_score": 700, "math_score": 700})
+    _stub_report(monkeypatch, verbal=700, math=700)
+    _project(db, scenario, {"report_key": REPORT_KEY})
     db.flush()
 
     rows = db.query(BluebookResult).filter(
         BluebookResult.student_id == scenario["student"].id).all()
     assert len(rows) == 1
     assert rows[0].total_score == 1400
+
+
+@pytest.mark.parametrize("answer", [
+    {},                                          # nothing at all
+    {"report_key": ""},                          # blank key
+    {"verbal_score": 640, "math_score": 780},    # typed scores, no report
+])
+def test_projection_records_nothing_without_an_official_report(db, scenario, answer):
+    from src.exams.models import BluebookResult
+    assert _project(db, scenario, answer) == 0
+    db.flush()
+    assert db.query(BluebookResult).filter(
+        BluebookResult.student_id == scenario["student"].id).count() == 0
 
 
 def test_projection_never_raises_on_malformed_content(db, scenario):
@@ -257,3 +301,80 @@ def test_projection_never_raises_on_malformed_content(db, scenario):
         answers={"task_1": {"verbal_score": 600, "math_score": 600}},
         assignment_content={"tasks": "not-a-list"},
     ) == 0
+
+
+# --------------------------------------------------------------------------------------
+# Official PDF report is the ONLY source of a Bluebook score
+# --------------------------------------------------------------------------------------
+
+def test_projection_ignores_client_supplied_scores_without_a_report(db, scenario):
+    """Students can no longer type a Bluebook score. Without a report_key there is
+    nothing to record, however plausible the numbers look."""
+    from src.exams.models import BluebookResult
+    assert _project(db, scenario, {"verbal_score": 800, "math_score": 800}) == 0
+    db.flush()
+    assert db.query(BluebookResult).filter(
+        BluebookResult.student_id == scenario["student"].id).count() == 0
+
+
+def test_projection_reads_scores_from_the_stored_pdf_not_the_payload(db, scenario, tmp_path,
+                                                                    monkeypatch):
+    """The submission carries a storage key; the server re-parses that file. A tampered
+    payload claiming 1600 must not change what is recorded."""
+    from src.exams.models import BluebookResult
+    from src.exams import projection as proj
+
+    # A genuine report for test 7: RW 720, Math 200, total 920.
+    report_text = (Path(__file__).parent / "fixtures" / "bluebook" / "practice_7.txt").read_text()
+
+    class _Parsed:
+        test_number, verbal_score, math_score = 7, 720, 200
+        total_score, report_date, student_name = 920, date(2025, 4, 19), "Test Student"
+
+    monkeypatch.setattr(proj, "_parse_stored_report", lambda key: _Parsed())
+
+    # Point the assignment at test 7 so the report matches what was assigned.
+    import json as _json
+    scenario["assignment"].content = _json.dumps(
+        {"tasks": [{"id": "task_1", "task_type": "bluebook_task", "title": "BB7",
+                    "order_index": 0, "points": 10, "content": {"test_number": 7}}]}
+    )
+    db.flush()
+    scenario["content"] = _json.loads(scenario["assignment"].content)
+
+    written = _project(db, scenario, {
+        "report_key": "/uploads/bluebook_report/x.pdf",
+        "verbal_score": 800, "math_score": 800,   # tampered, must be ignored
+    })
+    assert written == 1
+    db.flush()
+
+    row = db.query(BluebookResult).filter(
+        BluebookResult.student_id == scenario["student"].id).one()
+    assert (row.verbal_score, row.math_score, row.total_score) == (720, 200, 920)
+    assert row.report_url == "/uploads/bluebook_report/x.pdf"
+    assert row.report_date == date(2025, 4, 19)
+    assert row.report_student_name == "Test Student"
+    assert report_text  # fixture is present and readable
+
+
+def test_projection_refuses_a_report_for_the_wrong_test(db, scenario, monkeypatch):
+    """Assignment asks for #7; the student uploads their #9 report."""
+    from src.exams.models import BluebookResult
+    from src.exams import projection as proj
+
+    class _Parsed:
+        test_number, verbal_score, math_score = 9, 700, 700
+        total_score, report_date, student_name = 1400, date(2025, 5, 2), "Test Student"
+
+    monkeypatch.setattr(proj, "_parse_stored_report", lambda key: _Parsed())
+    assert _project(db, scenario, {"report_key": "/uploads/bluebook_report/y.pdf"}) == 0
+    db.flush()
+    assert db.query(BluebookResult).filter(
+        BluebookResult.student_id == scenario["student"].id).count() == 0
+
+
+def test_projection_skips_when_the_stored_report_cannot_be_read(db, scenario, monkeypatch):
+    from src.exams import projection as proj
+    monkeypatch.setattr(proj, "_parse_stored_report", lambda key: None)
+    assert _project(db, scenario, {"report_key": "/uploads/bluebook_report/gone.pdf"}) == 0

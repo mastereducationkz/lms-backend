@@ -19,6 +19,7 @@ Two tables:
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     Date,
@@ -48,6 +49,14 @@ EXAM_RESULT_STATUSES = ("reported", "verified", "rejected")
 EXAM_RESULT_SOURCES = ("assignment_zero", "staff", "student")
 
 BLUEBOOK_SOURCES = ("homework", "assignment_zero")
+
+# Testimonial lifecycle. Nothing reaches the sales team before "approved", and
+# "revoked" is terminal - consent can always be withdrawn.
+TESTIMONIAL_STATUSES = ("draft", "pending", "approved", "rejected", "revoked")
+
+# Where an approved testimonial may be used. Consent is per-channel: agreeing to a
+# quote on the website is not agreeing to appear in paid advertising.
+TESTIMONIAL_CHANNELS = ("website", "social", "ads", "print", "internal")
 
 # Bluebook practice tests a teacher may assign.
 BLUEBOOK_MIN_TEST_NUMBER = 4
@@ -165,6 +174,21 @@ class BluebookResult(Base):
 
     screenshot_url = Column(String, nullable=True)
 
+    # The official College Board PDF the scores were parsed from. Private storage key.
+    report_url = Column(String, nullable=True)
+    # Name as printed on the report. Kept so staff can spot a report submitted on
+    # someone else's behalf; a mismatch flags the row but never blocks submission,
+    # because Latin/Cyrillic spelling differences are routine here.
+    report_student_name = Column(String, nullable=True)
+    report_name_matches = Column(Boolean, nullable=True)
+    report_date = Column(Date, nullable=True)
+
+    # Staff correction of a parsed value. Students cannot edit a parsed score at all;
+    # this is the escape hatch for a genuine parse failure, and it records who did it.
+    overridden_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    overridden_at = Column(DateTime, nullable=True)
+    override_reason = Column(Text, nullable=True)
+
     # Null for Assignment Zero baseline rows: AZ stores a Bluebook 5 score but no
     # companion date. The grid dates that column from the group's start instead, and
     # marks it as a baseline rather than pretending to know the day.
@@ -190,3 +214,81 @@ class BluebookResult(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<BluebookResult {self.student_id} #{self.test_number} {self.total_score}>"
+
+
+class StudentTestimonial(Base):
+    """A student's photo and quote, for marketing use, with its consent record.
+
+    Consent is modelled explicitly rather than assumed. These are frequently minors, and
+    the material is used in advertising, so the row has to answer "who agreed, to what,
+    when, and who recorded it" long after the conversation happened. Without that a
+    photo in a paid campaign is indefensible if challenged.
+
+    Nothing is visible to the sales team until ``status == 'approved'``, and approval
+    requires consent to have been recorded first. Revocation is always possible and
+    immediately removes the material from the marketing view.
+    """
+
+    __tablename__ = "student_testimonials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    # Optional link to the result being celebrated, so a quote can be shown next to the
+    # score it refers to.
+    exam_result_id = Column(Integer, ForeignKey("exam_results.id", ondelete="SET NULL"),
+                            nullable=True)
+
+    quote = Column(Text, nullable=True)
+    photo_url = Column(String, nullable=True)
+    photo_uploaded_at = Column(DateTime, nullable=True)
+
+    status = Column(String(16), nullable=False, default="draft")
+
+    # --- consent record -----------------------------------------------------------
+    consent_given = Column(Boolean, nullable=False, default=False)
+    # Which channels the student agreed to, e.g. ["website", "social"].
+    consent_channels = Column(JSON, nullable=True)
+    # Whether a guardian's permission was obtained. Required for minors; the age check
+    # is a product decision made at approval time, not enforced blindly here, because
+    # birthday data is incomplete for many students.
+    guardian_consent = Column(Boolean, nullable=False, default=False)
+    consent_note = Column(Text, nullable=True)
+    consent_recorded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    consent_recorded_at = Column(DateTime, nullable=True)
+
+    # --- moderation ---------------------------------------------------------------
+    approved_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    rejected_reason = Column(Text, nullable=True)
+
+    # --- revocation ---------------------------------------------------------------
+    revoked_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_reason = Column(Text, nullable=True)
+
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    student = relationship("UserInDB", foreign_keys=[student_id])
+
+    __table_args__ = (
+        Index("ix_student_testimonials_status", "status"),
+        # One testimonial per student keeps the marketing view unambiguous; a new quote
+        # replaces the old one rather than accumulating variants nobody has approved.
+        UniqueConstraint("student_id", name="uq_student_testimonials_student"),
+    )
+
+    @property
+    def is_marketing_ready(self) -> bool:
+        """Usable by the sales team: approved, consented, and not withdrawn."""
+        return (
+            self.status == "approved"
+            and bool(self.consent_given)
+            and self.revoked_at is None
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"<StudentTestimonial {self.student_id} {self.status}>"

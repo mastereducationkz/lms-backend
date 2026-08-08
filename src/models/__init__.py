@@ -28,7 +28,7 @@ from src.content.models import FavoriteFlashcard, QuestionErrorReport, FavoriteS
 from src.curator.models import CuratorTaskTemplate, CuratorTaskInstance
 from src.lesson_requests.models import LessonRequest
 from src.parents.models import ParentStudent
-from src.exams.models import ExamResult, BluebookResult
+from src.exams.models import ExamResult, BluebookResult, StudentTestimonial
 from src.trials.models import TrialAccess
 
 __all__ = [
@@ -51,6 +51,6 @@ __all__ = [
     "CuratorTaskTemplate", "CuratorTaskInstance",
     "LessonRequest",
     "ParentStudent",
-    "ExamResult", "BluebookResult",
+    "ExamResult", "BluebookResult", "StudentTestimonial",
     "TrialAccess",
 ]
