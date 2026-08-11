@@ -30,6 +30,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from src.config import get_db
 from src.curator.notifications import (
+    notify_once,
+    send_curator_email,
     TYPE_ONBOARDING_OVERDUE,
     TYPE_UNASSIGNED_GROUP,
     crm_onboarding_url,
@@ -615,6 +617,79 @@ def list_groups(
 
 class AcademicRequest(BaseModel):
     lms_student_ids: list[int] = Field(default_factory=list)
+
+
+class NotifyItem(BaseModel):
+    """One notification the CRM has decided to send."""
+
+    curator_id: int
+    title: str
+    content: str
+    notification_type: str = "curator_health"
+    related_id: Optional[int] = None
+    #: Whether an email should also go out. The CRM applies the curator's preferences and the
+    #: "critical is not optional" rule before setting this; the LMS just delivers.
+    email: bool = False
+    email_subject: Optional[str] = None
+    email_lines: list[str] = Field(default_factory=list)
+    link: Optional[str] = None
+    #: Suppresses a repeat of the same (user, type, related_id) inside this many hours.
+    within_hours: int = 24
+
+
+class NotifyRequest(BaseModel):
+    items: list[NotifyItem] = Field(default_factory=list)
+
+
+@router.post("/notify")
+def notify_curators(
+    body: NotifyRequest,
+    db: Session = Depends(get_db),
+    actor: OnboardingActor = Depends(resolve_actor),
+) -> dict[str, Any]:
+    """Deliver CRM-composed notifications through the LMS's existing channels.
+
+    Reuses ``notify_once`` and Resend rather than giving the CRM a second notification stack:
+    curators already watch the LMS bell, and a school with two independent notification
+    systems is a school where half the alerts are missed.
+
+    The CRM decides *what* to send — it owns the rules, the deadlines and the preferences.
+    The LMS decides *how*, and applies its own duplicate window as a second line of defence
+    on top of the CRM's idempotency keys.
+
+    Email failure never fails the request: an unsent email must not roll back the business
+    change that triggered it, and the CRM will try again on its next pass.
+    """
+    users = {
+        u.id: u
+        for u in db.query(UserInDB)
+        .filter(UserInDB.id.in_([i.curator_id for i in body.items] or [0]))
+        .all()
+    }
+    created = emailed = 0
+    for item in body.items:
+        user = users.get(item.curator_id)
+        if user is None:
+            continue
+        if notify_once(
+            db,
+            user_id=item.curator_id,
+            title=item.title,
+            content=item.content,
+            notification_type=item.notification_type,
+            related_id=item.related_id,
+            within_hours=item.within_hours,
+        ) is not None:
+            created += 1
+        if item.email and send_curator_email(
+            user.email,
+            item.email_subject or item.title,
+            item.email_lines or [item.content],
+            link=item.link,
+        ):
+            emailed += 1
+    db.commit()
+    return {"in_app": created, "emails": emailed, "requested": len(body.items)}
 
 
 class FreezeStateItem(BaseModel):
