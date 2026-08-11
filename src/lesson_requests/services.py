@@ -179,8 +179,8 @@ def create_lesson_request_record(
     if not original_dt.tzinfo:
         original_dt = original_dt.replace(tzinfo=timezone.utc)
 
-    if original_dt < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Cannot create requests for past lessons.")
+    # Past lessons are allowed: a student may reply late, so teachers can still
+    # file reschedule/cancel/substitution requests against already-started lessons.
 
     if not skip_limits:
         dup_query = db.query(LessonRequest).filter(
