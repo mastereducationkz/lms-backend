@@ -14,6 +14,7 @@ from src.schemas.models import (
 )
 from pydantic import BaseModel
 from src.routes.auth import get_current_user_dependency
+from src.curator.freeze_mirror import freeze_states, frozen_badge, is_within_freeze
 from src.services.attendance_service import (
     AttendanceService,
     attendance_status_to_ui,
@@ -815,6 +816,9 @@ async def get_weekly_lessons_with_hw_status(
         }
         
     students = db.query(UserInDB).filter(UserInDB.id.in_(student_ids)).all()
+    # One query for the whole roster: the freeze mirror is read for every grid cell, and a
+    # lookup per student would be an N+1 across the busiest curator screen there is.
+    freeze_by_student = freeze_states(db, student_ids)
     students_list = sorted(students, key=lambda s: s.name or "")
     
     # 7. Get Attendance — from Attendance (single source of truth)
@@ -1129,6 +1133,7 @@ async def get_weekly_lessons_with_hw_status(
             "extra_points": manual.extra_points if manual else 0,
         }
 
+        freeze_row = freeze_by_student.get(student.id)
         lesson_data = {}
         for idx, event in enumerate(events):
             # Attendance
@@ -1157,6 +1162,14 @@ async def get_weekly_lessons_with_hw_status(
             # (status defaulted to "missed") renders as "Не отмечено" and drops
             # out of the % denominator instead of scoring like an absence.
             marked = att is not None
+
+            # A lesson inside the student's freeze is neither attended nor missed: they were
+            # not expected. It renders as «Заморозка», is not editable, and drops out of the
+            # attendance and homework denominators exactly as a pre-join lesson does. Weeks
+            # before the freeze are untouched — a freeze must never retroactively rewrite a
+            # term the student actually studied — and counting resumes from the *confirmed*
+            # return date, not the date that had merely been planned.
+            frozen_lesson = is_within_freeze(freeze_row, event.start_datetime.date())
 
             # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
@@ -1208,12 +1221,19 @@ async def get_weekly_lessons_with_hw_status(
                 "enrolled": enrolled,
                 # False = no attendance record yet (unmarked); see `marked` above.
                 "marked": marked,
+                # True = inside a CRM freeze period. Additive rather than a new
+                # attendance_status value, so older clients degrade to the previous
+                # rendering instead of showing an unknown status.
+                "frozen": frozen_lesson,
             }
             
         student_rows.append({
             "student_id": student.id,
             "student_name": student.name,
             "avatar_url": student.avatar_url,
+            # Staff view: the badge carries the planned return date, so a curator can see
+            # who is due back without opening the CRM.
+            "freeze": frozen_badge(freeze_row),
             "lessons": lesson_data,
             **manual_data
         })

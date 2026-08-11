@@ -617,6 +617,98 @@ class AcademicRequest(BaseModel):
     lms_student_ids: list[int] = Field(default_factory=list)
 
 
+class FreezeStateItem(BaseModel):
+    lms_student_id: int
+    status: str = "active"
+    freeze_start: Optional[str] = None
+    planned_resume_date: Optional[str] = None
+    actual_resume_date: Optional[str] = None
+    reason_code: Optional[str] = None
+    responsible_curator_id: Optional[int] = None
+    crm_freeze_period_id: Optional[int] = None
+    revision: int = 0
+    note: Optional[str] = None
+
+
+class FreezeStateRequest(BaseModel):
+    items: list[FreezeStateItem] = Field(default_factory=list)
+
+
+@router.post("/students/freeze-state")
+def push_freeze_state(
+    body: FreezeStateRequest,
+    db: Session = Depends(get_db),
+    actor: OnboardingActor = Depends(resolve_actor),
+) -> dict[str, Any]:
+    """Receive the CRM's freeze decisions. Idempotent, order-tolerant, batched.
+
+    The CRM is canonical for the freeze lifecycle; this only records what it decided so the
+    LMS can display and count without asking. ``revision`` makes a replayed or reordered
+    delivery converge instead of flapping, which matters because the outbox promises
+    at-least-once and nothing more.
+
+    Note what it does not do: freeze never touches LMS access. Platform access is an
+    independent policy with its own rules and audit, and conflating the two would silently
+    lock a paying student out of the course they can still study.
+    """
+    from src.curator.freeze_mirror import upsert_freeze_state
+
+    results = [upsert_freeze_state(db, item.model_dump()) for item in body.items]
+    db.commit()
+    return {
+        "applied": sum(1 for r in results if r.get("applied")),
+        "skipped": sum(1 for r in results if not r.get("applied")),
+        "results": results,
+    }
+
+
+class HealthFactsRequest(BaseModel):
+    lms_student_ids: list[int] = Field(default_factory=list)
+    window_days: int = 30
+    activity_days: int = 7
+    homework_window_days: int = 7
+    progress_days: int = 7
+    #: student id -> [[freeze_start, freeze_end], ...] in ISO dates. Supplied by the CRM,
+    #: which owns the freeze lifecycle; lessons inside these spans leave every denominator.
+    frozen_windows: dict[str, list[list[Optional[str]]]] = Field(default_factory=dict)
+
+
+@router.post("/students/health-facts")
+def students_health_facts(
+    body: HealthFactsRequest,
+    db: Session = Depends(get_db),
+    actor: OnboardingActor = Depends(resolve_actor),
+) -> dict[str, Any]:
+    """Counts and dates the CRM's health rules read. No thresholds, no severity.
+
+    The split is the point: the LMS knows who attended and who submitted, the CRM decides
+    what that means and whose problem it is. Putting a threshold here would mean changing a
+    setting required an LMS deploy, and would give the two services two opinions about when
+    a student is at risk.
+
+    Unscoped by curator on purpose — unlike ``/students/academic``, which projects per
+    curator for display. This feeds an engine that must evaluate a student *as a whole* to
+    decide severity; the per-curator projection happens in the CRM when a case is shown.
+    Access is already limited to the service key.
+    """
+    from src.curator.health_facts import health_facts
+
+    windows = {
+        int(sid): [(span[0] if span else None, span[1] if len(span) > 1 else None) for span in spans]
+        for sid, spans in (body.frozen_windows or {}).items()
+        if str(sid).lstrip("-").isdigit()
+    }
+    return health_facts(
+        db,
+        body.lms_student_ids,
+        window_days=body.window_days,
+        activity_days=body.activity_days,
+        homework_window_days=body.homework_window_days,
+        progress_days=body.progress_days,
+        frozen_windows=windows,
+    )
+
+
 @router.post("/students/academic")
 def students_academic(
     body: AcademicRequest,
