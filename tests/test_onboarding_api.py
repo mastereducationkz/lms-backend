@@ -25,6 +25,24 @@ def test_curator_sees_only_own(db):
     assert ids == {w["s"].id}                      # not s2
 
 
+def test_backfill_baseline_hidden_but_human_completed_shown(db):
+    """Done rows with no actioner (launch backfill) are hidden; human-completed show."""
+    from src.curator.routes.onboarding import list_onboarding, update_onboarding, OnboardingStatusUpdate
+    w = _seed(db)
+    card = db.query(CuratorOnboarding).filter_by(curator_id=w["c"].id).first()
+    # Simulate the launch backfill on this row: done, but never actioned by a human.
+    card.status = "done"
+    card.completed_by = None
+    db.flush()
+    out = list_onboarding(db=db, current_user=w["c"], curator_id=None)
+    assert card.student_id not in {c["student_id"] for c in out["cards"]}   # baseline hidden
+    # A genuine completion (PATCH → done) stamps completed_by, so it reappears.
+    update_onboarding(card_id=card.id, payload=OnboardingStatusUpdate(status="done"),
+                      db=db, current_user=w["c"])
+    out2 = list_onboarding(db=db, current_user=w["c"], curator_id=None)
+    assert card.student_id in {c["student_id"] for c in out2["cards"]}      # human-done shown
+
+
 def test_head_curator_sees_all_and_can_filter(db):
     from src.curator.routes.onboarding import list_onboarding
     w = _seed(db)

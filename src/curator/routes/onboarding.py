@@ -54,7 +54,12 @@ def list_onboarding(
 ):
     _require_role(current_user)
     q = db.query(CuratorOnboarding).filter(
-        CuratorOnboarding.status.in_(VISIBLE_STATUSES))
+        CuratorOnboarding.status.in_(VISIBLE_STATUSES),
+        # Hide the launch backfill baseline: existing pairs were seeded as 'done' with no
+        # human actioner (completed_by IS NULL) so the board starts clean. Genuinely
+        # onboarded students always have completed_by set, so they still show in Завершено.
+        ~((CuratorOnboarding.status == "done") & (CuratorOnboarding.completed_by.is_(None))),
+    )
     if current_user.role == "curator":
         q = q.filter(CuratorOnboarding.curator_id == current_user.id)
     elif curator_id is not None:
