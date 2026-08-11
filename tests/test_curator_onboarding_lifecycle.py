@@ -443,3 +443,71 @@ def test_completed_group_students_drop_out_of_scope(db):
     _enrol(db, g, student)
     db.flush()
     assert student.id not in curator_student_ids(db, [curator.id])
+
+
+# --- concurrent sweeps --------------------------------------------------------------------
+
+
+def test_only_one_sweep_runs_at_a_time(db):
+    """Four uvicorn workers each start a reconciler; only one may do the work.
+
+    Without the advisory lock the data stayed correct (the partial unique index and an
+    idempotent close saw to that) but every worker appended its own ``cycle.closed`` event,
+    so a card's history showed the same close four times — which is exactly what production
+    showed after the first deploy.
+    """
+    from sqlalchemy.orm import Session as SASession
+
+    from src.config import engine
+    from src.curator.onboarding_core import _try_acquire_sweep_lock, _release_sweep_lock
+
+    if engine.dialect.name != "postgresql":
+        pytest.skip("advisory locks are a PostgreSQL feature")
+
+    curator, student = _user(db, "curator"), _user(db, "student")
+    g = _group(db, curator)
+    _enrol(db, g, student)
+    db.commit()
+
+    holder = SASession(bind=engine)
+    try:
+        assert _try_acquire_sweep_lock(holder) is True, "first caller takes the lock"
+        result = reconcile_onboarding(db)
+        assert result.get("skipped") == 1, "second caller must stand down"
+        assert result["created"] == 0 and result["closed"] == 0
+    finally:
+        _release_sweep_lock(holder)
+        holder.close()
+
+    # Once the lock is free the sweep runs normally.
+    result = reconcile_onboarding(db)
+    assert result.get("skipped") == 0
+    assert active_cycle(db, curator.id, student.id) is not None
+
+
+def test_a_sweep_records_each_close_exactly_once(db):
+    curator, student = _user(db, "curator"), _user(db, "student")
+    g = _group(db, curator)
+    _enrol(db, g, student)
+    db.commit()
+    reconcile_onboarding(db)
+    row = active_cycle(db, curator.id, student.id)
+    assert row is not None
+    card_id = row.id
+
+    db.query(GroupStudent).filter(GroupStudent.student_id == student.id).delete()
+    db.commit()
+
+    # Run the sweep repeatedly, as four workers on an hourly timer would.
+    for _ in range(4):
+        reconcile_onboarding(db)
+
+    closes = (
+        db.query(CuratorOnboardingEvent)
+        .filter(
+            CuratorOnboardingEvent.onboarding_id == card_id,
+            CuratorOnboardingEvent.action == "cycle.closed",
+        )
+        .count()
+    )
+    assert closes == 1, f"expected one close event, found {closes}"

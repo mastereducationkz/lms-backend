@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional, Sequence
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -325,6 +325,46 @@ def compute_active_pairs(db: Session) -> dict[tuple[int, int], int]:
     return pairs
 
 
+#: Arbitrary but fixed key for the Postgres advisory lock guarding the sweep.
+_RECONCILE_LOCK_KEY = 0x0C0A_7E01
+
+
+def _try_acquire_sweep_lock(db: Session) -> bool:
+    """Claim the right to run the organisation-wide sweep, or report that someone else has it.
+
+    The API runs four uvicorn workers and each starts its own reconciler thread, so the
+    hourly sweep was running four times over. The *data* stayed correct — the partial unique
+    index makes duplicate cycles impossible and ``close_cycle`` is idempotent — but each
+    worker still appended its own ``cycle.closed`` event, so a card's history showed the
+    same close four times, and the work was done four times for nothing.
+
+    A session-level advisory lock is the cheap fix: it costs one round trip, needs no new
+    table, and is released automatically if the worker dies. Non-PostgreSQL backends
+    (SQLite, in tests) have no advisory locks and simply proceed — there is only ever one
+    writer there.
+    """
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return True
+    try:
+        return bool(
+            db.execute(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": _RECONCILE_LOCK_KEY}
+            ).scalar()
+        )
+    except Exception:  # noqa: BLE001 - a lock we cannot take must not stop the sweep
+        logger.warning("could not acquire reconcile advisory lock; proceeding", exc_info=True)
+        return True
+
+
+def _release_sweep_lock(db: Session) -> None:
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return
+    try:
+        db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _RECONCILE_LOCK_KEY})
+    except Exception:  # noqa: BLE001
+        logger.warning("could not release reconcile advisory lock", exc_info=True)
+
+
 def reconcile_onboarding(db: Session, actor: Optional[OnboardingActor] = None) -> dict[str, int]:
     """Bring cards in line with live relationships. Idempotent; safe to run concurrently.
 
@@ -332,8 +372,23 @@ def reconcile_onboarding(db: Session, actor: Optional[OnboardingActor] = None) -
     * relationship persists → refresh the display group only
     * relationship disappears → close the open cycle
     * relationship reappears later → a *new* cycle, never a revived historical row
+
+    Only one process performs the sweep at a time (see :func:`_try_acquire_sweep_lock`);
+    the others return ``skipped`` rather than duplicating the work and its history.
     """
     actor = actor or OnboardingActor.system("реконсилятор")
+
+    if not _try_acquire_sweep_lock(db):
+        logger.info("onboarding reconcile skipped: another worker holds the sweep lock")
+        return {"created": 0, "closed": 0, "regrouped": 0, "skipped": 1}
+
+    try:
+        return _reconcile_locked(db, actor)
+    finally:
+        _release_sweep_lock(db)
+
+
+def _reconcile_locked(db: Session, actor: OnboardingActor) -> dict[str, int]:
     active = compute_active_pairs(db)
 
     open_rows: dict[tuple[int, int], CuratorOnboarding] = {}
@@ -357,7 +412,7 @@ def reconcile_onboarding(db: Session, actor: Optional[OnboardingActor] = None) -
                 closed += 1
 
     db.commit()
-    return {"created": created, "closed": closed, "regrouped": regrouped}
+    return {"created": created, "closed": closed, "regrouped": regrouped, "skipped": 0}
 
 
 def reconcile_student(
