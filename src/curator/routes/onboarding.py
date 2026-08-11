@@ -1,12 +1,12 @@
 """Curator onboarding kanban API."""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import get_db
 from src.schemas.models import (
-    CuratorOnboarding, UserInDB, Group, AssignmentZeroSubmission,
+    CuratorOnboarding, UserInDB, AssignmentZeroSubmission,
 )
 from src.curator.schemas import OnboardingStatusUpdate
 from src.curator.onboarding_service import telegram_link
@@ -59,7 +59,11 @@ def list_onboarding(
         q = q.filter(CuratorOnboarding.curator_id == current_user.id)
     elif curator_id is not None:
         q = q.filter(CuratorOnboarding.curator_id == curator_id)
-    rows = q.order_by(CuratorOnboarding.created_at.desc()).all()
+    rows = q.options(
+        joinedload(CuratorOnboarding.student),
+        joinedload(CuratorOnboarding.group),
+        joinedload(CuratorOnboarding.curator),
+    ).order_by(CuratorOnboarding.created_at.desc()).all()
 
     # batch-load contact info
     student_ids = [r.student_id for r in rows]
