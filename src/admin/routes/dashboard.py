@@ -2933,7 +2933,12 @@ def get_teacher_recent_submissions(
 def get_teacher_salary_breakdown(
     period_start: str = Query(..., description="Start date YYYY-MM-DD"),
     period_end: str = Query(..., description="End date YYYY-MM-DD"),
-    lesson_rate: int = Query(4000, ge=0, le=1_000_000),
+    lesson_rate: Optional[int] = Query(
+        None,
+        ge=0,
+        le=1_000_000,
+        description="Переопределить ставку. По умолчанию берётся ставка педагога из CRM.",
+    ),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
@@ -2972,6 +2977,24 @@ def get_teacher_salary_breakdown(
         .all()
     )
 
+    # Rates the CRM computed for this teacher (level × lesson kind × group count). An
+    # explicit `lesson_rate` still wins — a manager recalculating an old period needs to be
+    # able to say what the rate WAS. With neither, fall back to the historical default so an
+    # unsynced teacher keeps working exactly as before.
+    from src.auth.models import TeacherHourlyRate
+
+    stored = (
+        db.query(TeacherHourlyRate)
+        .filter(TeacherHourlyRate.teacher_id == current_user.id)
+        .first()
+    )
+    group_rate = lesson_rate if lesson_rate is not None else (
+        int(stored.group_rate) if stored and stored.group_rate else 4000
+    )
+    individual_rate = lesson_rate if lesson_rate is not None else (
+        int(stored.individual_rate) if stored and stored.individual_rate else 3000
+    )
+
     by_group: dict[int, dict] = {}
     for event, group in event_rows:
         if group.id not in by_group:
@@ -2981,6 +3004,7 @@ def get_teacher_salary_breakdown(
             by_group[group.id] = {
                 "group_id": group.id,
                 "group_name": group.name,
+                "group_type": group.group_type,
                 "program_start": start_label,
                 "program_end": finish_d.isoformat() if finish_d else None,
                 "lesson_dates": [],
@@ -2994,8 +3018,13 @@ def get_teacher_salary_breakdown(
     for _, item in sorted(by_group.items(), key=lambda x: x[1]["group_name"].lower()):
         dates = sorted(item["lesson_dates"])
         lesson_count = len(dates)
-        is_indi_group = "indi" in item["group_name"].lower()
-        applied_rate = 3000 if is_indi_group else lesson_rate
+        # The group's own type decides which rate applies. The old check was a substring
+        # match on the name ("indi"), which missed every individual group named differently
+        # and mispriced any group that happened to contain those letters.
+        is_indi_group = (item.get("group_type") or "").strip().lower() == "individual" or (
+            "indi" in item["group_name"].lower()
+        )
+        applied_rate = individual_rate if is_indi_group else group_rate
         amount = lesson_count * applied_rate
         total_lessons += lesson_count
         total_amount += amount
@@ -3037,7 +3066,12 @@ def get_teacher_salary_breakdown(
         "teacher_name": current_user.name,
         "period_start": start_d.isoformat(),
         "period_end": end_d.isoformat(),
-        "lesson_rate": lesson_rate,
+        "lesson_rate": group_rate,
+        "individual_rate": individual_rate,
+        # So the UI can say WHERE the number came from instead of implying the teacher chose it.
+        "rate_source": "override" if lesson_rate is not None else ("crm" if stored else "default"),
+        "level": (stored.level if stored else None),
+        "group_band": (stored.group_band if stored else None),
         "groups": groups,
         "total_lessons": total_lessons,
         "total_amount_tenge": total_amount,
