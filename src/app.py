@@ -237,15 +237,18 @@ except Exception as e:
     logging.error(f"Failed to initialize lesson reminder scheduler: {e}")
 
 try:
-    from src.curator.services import start_curator_task_scheduler
-    disable_curator_scheduler = os.getenv('DISABLE_SCHEDULER', 'false').lower() == 'true'
-    if disable_curator_scheduler:
-        logging.info("Curator task scheduler disabled (DISABLE_SCHEDULER=true)")
+    # Curator TASK scheduler is paused (feature hidden). Reversal: re-enable this
+    # and remove the onboarding reconciler below.
+    #   from src.curator.services import start_curator_task_scheduler
+    #   start_curator_task_scheduler()
+    from src.curator.onboarding_service import start_onboarding_reconciler
+    if os.getenv('DISABLE_SCHEDULER', 'false').lower() == 'true':
+        logging.info("Onboarding reconciler disabled (DISABLE_SCHEDULER=true)")
     else:
-        start_curator_task_scheduler()
-        logging.info("Curator task scheduler initialized")
+        start_onboarding_reconciler()
+        logging.info("Onboarding reconciler initialized")
 except Exception as e:
-    logging.error(f"Failed to initialize curator task scheduler: {e}")
+    logging.error(f"Failed to initialize onboarding reconciler: {e}")
 
 
 @app.exception_handler(404)

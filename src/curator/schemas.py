@@ -67,6 +67,26 @@ class CuratorTaskInstanceUpdateSchema(BaseModel):
     screenshot_url: Optional[str] = None
 
 
+class OnboardingStatusUpdate(BaseModel):
+    status: str  # new | in_progress | done
+
+
+class OnboardingCard(BaseModel):
+    id: int
+    student_id: int
+    student_name: str
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    curator_id: int
+    curator_name: Optional[str] = None
+    telegram_id: Optional[str] = None
+    telegram_link: Optional[str] = None
+    phone_number: Optional[str] = None
+    parent_phone_number: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+
+
 class CuratorTaskBulkCreateSchema(BaseModel):
     """Create the same task for many curator × group combinations (cartesian product)."""
 
