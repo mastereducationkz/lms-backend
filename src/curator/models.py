@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, ForeignKey, Text, JSON, Index, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Date, DateTime, Boolean, ForeignKey, Text, JSON, Index, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -69,10 +69,26 @@ class CuratorTaskInstance(Base):
 
 
 class CuratorOnboarding(Base):
-    """
-    One onboarding card per (curator, student) pairing.
+    """One onboarding **cycle** per (curator, student) pairing.
+
     Rows are created/retired by the onboarding reconciler based on the live
     (curator <-> student) relationship, NOT on account age.
+
+    Lifecycle
+    ---------
+    The original design allowed exactly one row per pair for all time
+    (``uq_curator_onboarding_pair``), which meant a student returning to a curator they had
+    already been onboarded by could never get a fresh card — the reconciler either revived a
+    historical ``cancelled`` row (losing the fact that a *previous* relationship had ended) or
+    silently did nothing because a ``done`` row was in the way.
+
+    A row is now a *cycle*: it is **open** while ``ended_at IS NULL`` and closed once the
+    relationship ends. A pair may accumulate any number of closed cycles (``cycle_no`` 1, 2,
+    3…) but only ever one open cycle, enforced by the partial unique index
+    ``uq_curator_onboarding_active`` (Postgres) — see the Alembic revision. ``status``
+    continues to mean what it always did (new|in_progress|done|cancelled), so every existing
+    reader keeps working; ``ended_at`` is the new axis and defaults to NULL, which is exactly
+    what every pre-existing row is: still open.
     """
     __tablename__ = "curator_onboarding"
 
@@ -91,11 +107,109 @@ class CuratorOnboarding(Base):
     completed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
                           nullable=True)
 
+    # --- cycle metadata (see class docstring) ---
+    # 1 for every pre-existing row; incremented when a pair starts a fresh relationship.
+    cycle_no = Column(Integer, nullable=False, default=1, server_default="1")
+    # NULL == open. Set when responsibility for this student leaves this curator.
+    ended_at = Column(DateTime, nullable=True)
+    # Why the cycle closed: relationship_ended | transferred_out | curator_deactivated |
+    # legacy_cancelled | manual.
+    end_reason = Column(String(64), nullable=True)
+
+    # --- operational fields the CRM workspace edits ---
+    # When ``status`` last moved. Drives the "in_progress overdue after N days without an
+    # update" rule, which cannot use updated_at (any write touches that).
+    status_changed_at = Column(DateTime, nullable=True)
+    # Curator's planned next contact. Date, not datetime: the school plans in days.
+    next_action_at = Column(Date, nullable=True)
+    next_action_note = Column(String(500), nullable=True)
+
     curator = relationship("UserInDB", foreign_keys=[curator_id])
     student = relationship("UserInDB", foreign_keys=[student_id])
     group = relationship("Group", foreign_keys=[group_id])
+    events = relationship(
+        "CuratorOnboardingEvent",
+        back_populates="onboarding",
+        cascade="all, delete-orphan",
+        order_by="CuratorOnboardingEvent.created_at",
+    )
+    notes = relationship(
+        "CuratorOnboardingNote",
+        back_populates="onboarding",
+        cascade="all, delete-orphan",
+        order_by="CuratorOnboardingNote.created_at",
+    )
 
     __table_args__ = (
-        UniqueConstraint("curator_id", "student_id", name="uq_curator_onboarding_pair"),
+        # The cycle invariant, enforced by the database rather than by application timing:
+        # any number of closed cycles per pair, at most one open one. Two racing
+        # reconcilers therefore cannot both create a card — the loser gets an
+        # IntegrityError and adopts the winner's row.
+        Index(
+            "uq_curator_onboarding_active",
+            "curator_id",
+            "student_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+            sqlite_where=text("ended_at IS NULL"),
+        ),
         Index("ix_curator_onboarding_curator_status", "curator_id", "status"),
+        Index("ix_curator_onboarding_student_open", "student_id", "ended_at"),
+        Index("ix_curator_onboarding_next_action", "next_action_at"),
+    )
+
+
+class CuratorOnboardingEvent(Base):
+    """Append-only history of everything that happened to one onboarding cycle.
+
+    Nothing updates or deletes a row; a correction is a new row. Mirrors the CRM's
+    ``audit_log`` shape (actor / action / before / after) so the two feeds can be merged in
+    the UI without translation. ``actor_role`` is denormalised because it answers the
+    question the board actually asks — "did a head curator intervene here?" — without a join
+    to a role that may since have changed.
+    """
+    __tablename__ = "curator_onboarding_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    onboarding_id = Column(Integer, ForeignKey("curator_onboarding.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    actor_name = Column(String(500), nullable=True)
+    actor_role = Column(String(32), nullable=True)
+    # cycle.opened | cycle.closed | status.changed | note.added | next_action.set |
+    # group.changed | intervention
+    action = Column(String(64), nullable=False)
+    before = Column(JSON, nullable=True)
+    after = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+    onboarding = relationship("CuratorOnboarding", back_populates="events")
+
+    __table_args__ = (
+        Index("ix_curator_onboarding_events_card_time", "onboarding_id", "created_at"),
+    )
+
+
+class CuratorOnboardingNote(Base):
+    """A curator's private note on one onboarding cycle.
+
+    Deliberately scoped to the *cycle*, not the student: two curators sharing a student each
+    keep their own thread, and neither sees the other's. Head curators see both — they are
+    the oversight role — which is enforced in the service layer, not here.
+    """
+    __tablename__ = "curator_onboarding_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    onboarding_id = Column(Integer, ForeignKey("curator_onboarding.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    author_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    author_name = Column(String(500), nullable=True)
+    author_role = Column(String(32), nullable=True)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+    onboarding = relationship("CuratorOnboarding", back_populates="notes")
+
+    __table_args__ = (
+        Index("ix_curator_onboarding_notes_card_time", "onboarding_id", "created_at"),
     )

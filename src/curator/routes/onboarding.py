@@ -1,21 +1,35 @@
-"""Curator onboarding kanban API."""
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session, joinedload
-from datetime import datetime, timezone
+"""Curator onboarding kanban API (legacy LMS UI).
+
+The CRM workspace is the canonical onboarding interface; this router stays for backward
+compatibility with old bookmarks and the mobile clients, and **delegates every rule** to
+:mod:`src.curator.onboarding_core` rather than keeping a second copy of them. There is no
+dual-write: both surfaces mutate the same rows through the same service.
+"""
 from typing import Optional
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
 from src.config import get_db
-from src.schemas.models import (
-    CuratorOnboarding, UserInDB, AssignmentZeroSubmission,
+from src.curator.onboarding_core import (
+    BOARD_STATUSES,
+    SETTABLE_STATUSES,
+    OnboardingActor,
+    OnboardingNotFound,
+    OnboardingPermissionError,
+    get_card,
+    load_board,
+    serialize_card,
+    set_status,
+    telegram_link,
 )
 from src.curator.schemas import OnboardingStatusUpdate
-from src.curator.onboarding_service import telegram_link
 from src.routes.auth import get_current_user_dependency
+from src.schemas.models import AssignmentZeroSubmission, UserInDB
 
 router = APIRouter()
 
-VISIBLE_STATUSES = ("new", "in_progress", "done")
-SETTABLE_STATUSES = ("new", "in_progress", "done")
+VISIBLE_STATUSES = BOARD_STATUSES
 ALLOWED_ROLES = ("curator", "head_curator", "admin")
 
 
@@ -27,23 +41,19 @@ def _require_role(current_user: UserInDB) -> None:
         )
 
 
-def _serialize(row: CuratorOnboarding, az: Optional[AssignmentZeroSubmission]) -> dict:
-    student = row.student
-    return {
-        "id": row.id,
-        "student_id": row.student_id,
-        "student_name": (student.official_full_name or student.name) if student else "",
-        "group_id": row.group_id,
-        "group_name": row.group.name if row.group else None,
-        "curator_id": row.curator_id,
-        "curator_name": (row.curator.name if row.curator else None),
-        "telegram_id": az.telegram_id if az else None,
-        "telegram_link": telegram_link(az.telegram_id) if az else None,
-        "phone_number": az.phone_number if az else None,
-        "parent_phone_number": az.parent_phone_number if az else None,
-        "status": row.status,
-        "created_at": row.created_at,
-    }
+def _serialize(row, az: Optional[AssignmentZeroSubmission]) -> dict:
+    """Legacy card shape — kept field-for-field so existing clients do not break, with the
+    new lifecycle fields added alongside."""
+    data = serialize_card(row)
+    data.update(
+        {
+            "telegram_id": az.telegram_id if az else None,
+            "telegram_link": telegram_link(az.telegram_id) if az else None,
+            "phone_number": az.phone_number if az else None,
+            "parent_phone_number": az.parent_phone_number if az else None,
+        }
+    )
+    return data
 
 
 @router.get("/")
@@ -53,29 +63,23 @@ def list_onboarding(
     curator_id: Optional[int] = Query(None),
 ):
     _require_role(current_user)
-    q = db.query(CuratorOnboarding).filter(
-        CuratorOnboarding.status.in_(VISIBLE_STATUSES),
-        # Hide the launch backfill baseline: existing pairs were seeded as 'done' with no
-        # human actioner (completed_by IS NULL) so the board starts clean. Genuinely
-        # onboarded students always have completed_by set, so they still show in Завершено.
-        ~((CuratorOnboarding.status == "done") & (CuratorOnboarding.completed_by.is_(None))),
-    )
     if current_user.role == "curator":
-        q = q.filter(CuratorOnboarding.curator_id == current_user.id)
+        curator_ids = [current_user.id]
     elif curator_id is not None:
-        q = q.filter(CuratorOnboarding.curator_id == curator_id)
-    rows = q.options(
-        joinedload(CuratorOnboarding.student),
-        joinedload(CuratorOnboarding.group),
-        joinedload(CuratorOnboarding.curator),
-    ).order_by(CuratorOnboarding.created_at.desc()).all()
+        curator_ids = [curator_id]
+    else:
+        curator_ids = None
 
-    # batch-load contact info
+    rows = load_board(db, curator_ids=curator_ids)
+
     student_ids = [r.student_id for r in rows]
     az_map = {}
     if student_ids:
-        for az in db.query(AssignmentZeroSubmission).filter(
-                AssignmentZeroSubmission.user_id.in_(student_ids)).all():
+        for az in (
+            db.query(AssignmentZeroSubmission)
+            .filter(AssignmentZeroSubmission.user_id.in_(student_ids))
+            .all()
+        ):
             az_map[az.user_id] = az
     return {"cards": [_serialize(r, az_map.get(r.student_id)) for r in rows]}
 
@@ -90,21 +94,20 @@ def update_onboarding(
     _require_role(current_user)
     if payload.status not in SETTABLE_STATUSES:
         raise HTTPException(status_code=400, detail="invalid status")
-    row = db.query(CuratorOnboarding).filter(CuratorOnboarding.id == card_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="not found")
-    if current_user.role == "curator" and row.curator_id != current_user.id:
-        raise HTTPException(status_code=403, detail="forbidden")
+    actor = OnboardingActor.from_user(current_user)
+    try:
+        row = get_card(db, card_id, actor)
+        row = set_status(db, row, payload.status, actor)
+    except OnboardingNotFound:
+        raise HTTPException(status_code=404, detail="not found") from None
+    except OnboardingPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    row.status = payload.status
-    if payload.status == "done":
-        row.completed_at = datetime.now(timezone.utc)
-        row.completed_by = current_user.id
-    else:
-        row.completed_at = None
-        row.completed_by = None
-    db.commit()
-    db.refresh(row)
-    az = db.query(AssignmentZeroSubmission).filter(
-        AssignmentZeroSubmission.user_id == row.student_id).first()
+    az = (
+        db.query(AssignmentZeroSubmission)
+        .filter(AssignmentZeroSubmission.user_id == row.student_id)
+        .first()
+    )
     return _serialize(row, az)

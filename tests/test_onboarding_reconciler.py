@@ -2,8 +2,10 @@ import pytest
 from datetime import datetime, timezone, timedelta
 
 from src.schemas.models import CuratorOnboarding, GroupStudent
-# reuse the transactional db fixture + factories from the exams test module
-from tests.test_exams_rbac import db, _user, _group, _enrol  # noqa: F401
+# reuse the factories from the exams test module; the session comes from the
+# commit-tolerant fixture, because the reconciler under test commits.
+from tests.test_exams_rbac import _user, _group, _enrol  # noqa: F401
+from tests.onboarding_fixtures import db  # noqa: F401
 
 
 def _cards(db, curator_id):
@@ -69,7 +71,15 @@ def test_same_curator_second_group_no_duplicate(db):
     assert len(_cards(db, c.id)) == 1      # one card despite two groups
 
 
-def test_done_card_survives_and_reactivation(db):
+def test_done_card_survives_and_history_is_never_revived(db):
+    """A closed cycle is history; a live pair gets a *new* cycle, not the old row back.
+
+    The reconciler used to flip a ``cancelled`` row back to ``new`` in place. That silently
+    destroyed the record that a previous relationship had ended — the row's created_at, its
+    completion and its notes all now described a relationship that was not the one on the
+    board. Reviving is replaced by opening cycle 2 and leaving cycle 1 exactly as it was.
+    """
+    from src.curator.onboarding_core import close_cycle
     from src.curator.onboarding_service import reconcile_onboarding
     c = _user(db, "curator", "ob-c5@t.io")
     s = _user(db, "student", "ob-s5@t.io")
@@ -77,15 +87,22 @@ def test_done_card_survives_and_reactivation(db):
     _enrol(db, g, s)
     reconcile_onboarding(db)
     card = _cards(db, c.id)[0]
+    first_id = card.id
     card.status = "done"
     db.flush()
     reconcile_onboarding(db)
     assert _cards(db, c.id)[0].status == "done"   # done is terminal, not re-created
-    # cancel path -> reactivate
-    card.status = "cancelled"
-    db.flush()
+
+    # Close the cycle the way losing the student would, then give the student back.
+    close_cycle(db, card, "relationship_ended")
+    db.commit()
     reconcile_onboarding(db)
-    assert _cards(db, c.id)[0].status == "new"    # active pair revives a cancelled card
+
+    rows = sorted(_cards(db, c.id), key=lambda r: r.cycle_no)
+    assert len(rows) == 2, "a returning student gets a second cycle"
+    assert rows[0].id == first_id and rows[0].ended_at is not None, "history untouched"
+    assert rows[0].status == "done", "and still says what actually happened"
+    assert rows[1].cycle_no == 2 and rows[1].status == "new" and rows[1].ended_at is None
 
 
 def test_null_group_membership_created_at_does_not_crash(db):

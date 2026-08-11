@@ -1,5 +1,6 @@
 import pytest
-from tests.test_exams_rbac import db, _user, _group, _enrol  # noqa: F401
+from tests.test_exams_rbac import _user, _group, _enrol  # noqa: F401
+from tests.onboarding_fixtures import db  # noqa: F401 - commit-tolerant session
 from src.curator.onboarding_service import reconcile_onboarding
 from src.schemas.models import CuratorOnboarding
 
@@ -69,6 +70,13 @@ def test_patch_to_done_stamps_completion(db):
 
 
 def test_curator_cannot_patch_foreign_card(db):
+    """Refused — and without confirming that the card exists.
+
+    This used to answer 403, which tells the caller "that id is real, just not yours" and
+    turns the endpoint into an enumeration oracle for another curator's roster. The card is
+    now reported as simply not found, which is what a curator who may not see it should be
+    told. Either code satisfies "must not mutate"; only one of them also refuses to leak.
+    """
     from fastapi import HTTPException
     from src.curator.routes.onboarding import update_onboarding, OnboardingStatusUpdate
     w = _seed(db)
@@ -77,4 +85,8 @@ def test_curator_cannot_patch_foreign_card(db):
         update_onboarding(card_id=foreign.id,
                           payload=OnboardingStatusUpdate(status="done"),
                           db=db, current_user=w["c"])
-    assert ei.value.status_code == 403
+    assert ei.value.status_code in (403, 404)
+    assert ei.value.status_code == 404, "existence of another curator's card must not leak"
+
+    db.refresh(foreign)
+    assert foreign.status != "done", "and of course nothing was mutated"
