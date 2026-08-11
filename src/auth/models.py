@@ -6,6 +6,34 @@ from typing import List
 from src.models.base import Base
 
 
+class TeacherHourlyRate(Base):
+    """A teacher's current pay rates, owned and written by the CRM.
+
+    The CRM decides pay: career level («Ступенчатая оплата»), lesson kind, and — for group
+    lessons — how many groups the teacher is running. The LMS only needs the resulting
+    numbers, so the CRM pushes them here through the same LMS-write session it already uses
+    for ``users.official_full_name``. Nothing in the LMS computes or edits these.
+
+    Why mirrored instead of called live: the teacher's own dashboard builds their salary
+    breakdown from this, and that page must keep working when the CRM is unreachable. It
+    also avoids giving the LMS an outbound credential it has no other use for.
+
+    A teacher with no row falls back to the rate the caller passes, which is the behaviour
+    that existed before levels — so this is additive, never a regression.
+    """
+
+    __tablename__ = "teacher_hourly_rates"
+
+    teacher_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    level = Column(String(32), nullable=False, default="Level 1")
+    individual_rate = Column(Integer, nullable=False, default=0)
+    group_rate = Column(Integer, nullable=False, default=0)
+    pair_rate = Column(Integer, nullable=True)
+    # Which band of the group-count table `group_rate` came from, for display only.
+    group_band = Column(String(32), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class UserInDB(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
