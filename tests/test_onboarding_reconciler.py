@@ -88,6 +88,23 @@ def test_done_card_survives_and_reactivation(db):
     assert _cards(db, c.id)[0].status == "new"    # active pair revives a cancelled card
 
 
+def test_null_group_membership_created_at_does_not_crash(db):
+    from src.curator.onboarding_service import reconcile_onboarding
+    c = _user(db, "curator", "ob-null@t.io")
+    s = _user(db, "student", "ob-null-s@t.io")
+    g1 = _group(db, "OB N1", curator_id=c.id)
+    g2 = _group(db, "OB N2", curator_id=c.id)
+    _enrol(db, g1, s)
+    _enrol(db, g2, s)
+    # force one membership timestamp to NULL (external CRM inserts can do this)
+    rows = db.query(GroupStudent).filter(GroupStudent.student_id == s.id).all()
+    rows[0].created_at = None
+    db.flush()
+    reconcile_onboarding(db)  # must not raise
+    cards = db.query(CuratorOnboarding).filter(CuratorOnboarding.curator_id == c.id).all()
+    assert len(cards) == 1
+
+
 def test_telegram_link():
     from src.curator.onboarding_service import telegram_link
     assert telegram_link("@durov") == "https://t.me/durov"

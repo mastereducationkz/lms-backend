@@ -46,7 +46,7 @@ def compute_active_pairs(db) -> dict:
     seen_created: dict = {}
     for curator_id, student_id, group_id, created_at in rows:
         key = (curator_id, student_id)
-        ts = created_at or datetime.min.replace(tzinfo=timezone.utc)
+        ts = created_at or datetime.min
         if key not in pairs or ts > seen_created[key]:
             pairs[key] = group_id
             seen_created[key] = ts
