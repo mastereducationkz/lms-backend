@@ -1,5 +1,8 @@
 from src.models.base import Base
 
+# Registered here so `Base.metadata.create_all` and Alembic autogenerate both see it.
+from src.crm_audit.models import CrmAuditOutbox
+
 from src.auth.models import UserInDB, PointHistory, UserPushToken
 from src.courses.models import (
     Group, GroupStudent, Step, Course, CourseHeadTeacher,

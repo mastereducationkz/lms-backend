@@ -56,6 +56,22 @@ def main():
     except Exception as e:
         logger.error(f"Failed to start student-sync drainer: {e}", exc_info=True)
 
+    # CRM audit outbox drainer: delivers LMS-owned audit events (group, membership, lesson
+    # and attendance changes made inside the LMS) to the CRM. No-op until
+    # CRM_AUDIT_INGEST_URL is set; scheduler-container only so the API never double-drains.
+    try:
+        import threading
+        from src.crm_audit.drainer import run_drain_loop as run_crm_audit_drain
+
+        threading.Thread(
+            target=run_crm_audit_drain,
+            kwargs={"poll_seconds": int(os.getenv("CRM_AUDIT_POLL_SECONDS", "20"))},
+            daemon=True,
+            name="crm-audit-drainer",
+        ).start()
+    except Exception as e:
+        logger.error(f"Failed to start crm-audit drainer: {e}", exc_info=True)
+
     # Trial-access bookkeeping: flips expired trial grants' status (enforcement is
     # request-time; this only keeps admin list views truthful). Scheduler-container only.
     try:

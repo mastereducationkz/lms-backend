@@ -20,3 +20,5 @@ sync_prod_db.sh
 # Ruflo runtime state
 .claude-flow/
 .swarm/
+
+.venv
