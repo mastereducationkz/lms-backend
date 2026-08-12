@@ -2982,6 +2982,7 @@ def get_teacher_salary_breakdown(
     # able to say what the rate WAS. With neither, fall back to the historical default so an
     # unsynced teacher keeps working exactly as before.
     from src.auth.models import TeacherHourlyRate
+    from src.services.lesson_minutes import amount_for, format_hours, lesson_minutes
 
     stored = (
         db.query(TeacherHourlyRate)
@@ -3008,8 +3009,10 @@ def get_teacher_salary_breakdown(
                 "program_start": start_label,
                 "program_end": finish_d.isoformat() if finish_d else None,
                 "lesson_dates": [],
+                "minutes": 0,
             }
         by_group[group.id]["lesson_dates"].append(event.start_datetime.date())
+        by_group[group.id]["minutes"] += lesson_minutes(event.start_datetime, event.end_datetime)
 
     groups = []
     total_amount = 0
@@ -3025,7 +3028,10 @@ def get_teacher_salary_breakdown(
             "indi" in item["group_name"].lower()
         )
         applied_rate = individual_rate if is_indi_group else group_rate
-        amount = lesson_count * applied_rate
+        # The stored rate is hourly and was multiplied by the lesson *count*, so a
+        # ninety-minute group paid what a sixty-minute one did.
+        minutes = item["minutes"]
+        amount = amount_for(applied_rate, minutes)
         total_lessons += lesson_count
         total_amount += amount
         groups.append({
@@ -3035,6 +3041,8 @@ def get_teacher_salary_breakdown(
             "program_end": item["program_end"],
             "lesson_dates": [d.isoformat() for d in dates],
             "lesson_count": lesson_count,
+            "lesson_minutes": minutes,
+            "lesson_hours": format_hours(minutes),
             "lesson_rate_tenge": applied_rate,
             "amount_tenge": amount,
         })
@@ -3045,9 +3053,13 @@ def get_teacher_salary_breakdown(
         start_text = datetime.fromisoformat(g["program_start"]).strftime("%d.%m.%y") if g["program_start"] else "—"
         end_text = datetime.fromisoformat(g["program_end"]).strftime("%d.%m.%y") if g["program_end"] else "—"
         lines.extend([
-            f"{idx}. {g['group_name']} — {g['lesson_count']} уроков",
+            # Hours are stated whenever they are not simply the lesson count, so a mixed
+            # month is legible instead of looking like an arithmetic error.
+            f"{idx}. {g['group_name']} — {g['lesson_count']} уроков"
+            + ("" if g["lesson_minutes"] == g["lesson_count"] * 60
+               else f" ({g['lesson_hours']} ч)"),
             f"{g['amount_tenge']} тг",
-            f"(ставка: {g['lesson_rate_tenge']} тг/урок)",
+            f"(ставка: {g['lesson_rate_tenge']} тг/час)",
             f"({dates_text})" if dates_text else "(—)",
             f"старт {start_text} — финиш {end_text}",
             "",

@@ -2488,6 +2488,8 @@ async def get_teacher_salary_breakdown(
         .all()
     )
 
+    from src.services.lesson_minutes import amount_for, format_hours, lesson_minutes
+
     by_group: dict[int, dict] = {}
     for event, group in event_rows:
         if group.id not in by_group:
@@ -2500,8 +2502,10 @@ async def get_teacher_salary_breakdown(
                 "program_start": start_label,
                 "program_end": finish_d.isoformat() if finish_d else None,
                 "lesson_dates": [],
+                "minutes": 0,
             }
         by_group[group.id]["lesson_dates"].append(event.start_datetime.date())
+        by_group[group.id]["minutes"] += lesson_minutes(event.start_datetime, event.end_datetime)
 
     groups = []
     total_amount = 0
@@ -2510,7 +2514,10 @@ async def get_teacher_salary_breakdown(
     for _, item in sorted(by_group.items(), key=lambda x: x[1]["group_name"].lower()):
         dates = sorted(item["lesson_dates"])
         lesson_count = len(dates)
-        amount = lesson_count * lesson_rate
+        # `lesson_rate` is hourly; multiplying it by the lesson count underpaid every
+        # lesson longer than an hour.
+        minutes = item["minutes"]
+        amount = amount_for(lesson_rate, minutes)
         total_lessons += lesson_count
         total_amount += amount
         groups.append({
@@ -2520,6 +2527,8 @@ async def get_teacher_salary_breakdown(
             "program_end": item["program_end"],
             "lesson_dates": [d.isoformat() for d in dates],
             "lesson_count": lesson_count,
+            "lesson_minutes": minutes,
+            "lesson_hours": format_hours(minutes),
             "amount_tenge": amount,
         })
 
