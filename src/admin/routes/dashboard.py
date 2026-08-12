@@ -2960,6 +2960,11 @@ def get_teacher_salary_breakdown(
     start_dt = datetime.combine(start_d, datetime.min.time())
     end_dt = datetime.combine(end_d, datetime.max.time())
 
+    # A payslip lists work already done. Without the `end_datetime <= now` bound a breakdown
+    # for the second half of the month, generated on the 13th, quietly billed lessons that
+    # have not happened yet — the CRM's own payroll has always had this filter and this copy
+    # did not.
+    now_utc = datetime.utcnow()
     event_rows = (
         db.query(Event, Group)
         .join(EventGroup, EventGroup.event_id == Event.id)
@@ -2969,6 +2974,7 @@ def get_teacher_salary_breakdown(
             Event.is_active == True,
             Event.start_datetime >= start_dt,
             Event.start_datetime <= end_dt,
+            Event.end_datetime <= now_utc,
             or_(
                 Event.teacher_id == current_user.id,
                 and_(Event.teacher_id.is_(None), Group.teacher_id == current_user.id),
@@ -3010,6 +3016,12 @@ def get_teacher_salary_breakdown(
                 "program_end": finish_d.isoformat() if finish_d else None,
                 "lesson_dates": [],
                 "minutes": 0,
+                # A lesson taught in a group somebody else is responsible for. Paid to whoever
+                # stood in front of it, but a payslip that does not name it leaves the teacher
+                # to work out why an unfamiliar group is on their list.
+                "is_substitution": bool(
+                    group.teacher_id is not None and group.teacher_id != current_user.id
+                ),
             }
         by_group[group.id]["lesson_dates"].append(event.start_datetime.date())
         by_group[group.id]["minutes"] += lesson_minutes(event.start_datetime, event.end_datetime)
@@ -3044,10 +3056,46 @@ def get_teacher_salary_breakdown(
             "lesson_minutes": minutes,
             "lesson_hours": format_hours(minutes),
             "lesson_rate_tenge": applied_rate,
+            "is_substitution": item["is_substitution"],
             "amount_tenge": amount,
         })
 
-    lines = ["Здравствуйте!", f"Зарплата на {end_d.strftime('%d.%m.%Y')}:", ""]
+    period_text = f"{start_d.strftime('%d.%m.%Y')} — {end_d.strftime('%d.%m.%Y')}"
+    lines = [
+        "Здравствуйте!",
+        f"Зарплата на {end_d.strftime('%d.%m.%Y')}:",
+        # The period was only implied by the dates in the group lines, so a breakdown for the
+        # wrong half of the month looked exactly like one for the right half.
+        f"Период: {period_text}",
+        "",
+    ]
+
+    if not groups:
+        # Saying "0 тг" for a period whose lessons simply have not happened yet reads as a
+        # payroll error. Say which it is.
+        lines.extend([
+            "За этот период проведённых уроков нет.",
+            "",
+            "В расчёт попадают только уже проведённые уроки — те, что ещё предстоят,"
+            " появятся здесь после проведения.",
+        ])
+        message = "\n".join(lines)
+        return {
+            "teacher_id": current_user.id,
+            "teacher_name": current_user.name,
+            "period_start": start_d.isoformat(),
+            "period_end": end_d.isoformat(),
+            "lesson_rate": group_rate,
+            "individual_rate": individual_rate,
+            "level": stored.level if stored else None,
+            "group_band": stored.group_band if stored else None,
+            "groups": [],
+            "total_lessons": 0,
+            "total_amount": 0,
+            "message": message,
+            "telegram_username": "@gauhar107",
+            "telegram_username_link": "https://t.me/gauhar107",
+        }
     for idx, g in enumerate(groups, start=1):
         dates_text = "; ".join(datetime.fromisoformat(d).strftime("%d.%m") for d in g["lesson_dates"])
         start_text = datetime.fromisoformat(g["program_start"]).strftime("%d.%m.%y") if g["program_start"] else "—"
@@ -3055,7 +3103,8 @@ def get_teacher_salary_breakdown(
         lines.extend([
             # Hours are stated whenever they are not simply the lesson count, so a mixed
             # month is legible instead of looking like an arithmetic error.
-            f"{idx}. {g['group_name']} — {g['lesson_count']} уроков"
+            f"{idx}. {g['group_name']}{' · замена' if g['is_substitution'] else ''}"
+            f" — {g['lesson_count']} уроков"
             + ("" if g["lesson_minutes"] == g["lesson_count"] * 60
                else f" ({g['lesson_hours']} ч)"),
             f"{g['amount_tenge']} тг",
@@ -3069,9 +3118,26 @@ def get_teacher_salary_breakdown(
     telegram_username = "@gauhar107"
     telegram_username_link = "https://t.me/gauhar107"
 
-    lines.extend([
-        f"Итого: {total_expr}={total_amount} тг",
-    ])
+    lines.append(f"Итого: {total_expr}={total_amount} тг")
+
+    # Why *this* rate. The group rate comes from the teacher's level and how many groups they
+    # run in total — not from how many happen to appear on this payslip, which is what made
+    # «8000 тг/час» look arbitrary next to a list of five groups.
+    if stored is not None:
+        basis = [f"уровень: {stored.level}"] if stored.level else []
+        if stored.group_band:
+            basis.append(f"группы: {stored.group_band}")
+        lines.extend([
+            "",
+            f"Базовая ставка — групповой урок {group_rate} тг/час, "
+            f"индивидуальный {individual_rate} тг/час"
+            + (f" ({', '.join(basis)})" if basis else "")
+            + ".",
+            "Ставка за групповые уроки зависит от уровня педагога и общего количества групп,"
+            " а не от числа групп в этом расчёте.",
+        ])
+    if any(g["is_substitution"] for g in groups):
+        lines.append("«Замена» — урок в группе другого педагога; он оплачивается вам.")
 
     return {
         "teacher_id": current_user.id,

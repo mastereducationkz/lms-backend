@@ -2471,6 +2471,8 @@ async def get_teacher_salary_breakdown(
     start_dt = datetime.combine(start_d, datetime.min.time())
     end_dt = datetime.combine(end_d, datetime.max.time())
 
+    # A payslip lists work already done — see the admin copy for why this bound matters.
+    now_utc = datetime.utcnow()
     event_rows = (
         db.query(Event, Group)
         .join(EventGroup, EventGroup.event_id == Event.id)
@@ -2480,6 +2482,7 @@ async def get_teacher_salary_breakdown(
             Event.is_active == True,
             Event.start_datetime >= start_dt,
             Event.start_datetime <= end_dt,
+            Event.end_datetime <= now_utc,
             or_(
                 Event.teacher_id == current_user.id,
                 and_(Event.teacher_id.is_(None), Group.teacher_id == current_user.id),
@@ -2503,6 +2506,10 @@ async def get_teacher_salary_breakdown(
                 "program_end": finish_d.isoformat() if finish_d else None,
                 "lesson_dates": [],
                 "minutes": 0,
+                # Taught in a group somebody else is responsible for.
+                "is_substitution": bool(
+                    group.teacher_id is not None and group.teacher_id != current_user.id
+                ),
             }
         by_group[group.id]["lesson_dates"].append(event.start_datetime.date())
         by_group[group.id]["minutes"] += lesson_minutes(event.start_datetime, event.end_datetime)
@@ -2529,23 +2536,43 @@ async def get_teacher_salary_breakdown(
             "lesson_count": lesson_count,
             "lesson_minutes": minutes,
             "lesson_hours": format_hours(minutes),
+            "is_substitution": item["is_substitution"],
             "amount_tenge": amount,
         })
 
-    lines = ["Здравствуйте!", f"Зарплата на {end_d.strftime('%d.%m.%Y')}:", ""]
+    lines = [
+        "Здравствуйте!",
+        f"Зарплата на {end_d.strftime('%d.%m.%Y')}:",
+        f"Период: {start_d.strftime('%d.%m.%Y')} — {end_d.strftime('%d.%m.%Y')}",
+        "",
+    ]
+    if not groups:
+        lines.extend([
+            "За этот период проведённых уроков нет.",
+            "",
+            "В расчёт попадают только уже проведённые уроки — те, что ещё предстоят,"
+            " появятся здесь после проведения.",
+        ])
     for idx, g in enumerate(groups, start=1):
         dates_text = "; ".join(datetime.fromisoformat(d).strftime("%d.%m") for d in g["lesson_dates"])
         start_text = datetime.fromisoformat(g["program_start"]).strftime("%d.%m.%y") if g["program_start"] else "—"
         end_text = datetime.fromisoformat(g["program_end"]).strftime("%d.%m.%y") if g["program_end"] else "—"
         lines.extend([
-            f"{idx}. {g['group_name']} — {g['lesson_count']} уроков",
+            f"{idx}. {g['group_name']}{' · замена' if g['is_substitution'] else ''}"
+            f" — {g['lesson_count']} уроков"
+            + ("" if g["lesson_minutes"] == g["lesson_count"] * 60
+               else f" ({g['lesson_hours']} ч)"),
             f"{g['amount_tenge']} тг",
+            f"(ставка: {lesson_rate} тг/час)",
             f"({dates_text})" if dates_text else "(—)",
             f"старт {start_text} — финиш {end_text}",
             "",
         ])
 
     total_expr = "+".join(str(g["amount_tenge"]) for g in groups) if groups else "0"
+    if any(g["is_substitution"] for g in groups):
+        lines.append("«Замена» — урок в группе другого педагога; он оплачивается вам.")
+        lines.append("")
     lines.extend([
         f"Итого: {total_expr}={total_amount} тг",
         "",
