@@ -3,9 +3,11 @@ Tests for the LMS consumer side of the external exam-platform integration:
 - fetch_batch_scores_by_date / fetch_scores_by_date forward exam_type.
 - _post attaches the X-Exam-Type header only when an exam type is given.
 
-Scaled weekly-set scores are no longer consumed by the leaderboard, so
-SATService.extract_weekly_set (and its tests) are gone; the raw per-section
-correct/total counts are what remains.
+Scaled weekly-set scores are no longer surfaced as a standalone object by the
+leaderboard, so SATService.extract_weekly_set (and its tests) are gone; the raw
+per-section correct/total counts are what remains. NUET's batch-scores-by-week
+endpoint has no flat correct-count fields though — extract_section_scores falls
+back to reading the nested weeklySet.mathScaled/verbalScaled for that case.
 
 No DB or network needed — httpx is stubbed.
 """
@@ -39,6 +41,37 @@ def test_totals_present_in_payload_win_for_every_product():
         scores = SATService.extract_section_scores(item, exam_type=exam_type)
         assert scores["math_total"] == 10, exam_type
         assert scores["verbal_total"] == 12, exam_type
+
+
+def test_nuet_weekly_set_falls_back_to_nested_scaled_scores():
+    """batch-scores-by-week's real NUET response has no flat mathCorrectCount at
+    all — scores are nested under "weeklySet" (mathScaled/verbalScaled). Without
+    this fallback every NUET group's Math/Verbal columns read as "not submitted"
+    even when the student completed the weekly set (2026-08-12 curator report,
+    group "Ерсултан - NUET August 1 2026")."""
+    item = {
+        "email": "student@example.com",
+        "weeklySet": {
+            "id": 55, "name": "Weekly Set [NUET] (Week 1)", "weekNumber": 1,
+            "examType": "NUET", "mathScaled": 80, "verbalScaled": 109,
+            "total": 189, "completed": True, "completedAt": "2026-08-09T15:24:39",
+        },
+    }
+    scores = SATService.extract_section_scores(item, exam_type="NUET")
+    assert scores == {"math_correct": 80, "verbal_correct": 109,
+                      "math_total": None, "verbal_total": None}
+
+    # A student who hasn't touched the weekly set at all: no nested scores either.
+    not_started = {"email": "other@example.com", "weeklySet": {"completed": False}}
+    assert SATService.extract_section_scores(not_started, exam_type="NUET") == {
+        "math_correct": None, "verbal_correct": None,
+        "math_total": None, "verbal_total": None,
+    }
+
+    # SAT must never fall back to the nested shape (it has its own flat contract).
+    assert SATService.extract_section_scores(
+        {"weeklySet": {"mathScaled": 80}}, exam_type="SAT"
+    )["math_correct"] is None
 
 
 def test_fetch_forwards_exam_type(monkeypatch):

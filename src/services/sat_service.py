@@ -135,6 +135,15 @@ class SATService:
         Falls back to known fixed question counts: Math=22, Verbal=27. Those counts
         are SAT-specific, so any other product (NUET) reports no total at all rather
         than a wrong denominator — the UI renders the bare correct count in that case.
+
+        NUET's batch-scores-by-week response nests scores under "weeklySet"
+        (mathScaled/verbalScaled) instead of the flat mathCorrectCount/verbalCorrectCount
+        that SAT's batch-scores-by-date returns — a different shape from a different
+        upstream endpoint. Verified against the live NUET API (2026-08-12): reading only
+        the flat keys left every NUET group's math/verbal always None ("Не сдано"), even
+        for students who had completed the weekly set. The flat keys are tried first (in
+        case a non-SAT product ever sends them directly) and the nested weeklySet is only
+        a fallback when both are absent.
         """
         is_sat = not exam_type or exam_type.upper() == "SAT"
         math_total = (
@@ -147,9 +156,15 @@ class SATService:
             or item.get("verbalQuestionCount")
             or (SATService.SAT_VERBAL_TOTAL_DEFAULT if is_sat else None)
         )
+        math_correct = item.get("mathCorrectCount")
+        verbal_correct = item.get("verbalCorrectCount")
+        if not is_sat and math_correct is None and verbal_correct is None:
+            weekly_set = item.get("weeklySet") or {}
+            math_correct = weekly_set.get("mathScaled")
+            verbal_correct = weekly_set.get("verbalScaled")
         return {
-            "math_correct": item.get("mathCorrectCount"),
-            "verbal_correct": item.get("verbalCorrectCount"),
+            "math_correct": math_correct,
+            "verbal_correct": verbal_correct,
             "math_total": math_total,
             "verbal_total": verbal_total,
         }
