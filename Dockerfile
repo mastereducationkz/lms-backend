@@ -12,6 +12,12 @@ RUN apt-get update && apt-get install -y \
 
 # Deno: JS runtime yt-dlp needs to solve YouTube's nsig challenge. Without it YouTube
 # throttles video downloads to a crawl (read timeouts). yt-dlp auto-detects deno on PATH.
+#
+# The download retries because GitHub's release CDN returns 503 often enough to have failed
+# four builds and deploys in a single evening, and a plain `curl -fsSL` gives up on the first
+# one. Eight attempts with widening backoff, each with curl's own retry; the archive is then
+# verified non-empty, because a truncated download would otherwise fail later in unzip with a
+# far less obvious message.
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates \
     && ARCH="$(uname -m)" \
     && case "$ARCH" in \
@@ -19,7 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-c
          aarch64|arm64) DENO_ARCH=aarch64-unknown-linux-gnu ;; \
          *) echo "unsupported arch: $ARCH" && exit 1 ;; \
        esac \
-    && curl -fsSL "https://github.com/denoland/deno/releases/latest/download/deno-${DENO_ARCH}.zip" -o /tmp/deno.zip \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
+         curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --retry-connrefused \
+           "https://github.com/denoland/deno/releases/latest/download/deno-${DENO_ARCH}.zip" \
+           -o /tmp/deno.zip && break; \
+         echo "deno download attempt ${attempt} failed; retrying"; \
+         sleep $((attempt * 5)); \
+       done \
+    && test -s /tmp/deno.zip \
     && unzip -o /tmp/deno.zip -d /usr/local/bin \
     && chmod +x /usr/local/bin/deno \
     && rm /tmp/deno.zip \
