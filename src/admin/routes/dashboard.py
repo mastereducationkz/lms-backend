@@ -3072,30 +3072,19 @@ def get_teacher_salary_breakdown(
 
     if not groups:
         # Saying "0 тг" for a period whose lessons simply have not happened yet reads as a
-        # payroll error. Say which it is.
+        # payroll error. Say which it is — then fall through to the single return below.
+        #
+        # This used to return early with its own dict, which is how it came to spell
+        # `total_amount_tenge` as `total_amount` and `message_text` as `message`: the
+        # dashboard read `total_amount_tenge`, got `undefined`, and crashed on
+        # `.toLocaleString()`. One exit means the response shape cannot drift between the
+        # empty case and the ordinary one.
         lines.extend([
             "За этот период проведённых уроков нет.",
             "",
             "В расчёт попадают только уже проведённые уроки — те, что ещё предстоят,"
             " появятся здесь после проведения.",
         ])
-        message = "\n".join(lines)
-        return {
-            "teacher_id": current_user.id,
-            "teacher_name": current_user.name,
-            "period_start": start_d.isoformat(),
-            "period_end": end_d.isoformat(),
-            "lesson_rate": group_rate,
-            "individual_rate": individual_rate,
-            "level": stored.level if stored else None,
-            "group_band": stored.group_band if stored else None,
-            "groups": [],
-            "total_lessons": 0,
-            "total_amount": 0,
-            "message": message,
-            "telegram_username": "@gauhar107",
-            "telegram_username_link": "https://t.me/gauhar107",
-        }
     for idx, g in enumerate(groups, start=1):
         dates_text = "; ".join(datetime.fromisoformat(d).strftime("%d.%m") for d in g["lesson_dates"])
         start_text = datetime.fromisoformat(g["program_start"]).strftime("%d.%m.%y") if g["program_start"] else "—"
@@ -3118,7 +3107,8 @@ def get_teacher_salary_breakdown(
     telegram_username = "@gauhar107"
     telegram_username_link = "https://t.me/gauhar107"
 
-    lines.append(f"Итого: {total_expr}={total_amount} тг")
+    if groups:
+        lines.append(f"Итого: {total_expr}={total_amount} тг")
 
     # Why *this* rate. The group rate comes from the teacher's level and how many groups they
     # run in total — not from how many happen to appear on this payslip, which is what made
