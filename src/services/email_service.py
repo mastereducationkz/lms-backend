@@ -10,6 +10,10 @@ import requests
 from dotenv import load_dotenv
 
 from src.services import email_log
+from src.curator.email_policy import (
+    SUPPRESSION_REASON as CURATOR_SUPPRESSION_REASON,
+    is_operational_event,
+)
 
 # Load environment variables
 load_dotenv()
@@ -85,6 +89,42 @@ class EmailService:
             "Content-Type": "application/json"
         }
     
+    @staticmethod
+    def _drop_curator_recipients(emails: List[str]) -> tuple[List[str], List[str]]:
+        """Split recipients into (may receive, must not). Fails **closed**.
+
+        Opens its own short-lived session: this runs on the send path, which is called from
+        many transactions and from background workers, and it must not join any of them. If
+        the lookup itself fails the recipients are withheld rather than sent — an unavailable
+        policy check must not become a delivered message.
+        """
+        from src.config import SessionLocal
+        from src.curator.email_policy import curator_user_ids
+
+        if not emails:
+            return [], []
+        db = SessionLocal()
+        try:
+            from src.schemas.models import UserInDB
+
+            rows = (
+                db.query(UserInDB.id, UserInDB.email)
+                .filter(UserInDB.email.in_(emails))
+                .all()
+            )
+            by_id = {int(uid): addr for uid, addr in rows}
+            curator_addresses = {
+                by_id[uid] for uid in curator_user_ids(db, list(by_id.keys())) if uid in by_id
+            }
+        except Exception:  # noqa: BLE001 — withhold rather than risk a leak
+            logger.exception("curator email policy check failed; withholding all recipients")
+            return [], list(emails)
+        finally:
+            db.close()
+        kept = [e for e in emails if e not in curator_addresses]
+        withheld = [e for e in emails if e in curator_addresses]
+        return kept, withheld
+
     def send_email(
         self,
         to_emails: List[str],
@@ -142,6 +182,40 @@ class EmailService:
                 len(valid_emails),
             )
             return None
+
+        # Curators and head curators are notified in-app only. Enforced *here*, at the single
+        # funnel every LMS email passes through, rather than at each composer: there are at
+        # least six code paths that build curator mail, one of them
+        # (`send_lesson_change_curator_notification`) assembles its own HTML and never calls
+        # the shared curator helper, and the next one nobody has written yet would be seventh.
+        #
+        # Identity and account-recovery mail is exempt by allow-list, so invitations and
+        # password resets keep working for curators like anyone else.
+        if is_operational_event(event_type):
+            kept, withheld = self._drop_curator_recipients(valid_emails)
+            for email in withheld:
+                # Recorded, not silently dropped: the journal must show a withheld message
+                # rather than a gap somebody has to guess about.
+                email_log.finish(
+                    email_log.claim(
+                        event_type=event_type,
+                        recipient_email=email,
+                        subject=subject,
+                        recipient_user_id=recipient_user_id,
+                        related_type=related_type,
+                        related_id=related_id,
+                    ),
+                    status="suppressed",
+                    error=CURATOR_SUPPRESSION_REASON,
+                    event_type=event_type,
+                )
+            if not kept:
+                logger.info(
+                    "📭 [EMAIL] all recipients are curators; '%s' withheld (%s)",
+                    subject, CURATOR_SUPPRESSION_REASON,
+                )
+                return None
+            valid_emails = kept
 
         def _journal(email: str, key: Optional[str]) -> Optional[int]:
             return email_log.claim(
@@ -1100,7 +1174,7 @@ def send_lesson_change_curator_notification(
           <h1 style="font-size:20px;font-weight:600;color:#111;margin:0 0 24px;">Изменение расписания</h1>
           <p style="margin:0 0 16px;font-size:15px;">Здравствуйте, {curator_name}!</p>
           <p style="margin:0 0 24px;font-size:15px;">
-            Запрос учителя на изменение урока был одобрен head teacher.
+            Запрос педагога на изменение урока одобрен старшим преподавателем.
           </p>
           <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">{details_html}</table>
           <p style="margin:0;font-size:13px;color:#999;">Master Education LMS</p>

@@ -32,6 +32,25 @@ CURATOR_ROLES = frozenset({"curator", "head_curator"})
 #: Recorded in the email journal so a withheld message is distinguishable from a lost one.
 SUPPRESSION_REASON = "curator_in_app_only"
 
+#: The only mail a curator may still receive: identity and account recovery.
+#:
+#: Expressed as an allow-list of *authentication* types rather than a block-list of
+#: operational ones, and that direction is deliberate. A block-list has to be extended every
+#: time somebody adds an event type, and the failure mode of forgetting is a leaked email. An
+#: allow-list's failure mode is a withheld one, which is the safe direction — and there will
+#: never be a new kind of password reset.
+AUTH_EVENT_TYPES = frozenset({
+    "invite",
+    "trial_invite",
+    "password_reset",
+    "password_changed",
+})
+
+
+def is_operational_event(event_type: Optional[str]) -> bool:
+    """True for anything that is not identity/account-recovery mail."""
+    return (event_type or "other").strip() not in AUTH_EVENT_TYPES
+
 
 def curator_user_ids(db: Session, user_ids: Iterable[int]) -> set[int]:
     """Which of these LMS users hold a curator or head-curator role."""

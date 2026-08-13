@@ -158,3 +158,105 @@ def test_a_policy_lookup_failure_withholds_rather_than_delivers(db, monkeypatch)
 
     assert notifications.send_curator_email("someone@test.local", "s", ["l"]) is False
     assert sent == []
+
+
+# --- the single funnel every LMS email passes through ------------------------------------
+#
+# Guarding each composer is not enough: there are at least six paths that build curator mail,
+# one of them assembles its own HTML and never calls the shared helper, and the next one
+# nobody has written yet would be seventh. `EmailService.send_email` is the one chokepoint.
+
+
+@pytest.fixture
+def service(db, monkeypatch):
+    """A configured service whose HTTP calls are captured, pointed at the test session."""
+    import src.config
+    from src.services import email_service as module
+
+    monkeypatch.setattr(src.config, "SessionLocal", lambda: _NoCloseSession(db))
+    calls: list = []
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"id": "msg-1"}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        module.requests, "post",
+        lambda url, json=None, headers=None, timeout=None: (calls.append(json), _Resp())[1],
+    )
+    svc = module.EmailService()
+    svc.api_key = "re_test_only_not_a_real_key"
+    return svc, calls
+
+
+@pytest.mark.parametrize("event_type", ["curator_transfer", "lesson_change", "curator_notify"])
+def test_operational_mail_to_a_curator_never_leaves_the_funnel(db, service, event_type):
+    """`curator_transfer` and `lesson_change` are the two types production actually
+    delivered to curators — 7 and 2 messages respectively."""
+    svc, calls = service
+    curator = _user(db, "curator")
+    db.flush()
+
+    result = svc.send_email([curator.email], "Тема", "<p>текст</p>", event_type=event_type)
+
+    assert result is None
+    assert calls == [], "nothing was handed to the provider"
+
+
+@pytest.mark.parametrize("event_type", ["invite", "trial_invite", "password_reset", "password_changed"])
+def test_a_curator_still_receives_identity_and_recovery_mail(db, service, event_type):
+    """Allow-list, not block-list: there will never be a new kind of password reset, but
+    there will be new operational event types, and forgetting one must withhold rather than
+    leak."""
+    svc, calls = service
+    curator = _user(db, "curator")
+    db.flush()
+
+    svc.send_email([curator.email], "Доступ", "<p>ссылка</p>", event_type=event_type)
+
+    assert len(calls) == 1
+    assert calls[0]["to"] == [curator.email]
+
+
+def test_a_mixed_recipient_list_drops_only_the_curators(db, service):
+    """A digest addressed to a teacher and a curator still reaches the teacher."""
+    svc, calls = service
+    curator = _user(db, "curator")
+    teacher = _user(db, "teacher")
+    db.flush()
+
+    svc.send_email(
+        [curator.email, teacher.email], "Тема", "<p>x</p>", event_type="lesson_change"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["to"] == [teacher.email], "the curator was removed, the teacher kept"
+
+
+def test_non_curators_are_completely_unaffected(db, service):
+    svc, calls = service
+    for role in ("teacher", "student", "parent", "admin"):
+        user = _user(db, role)
+        db.flush()
+        svc.send_email([user.email], "Тема", "<p>x</p>", event_type="lesson_change")
+    assert len(calls) == 4
+
+
+def test_a_failed_policy_lookup_withholds_every_recipient(db, service, monkeypatch):
+    """Fail closed at the funnel too."""
+    svc, calls = service
+    monkeypatch.setattr(
+        "src.curator.email_policy.curator_user_ids",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+    teacher = _user(db, "teacher")
+    db.flush()
+
+    assert svc.send_email([teacher.email], "Тема", "<p>x</p>", event_type="lesson_change") is None
+    assert calls == []
