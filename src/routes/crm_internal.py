@@ -16,7 +16,7 @@ from src.schemas.models import (
     CreateLessonRequestSchema,
 )
 from src.lesson_requests.services import create_lesson_request_record
-from src.lesson_requests.helpers import enrich_request, notify_approvers_of_request
+from src.lesson_requests.helpers import enrich_request, enrich_requests, notify_approvers_of_request
 from src.services.email_service import send_invite_email
 from src.services.sso_broker import SsoBrokerError, mint_handoff, sso_broker_enabled
 from src.utils.auth_utils import hash_password, verify_lms_stored_password
@@ -228,7 +228,7 @@ async def crm_get_my_lesson_requests(
     if status_filter:
         query = query.filter(LessonRequest.status == status_filter)
     requests = query.order_by(LessonRequest.created_at.desc()).all()
-    return [enrich_request(r, db) for r in requests]
+    return enrich_requests(requests, db)
 
 
 @router.get(
