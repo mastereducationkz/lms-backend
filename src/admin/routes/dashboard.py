@@ -75,32 +75,30 @@ def _missing_attendance_reminders(
     """
     from src.schemas.models import Event, EventGroup, Group
     from src.events.models import Attendance
-    from src.services.payable_lessons import teacher_lesson_clause
+    from src.services.attendance_warnings import warning_eligible_events
 
     if group_ids is not None and not group_ids:
         return []
 
-    events_q = (
-        db.query(Event.id)
-        .join(EventGroup, EventGroup.event_id == Event.id)
-        .filter(
-            Event.event_type == "class",
-            Event.end_datetime <= datetime.utcnow(),
-            Event.end_datetime >= _ATTENDANCE_CUTOFF,
-            Event.is_active == True,
-        )
-    )
-    if start is not None:
-        events_q = events_q.filter(Event.start_datetime >= start)
-    if end is not None:
-        events_q = events_q.filter(Event.start_datetime < end)
-    if group_ids is not None:
-        events_q = events_q.filter(EventGroup.group_id.in_(group_ids))
-    if teacher_id is not None:
-        # Join Group so the NULL-teacher fallback inside teacher_lesson_clause can resolve.
-        events_q = events_q.join(Group, Group.id == EventGroup.group_id).filter(
-            teacher_lesson_clause(teacher_id)
-        )
+    # Eligibility is not this function's to decide any more. `warning_eligible_events` owns
+    # the rule — lesson ended and not cancelled, group still operational, group still has an
+    # active student, register genuinely missing, and the *effective* teacher asked rather
+    # than the group's owner — so the dashboard card, the totals, the detail list, the mobile
+    # view and every reminder derived from unmarked attendance are the same rows.
+    #
+    # The condition this function never had was the group one, which is how a switched-off
+    # group with no active students left kept asking its teacher for 11 registers.
+    events_q = warning_eligible_events(
+        db,
+        teacher_id=teacher_id,
+        group_ids=group_ids,
+        start=start,
+        end=end,
+        # This function compares expected students against marked ones below — a lesson where
+        # one of two was registered is still incomplete — so it must see partially-marked
+        # lessons rather than have them filtered out as "already marked".
+        require_unmarked=False,
+    ).with_entities(Event.id)
     past_event_ids_sq = events_q.distinct().subquery()
 
     # Expected headcount is join-date-aware: a student added to the group AFTER an
