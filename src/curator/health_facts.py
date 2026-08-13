@@ -19,7 +19,8 @@ so a school that has stopped marking sees a data-quality problem rather than a w
 
 **Denominators respect boundaries.** Lessons before the student joined the group, cancelled
 lessons, and lessons inside a freeze period never count. A student who joined in March is not
-responsible for February.
+responsible for February. A freeze is *scoped to a group*: freezing SAT drops the SAT lessons
+and leaves every IELTS denominator exactly as it was, because the student is still attending.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from src.curator.freeze_mirror import GROUP_WIDE
 from src.schemas.models import (
     Assignment,
     AssignmentExtension,
@@ -53,6 +55,9 @@ MARKED_STATUSES = PRESENT_STATUSES | ABSENT_STATUSES
 #: How far back the attendance window may reach. Bounded so one call cannot scan years.
 MAX_WINDOW_DAYS = 120
 
+#: Parsed shape: student → group → spans. Group :data:`GROUP_WIDE` covers every group.
+ScopedSpans = dict[int, dict[int, list[tuple[Optional[date], Optional[date]]]]]
+
 
 def _as_date(value) -> Optional[date]:
     if value is None:
@@ -72,13 +77,16 @@ def health_facts(
     activity_days: int = 7,
     homework_window_days: int = 7,
     progress_days: int = 7,
-    frozen_windows: Optional[dict[int, list[tuple[Optional[str], Optional[str]]]]] = None,
+    frozen_windows: Optional[dict[int, Any]] = None,
 ) -> dict[str, Any]:
     """Per student, per group, the counts the CRM's rules read.
 
-    ``frozen_windows`` maps student id → list of (start, end) ISO dates the CRM considers
-    frozen. Lessons inside them are dropped from every denominator. The CRM supplies them
-    because the CRM owns the freeze lifecycle; the LMS neither stores nor infers it.
+    ``frozen_windows`` maps student id to the (start, end) ISO spans the CRM considers frozen,
+    in either of two shapes: ``{student_id: [[start, end], ...]}`` (student-wide, every group)
+    or ``{student_id: {group_id: [[start, end], ...]}}`` (one entry per frozen enrollment).
+    Lessons inside a span that covers their group are dropped from every denominator. The CRM
+    supplies them because the CRM owns the freeze lifecycle; the LMS neither stores nor infers
+    it here.
     """
     ids = sorted({int(s) for s in student_ids})[:5000]
     if not ids:
@@ -99,6 +107,8 @@ def health_facts(
             "last_progress_at": None,
             "has_homework_data": False,
             "has_progress_data": False,
+            "has_frozen_scope": False,
+            "frozen_group_ids": [],
         }
         for sid in ids
     }
@@ -108,6 +118,16 @@ def health_facts(
         user = users.get(sid)
         if user is not None and user.last_activity_date:
             out[str(sid)]["last_activity_date"] = user.last_activity_date.isoformat()
+
+    # Parsed before anything else reads a membership, because the fully frozen student is the
+    # one who has no memberships left at all and still has to be distinguishable from a
+    # student who simply lost their group — see :func:`_live_frozen_groups`.
+    frozen = _parse_frozen(frozen_windows)
+    for sid in ids:
+        live = _live_frozen_groups(frozen.get(sid), today)
+        if live:
+            out[str(sid)]["has_frozen_scope"] = True
+            out[str(sid)]["frozen_group_ids"] = live
 
     # --- membership --------------------------------------------------------------------
     memberships: dict[int, dict[int, Optional[date]]] = {sid: {} for sid in ids}
@@ -177,8 +197,6 @@ def health_facts(
     for bucket in lessons_by_group.values():
         bucket.sort(key=lambda item: item[1])
 
-    frozen = _parse_frozen(frozen_windows)
-
     for sid in ids:
         entry = out[str(sid)]
         for group_id, joined in memberships[sid].items():
@@ -197,7 +215,7 @@ def health_facts(
                 if joined and start_date and start_date < joined:
                     # Before they joined. Not their lesson.
                     continue
-                if _in_frozen_window(frozen.get(sid), start_date):
+                if _in_frozen_window(frozen.get(sid), group_id, start_date):
                     continue
                 status = attendance.get((event_id, sid))
                 if status in REMOVED_STATUSES:
@@ -239,28 +257,37 @@ def health_facts(
     return {"students": out}
 
 
-def _parse_frozen(
-    frozen_windows: Optional[dict[int, list[tuple[Optional[str], Optional[str]]]]],
-) -> dict[int, list[tuple[Optional[date], Optional[date]]]]:
-    parsed: dict[int, list[tuple[Optional[date], Optional[date]]]] = {}
-    for sid, windows in (frozen_windows or {}).items():
-        spans: list[tuple[Optional[date], Optional[date]]] = []
-        for start, end in windows or []:
-            try:
-                spans.append(
-                    (
-                        date.fromisoformat(start) if start else None,
-                        date.fromisoformat(end) if end else None,
+def _parse_frozen(frozen_windows: Optional[dict[int, Any]]) -> ScopedSpans:
+    """Both wire shapes, one internal shape.
+
+    The flat legacy shape — a bare list of spans per student — means "every group", which is
+    what it has always meant and the only reading that keeps an older CRM build correct while
+    the two services roll out independently.
+    """
+    parsed: ScopedSpans = {}
+    for sid, value in (frozen_windows or {}).items():
+        per_group = value if isinstance(value, dict) else {GROUP_WIDE: value}
+        by_group: dict[int, list[tuple[Optional[date], Optional[date]]]] = {}
+        for gid, windows in (per_group or {}).items():
+            spans: list[tuple[Optional[date], Optional[date]]] = []
+            for start, end in windows or []:
+                try:
+                    spans.append(
+                        (
+                            date.fromisoformat(start) if start else None,
+                            date.fromisoformat(end) if end else None,
+                        )
                     )
-                )
-            except (TypeError, ValueError):
-                continue
-        if spans:
-            parsed[int(sid)] = spans
+                except (TypeError, ValueError):
+                    continue
+            if spans:
+                by_group[int(gid)] = spans
+        if by_group:
+            parsed[int(sid)] = by_group
     return parsed
 
 
-def _in_frozen_window(
+def _spans_cover(
     spans: Optional[list[tuple[Optional[date], Optional[date]]]], day: Optional[date]
 ) -> bool:
     if not spans or day is None:
@@ -272,6 +299,43 @@ def _in_frozen_window(
             continue
         return True
     return False
+
+
+def _in_frozen_window(
+    scopes: Optional[dict[int, list[tuple[Optional[date], Optional[date]]]]],
+    group_id: int,
+    day: Optional[date],
+) -> bool:
+    """Does a freeze covering *this group* cover this day?
+
+    A student-wide span covers every group; a scoped one covers only its own. This is the line
+    that stops a SAT freeze from erasing an IELTS lesson from the denominator.
+    """
+    if not scopes:
+        return False
+    return _spans_cover(scopes.get(GROUP_WIDE), day) or _spans_cover(
+        scopes.get(int(group_id)), day
+    )
+
+
+def _live_frozen_groups(
+    scopes: Optional[dict[int, list[tuple[Optional[date], Optional[date]]]]],
+    today: date,
+) -> list[int]:
+    """The scopes whose freeze covers today.
+
+    Freezing now deletes the student's ``group_students`` row, so a fully frozen student comes
+    back from this endpoint with no groups at all — which is indistinguishable, by shape
+    alone, from a student who has simply lost their group. That is exactly the CRM's
+    ``active_without_group`` signal, and without this flag it would fire on every student the
+    school deliberately froze: the feature would announce itself as a wave of false cases.
+
+    The rule stays in the CRM, which owns every judgement here. What the LMS owes it is the
+    fact that makes the distinction possible, which is this list.
+    """
+    if not scopes:
+        return []
+    return sorted(gid for gid, spans in scopes.items() if _spans_cover(spans, today))
 
 
 def _finish_homework_and_progress(

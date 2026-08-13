@@ -3,6 +3,9 @@
 Two contracts the CRM depends on:
 
 * the mirror converges under at-least-once, out-of-order delivery, and never touches access;
+  a payload naming no group lands on the student-wide sentinel and keeps freezing
+  everything, which is what keeps a CRM build predating scoped freezes correct — the
+  scoped behaviour has its own file, ``test_scoped_freeze.py``;
 * the facts endpoint counts the way the CRM's rules assume — unmarked is missing data,
   cancelled and pre-membership lessons are not denominators, and frozen days drop out.
 
@@ -306,6 +309,9 @@ def test_the_mirror_applies_a_freeze(db):  # noqa: F811
     row = db.query(StudentFreezeState).one()
     assert row.is_frozen is True
     assert row.responsible_curator_id == 5
+    # No group_id in the payload: student-wide, which is the only reading that keeps an
+    # older CRM build correct.
+    assert row.group_id == 0
 
 
 def test_replaying_the_same_message_converges(db):  # noqa: F811

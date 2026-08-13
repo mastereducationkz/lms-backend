@@ -14,7 +14,7 @@ from src.schemas.models import (
 )
 from pydantic import BaseModel
 from src.routes.auth import get_current_user_dependency
-from src.curator.freeze_mirror import freeze_states, frozen_badge, is_within_freeze
+from src.curator.freeze_mirror import freeze_index
 from src.services.attendance_service import (
     AttendanceService,
     attendance_status_to_ui,
@@ -817,8 +817,10 @@ async def get_weekly_lessons_with_hw_status(
         
     students = db.query(UserInDB).filter(UserInDB.id.in_(student_ids)).all()
     # One query for the whole roster: the freeze mirror is read for every grid cell, and a
-    # lookup per student would be an N+1 across the busiest curator screen there is.
-    freeze_by_student = freeze_states(db, student_ids)
+    # lookup per student would be an N+1 across the busiest curator screen there is. The
+    # index is scoped, so this grid asks only about *this* group: a student who froze SAT
+    # keeps a full, ordinary IELTS row here.
+    freezes = freeze_index(db, student_ids)
     students_list = sorted(students, key=lambda s: s.name or "")
     
     # 7. Get Attendance — from Attendance (single source of truth)
@@ -1133,7 +1135,6 @@ async def get_weekly_lessons_with_hw_status(
             "extra_points": manual.extra_points if manual else 0,
         }
 
-        freeze_row = freeze_by_student.get(student.id)
         lesson_data = {}
         for idx, event in enumerate(events):
             # Attendance
@@ -1163,13 +1164,16 @@ async def get_weekly_lessons_with_hw_status(
             # out of the % denominator instead of scoring like an absence.
             marked = att is not None
 
-            # A lesson inside the student's freeze is neither attended nor missed: they were
-            # not expected. It renders as «Заморозка», is not editable, and drops out of the
-            # attendance and homework denominators exactly as a pre-join lesson does. Weeks
-            # before the freeze are untouched — a freeze must never retroactively rewrite a
-            # term the student actually studied — and counting resumes from the *confirmed*
-            # return date, not the date that had merely been planned.
-            frozen_lesson = is_within_freeze(freeze_row, event.start_datetime.date())
+            # A lesson inside the freeze *of this group* is neither attended nor missed:
+            # they were not expected. It renders as «Заморозка», is not editable, and drops
+            # out of the attendance and homework denominators exactly as a pre-join lesson
+            # does. The scope is what keeps this right for a student who froze SAT and still
+            # comes to IELTS. Weeks before the freeze are untouched — a freeze must never
+            # retroactively rewrite a term the student actually studied — and counting
+            # resumes from the *confirmed* return date, not the one merely planned.
+            frozen_lesson = freezes.is_frozen_on(
+                student.id, group_id, event.start_datetime.date()
+            )
 
             # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
@@ -1232,8 +1236,9 @@ async def get_weekly_lessons_with_hw_status(
             "student_name": student.name,
             "avatar_url": student.avatar_url,
             # Staff view: the badge carries the planned return date, so a curator can see
-            # who is due back without opening the CRM.
-            "freeze": frozen_badge(freeze_row),
+            # who is due back without opening the CRM. Narrowed to this group — a badge
+            # borrowed from the student's *other* frozen product would misdescribe this one.
+            "freeze": freezes.badge_for(student.id, group_id),
             "lessons": lesson_data,
             **manual_data
         })
