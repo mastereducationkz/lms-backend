@@ -13,10 +13,15 @@ This module is the answer to that question. Every send writes one :class:`EmailL
   session and its own ``try``; if the journal is down, the email still goes out and the
   failure lands on stdout. A logging table that can take down password reset would be a
   worse bug than the one it fixes.
-* **The journal holds no secrets.** There is deliberately no body column. Credential
-  emails (invites, admin-set passwords) carry a plaintext password in their HTML, so for
-  those event types even the provider's error response is dropped rather than stored —
-  Resend echoes the payload on some 4xx replies, and that payload contains the password.
+* **The journal holds no secrets.** It now keeps a content snapshot, because "what did we
+  actually send them?" is the second question anybody asks and the answer used to be a
+  shrug. But only for mail that carries nothing sensitive: credential emails (invites,
+  admin-set passwords, reset links) store *no* body at all — see
+  :data:`NO_CONTENT_EVENT_TYPES` — and for those even the provider's error response is
+  dropped rather than stored, because Resend echoes the payload on some 4xx replies and
+  that payload is the credential. What is stored is stripped of script, form and
+  remote-resource content on the way *in*, so a future reader that forgets to sanitize
+  still cannot be attacked by a row.
 
 ``idempotency_key`` is the other half of the design. Writing the claim row *before*
 sending, under a unique constraint, is what lets the lesson-reminder scheduler survive a
@@ -38,7 +43,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
-from sqlalchemy import Column, DateTime, Index, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Index, Integer, String, Text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -74,6 +79,60 @@ EVENT_TYPES = (
 #: payload on some failures and that payload is the credential itself.
 CREDENTIAL_EVENT_TYPES = frozenset({"invite", "trial_invite", "password_changed"})
 
+#: Event types whose **body** must never be stored, which is a wider set than the one above.
+#:
+#: That set exists to keep a provider's echoed *error* text out of the journal. This one
+#: decides whether a content snapshot is kept at all, and it additionally includes
+#: ``password_reset``: that mail carries no password, but it carries a single-use reset link,
+#: and a stored reset link is a stored credential. A journal an administrator can read is
+#: also a journal an attacker who reaches an admin account can read.
+#:
+#: Membership here means: keep who / when / whether it arrived, keep nothing that could be
+#: used to sign in as somebody.
+NO_CONTENT_EVENT_TYPES = CREDENTIAL_EVENT_TYPES | {"password_reset"}
+
+#: Shown instead of a body for the types above, so "we are deliberately not showing you this"
+#: is distinguishable from "there is nothing here".
+CONTENT_WITHHELD_NOTICE = (
+    "Содержимое скрыто, поскольку письмо содержит данные доступа."
+)
+
+#: A stored snapshot is for reading, not for re-sending. Anything that can execute, submit,
+#: or call home is removed before the row is written — not at render time, so a future reader
+#: that forgets to sanitize still cannot be attacked by what is in the database.
+_SCRIPTABLE_TAGS = ("script", "style", "iframe", "object", "embed", "form", "link", "meta")
+
+
+def strip_active_content(html: Optional[str]) -> Optional[str]:
+    """Remove everything executable or network-fetching from a stored body.
+
+    Deliberately a blunt allow-nothing pass rather than a parser: the journal shows what was
+    said, and no email the LMS sends needs script, form or remote-resource behaviour to be
+    legible. Remote images go too — a tracking pixel that fires every time an administrator
+    opens the journal would report the wrong thing to the sender and leak that the row was
+    read.
+
+    Rendering still happens inside a sandboxed iframe. This is the second of the two layers,
+    and the one that survives a mistake in the first.
+    """
+    if not html:
+        return html
+    cleaned = html
+    for tag in _SCRIPTABLE_TAGS:
+        cleaned = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}\s*>", "", cleaned, flags=re.IGNORECASE | re.DOTALL
+        )
+        cleaned = re.sub(rf"<{tag}\b[^>]*/?>", "", cleaned, flags=re.IGNORECASE)
+    # Inline handlers (`onclick=…`) and javascript: targets.
+    cleaned = re.sub(r"\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(href|src)\s*=\s*([\"']?)\s*javascript:[^\"'>\s]*\2", r"\1=\2#\2",
+                     cleaned, flags=re.IGNORECASE)
+    # Remote resources: neutralise the attribute rather than the element, so the alt text and
+    # layout survive and the reader can see that an image was there.
+    cleaned = re.sub(r"\ssrc\s*=\s*([\"'])https?://[^\"']*\1", r" data-blocked-src=\1\1",
+                     cleaned, flags=re.IGNORECASE)
+    return cleaned
+
 #: ``queued`` is claimed-but-not-yet-answered; ``sent`` means Resend accepted it; the last
 #: three arrive later over the webhook. ``suppressed`` is the LMS declining to send at all
 #: (no API key, unusable address) — recorded because "we never tried" is itself the answer
@@ -102,6 +161,17 @@ class EmailLog(Base):
     attempts = Column(Integer, nullable=False, default=1, server_default="1")
     error = Column(Text, nullable=True)
     idempotency_key = Column(String(200), nullable=True, unique=True)
+    #: A sanitized snapshot of what was sent, for non-credential mail only. Written already
+    #: stripped of script/form/remote-resource content — see :func:`strip_active_content` —
+    #: so a reader that forgets to sanitize still cannot be attacked by the stored row.
+    body_html = Column(Text, nullable=True)
+    #: The plain-text alternative, when the sender supplied one. Also the fallback the detail
+    #: view renders when there is no HTML.
+    body_text = Column(Text, nullable=True)
+    #: True when the body was deliberately not stored because the mail carries credentials.
+    #: Distinguishes "we are not showing you this" from "this row predates content capture",
+    #: which the journal must never conflate — one is a policy, the other is a gap.
+    content_withheld = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     sent_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=True, onupdate=lambda: datetime.now(timezone.utc))
@@ -203,13 +273,22 @@ def claim(
     related_type: Optional[str] = None,
     related_id: Optional[int] = None,
     idempotency_key: Optional[str] = None,
+    html_content: Optional[str] = None,
+    text_content: Optional[str] = None,
 ) -> Optional[int]:
     """Reserve a row for a send that is about to happen.
 
     Returns the row id, or ``None`` when the send should not proceed — either because
     ``idempotency_key`` is already taken (someone else has this one) or because the journal
     is unavailable. Those two are distinguished by :func:`claimed_elsewhere`.
+
+    ``html_content`` / ``text_content`` are the body as it will be sent. Whether any of it is
+    kept is decided *here*, from ``event_type``, and not by the caller — twenty-four call
+    sites each remembering to withhold a password is not a security boundary. A credential
+    mail stores nothing and is flagged ``content_withheld``; everything else is stripped of
+    active content and stored.
     """
+    withhold = (event_type if event_type in EVENT_TYPES else "other") in NO_CONTENT_EVENT_TYPES
     try:
         db = _new_session()
     except Exception as exc:  # pragma: no cover - only when the DB config itself is broken
@@ -227,6 +306,9 @@ def claim(
             status="queued",
             attempts=1,
             idempotency_key=idempotency_key,
+            body_html=None if withhold else strip_active_content(html_content),
+            body_text=None if withhold else text_content,
+            content_withheld=withhold,
             created_at=datetime.now(timezone.utc),
         )
         db.add(row)

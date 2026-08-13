@@ -223,3 +223,53 @@ def read_email_log(
 def read_event_types() -> dict:
     """The filter vocabulary, so the CRM dropdown cannot drift from the backend."""
     return {"event_types": list(email_log.EVENT_TYPES), "statuses": list(email_log.STATUSES)}
+
+
+@router.get("/log/{log_id}", dependencies=[Depends(_require_crm_internal_key)])
+def read_log_entry(log_id: int, db: Session = Depends(get_db)) -> dict:
+    """One journal row in full, including the body when there is one to show.
+
+    **Reading is not sending.** This is a plain SELECT: opening a row must never re-deliver
+    the mail, and there is no code path from here into the send. The at-most-once guarantee
+    that ``idempotency_key`` buys is unaffected because nothing here writes.
+
+    Three distinct answers about content, which the caller must be able to tell apart:
+
+    * ``content_withheld`` — deliberately not stored: the mail carries a password or a reset
+      link. The notice says so.
+    * ``has_content = false`` with ``content_withheld = false`` — this row predates content
+      capture. Nothing is hidden and nothing is invented; the view says it is unavailable.
+    * a body — stored, and already stripped of script/form/remote-resource content on the way
+      in. The CRM still renders it inside a sandboxed iframe; that is the second layer.
+    """
+    row = db.query(email_log.EmailLog).filter(email_log.EmailLog.id == log_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Письмо не найдено")
+
+    withheld = bool(row.content_withheld)
+    return {
+        "id": row.id,
+        "event_type": row.event_type,
+        "recipient_email": row.recipient_email,
+        "recipient_user_id": row.recipient_user_id,
+        "subject": row.subject,
+        "template_version": row.template_version,
+        "related_type": row.related_type,
+        "related_id": row.related_id,
+        "provider_message_id": row.provider_message_id,
+        "status": row.status,
+        "attempts": row.attempts,
+        # Already sanitized when written — `sanitize_error` drops the provider's echoed
+        # payload entirely for credential mail.
+        "error": row.error,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "sent_at": row.sent_at.isoformat() if row.sent_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "content_withheld": withheld,
+        "content_notice": email_log.CONTENT_WITHHELD_NOTICE if withheld else None,
+        # Never fall back to the other field when withheld: a credential body must be absent
+        # from the response, not merely unrendered by the client.
+        "body_html": None if withheld else row.body_html,
+        "body_text": None if withheld else row.body_text,
+        "has_content": bool(not withheld and (row.body_html or row.body_text)),
+    }

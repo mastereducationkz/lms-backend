@@ -152,6 +152,11 @@ class EmailService:
                 related_type=related_type,
                 related_id=related_id,
                 idempotency_key=key,
+                # Handed over as sent. Whether any of it is *kept* is decided inside the
+                # journal from `event_type`, not here — a credential body must not depend on
+                # each of twenty-four call sites remembering to withhold it.
+                html_content=html_content,
+                text_content=text_content,
             )
 
         if not self.is_configured:
