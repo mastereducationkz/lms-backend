@@ -485,3 +485,103 @@ def test_the_repair_never_touches_pending_or_rejected_requests(world):
     assert all(f.event_id not in (pending.id, rejected.id) for f in report.repaired)
     assert db.get(Event, pending.id).teacher_id == azamat.id
     assert db.get(Event, rejected.id).teacher_id == azamat.id
+
+
+# --------------------------------------------------- 6. what /lesson-requests can show
+
+
+def test_the_request_response_names_the_approver_and_the_live_state(world):
+    """A decision with no accountable name on it, and no way to see whether it took effect,
+    is what let the schedule silently disagree with an approval for weeks."""
+    db, azamat, nuray = world["db"], world["azamat"], world["nuray"]
+    from src.lesson_requests.helpers import enrich_requests
+
+    head = _user(db, "Head", role="head_teacher")
+    ev = world["lesson"](when=datetime.utcnow() - timedelta(days=1), teacher_id=nuray.id)
+    lr = world["approve"](ev.id, nuray.id)
+    lr.resolved_by = head.id
+    world["mark"](ev.id)
+    db.flush()
+
+    [out] = enrich_requests([lr], db)
+
+    assert out.resolver_name == "Head"
+    assert out.resolver_role == "head_teacher"
+    assert out.resolved_at is not None
+    assert out.requester_name == "Azamat"
+    assert out.substitute_teacher_name == "Nuray"
+    # The live schedule, not just what was requested.
+    assert out.current_event_teacher_id == nuray.id
+    assert out.current_event_teacher_name == "Nuray"
+    assert out.group_teacher_id == azamat.id, "the group is still Azamat's"
+    assert out.attendance_owner_name == "Nuray"
+    assert out.attendance_marked is True
+    assert out.lesson_is_active is True
+    assert out.is_applied is True
+    assert out.consistency_note is None
+
+
+def test_an_approved_request_the_schedule_disagrees_with_is_flagged(world):
+    """The consistency warning. Silence here is what made the original bug invisible."""
+    db, azamat, nuray = world["db"], world["azamat"], world["nuray"]
+    from src.lesson_requests.helpers import enrich_requests
+
+    ev = world["lesson"](when=datetime.utcnow() + timedelta(days=2), teacher_id=azamat.id)
+    lr = world["approve"](ev.id, nuray.id)  # approved for Nuray, Event still says Azamat
+    db.flush()
+
+    [out] = enrich_requests([lr], db)
+
+    assert out.is_applied is False
+    assert out.consistency_note, "a teacher gets a sentence, not a stack trace"
+    assert "одобрена" in out.consistency_note
+    assert out.current_event_teacher_name == "Azamat"
+    assert out.substitute_teacher_name == "Nuray"
+
+
+def test_a_pending_request_is_not_reported_as_inconsistent(world):
+    """`is_applied` is only meaningful once a decision exists."""
+    db, azamat, nuray = world["db"], world["azamat"], world["nuray"]
+    from src.lesson_requests.helpers import enrich_requests
+
+    ev = world["lesson"](when=datetime.utcnow() + timedelta(days=2), teacher_id=azamat.id)
+    lr = world["approve"](ev.id, nuray.id, status="pending")
+    db.flush()
+
+    [out] = enrich_requests([lr], db)
+
+    assert out.is_applied is None
+    assert out.consistency_note is None
+
+
+def test_enriching_a_page_does_not_scale_its_query_count_with_its_size(world):
+    """The list endpoints issued one SELECT per user they had to name. A page of fifty
+    requests cost a few hundred round trips; the count must not grow with the page."""
+    db, azamat, nuray = world["db"], world["azamat"], world["nuray"]
+    from sqlalchemy import event as sa_event
+    from src.lesson_requests.helpers import enrich_requests
+
+    def build(n):
+        out = []
+        for i in range(n):
+            ev = world["lesson"](when=datetime.utcnow() + timedelta(days=2 + i),
+                                 teacher_id=nuray.id, title=f"Lesson {i}")
+            out.append(world["approve"](ev.id, nuray.id))
+        db.flush()
+        return out
+
+    small, large = build(2), build(8)
+
+    def count_queries(rows):
+        seen = []
+        engine = db.get_bind()
+        listener = lambda *a, **k: seen.append(1)  # noqa: E731
+        sa_event.listen(engine, "before_cursor_execute", listener)
+        try:
+            enrich_requests(rows, db)
+        finally:
+            sa_event.remove(engine, "before_cursor_execute", listener)
+        return len(seen)
+
+    assert count_queries(large) == count_queries(small), \
+        "query count must be fixed, not proportional to the page"

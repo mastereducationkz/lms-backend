@@ -24,6 +24,7 @@ from src.lesson_requests.services import (
 )
 from src.lesson_requests.helpers import (
     enrich_request,
+    enrich_requests,
     apply_approved_request,
     notify_approvers_of_request,
     notify_approvers_of_confirmation,
@@ -93,7 +94,7 @@ async def get_my_lesson_requests(
         query = query.filter(LessonRequest.status == status_filter)
 
     requests = query.order_by(LessonRequest.created_at.desc()).all()
-    return [enrich_request(r, db) for r in requests]
+    return enrich_requests(requests, db)
 
 
 @router.get("/incoming", response_model=List[LessonRequestSchema])
@@ -131,7 +132,7 @@ async def get_incoming_requests(
                 results.append(r)
 
     results.sort(key=lambda x: x.created_at, reverse=True)
-    return [enrich_request(r, db) for r in results]
+    return enrich_requests(results, db)
 
 
 @router.post("/{request_id}/confirm", response_model=LessonRequestSchema)
@@ -233,7 +234,7 @@ async def list_lesson_requests(
             query = query.filter(LessonRequest.status.in_(statuses))
 
     requests = query.order_by(LessonRequest.created_at.desc()).all()
-    return [enrich_request(r, db) for r in requests]
+    return enrich_requests(requests, db)
 
 
 @router.get("/pending-approval", response_model=List[LessonRequestSchema])
@@ -253,7 +254,7 @@ async def list_pending_approval(
         query = query.filter(LessonRequest.group_id.in_(scope_group_ids))
 
     requests = query.order_by(LessonRequest.created_at.desc()).all()
-    return [enrich_request(r, db) for r in requests]
+    return enrich_requests(requests, db)
 
 
 @router.post("/{request_id}/approve", response_model=LessonRequestSchema)

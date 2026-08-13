@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -26,53 +27,180 @@ from src.lesson_requests.services import resolve_head_teachers_for_group
 logger = logging.getLogger(__name__)
 
 
-def enrich_request(lr: LessonRequest, db: Session) -> LessonRequestSchema:
-    requester = db.query(UserInDB).filter(UserInDB.id == lr.requester_id).first()
-    group = db.query(Group).filter(Group.id == lr.group_id).first()
-    sub_teacher = None
-    if lr.substitute_teacher_id:
-        sub_teacher = db.query(UserInDB).filter(UserInDB.id == lr.substitute_teacher_id).first()
+#: Said to a teacher when an approved request and the live schedule disagree. Staff get the
+#: same flag rendered as a red warning with the ids; a teacher gets a sentence.
+_NOT_APPLIED_NOTE = (
+    "Замена одобрена, но в расписании урок пока закреплён за другим педагогом. "
+    "Администратор уведомлён."
+)
+_NO_LESSON_NOTE = (
+    "Заявка одобрена, но урок не найден в расписании. Обратитесь к администратору."
+)
 
-    confirmed_teacher = None
-    if lr.confirmed_teacher_id:
-        confirmed_teacher = db.query(UserInDB).filter(UserInDB.id == lr.confirmed_teacher_id).first()
 
-    teacher_ids_list = None
-    teacher_names_list = None
-    if lr.substitute_teacher_ids:
-        try:
-            teacher_ids_list = json.loads(lr.substitute_teacher_ids)
-            teacher_names_list = []
-            for tid in teacher_ids_list:
-                t = db.query(UserInDB).filter(UserInDB.id == tid).first()
-                teacher_names_list.append(t.name if t else "Unknown")
-        except (json.JSONDecodeError, TypeError):
-            pass
+def _parse_teacher_ids(raw) -> Optional[list]:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, list) else None
 
-    return LessonRequestSchema(
-        id=lr.id,
-        request_type=lr.request_type,
-        status=lr.status,
-        requester_id=lr.requester_id,
-        requester_name=requester.name if requester else None,
-        lesson_schedule_id=lr.lesson_schedule_id,
-        event_id=lr.event_id,
-        group_id=lr.group_id,
-        group_name=group.name if group else None,
-        original_datetime=lr.original_datetime,
-        substitute_teacher_id=lr.substitute_teacher_id,
-        substitute_teacher_name=sub_teacher.name if sub_teacher else None,
-        substitute_teacher_ids=teacher_ids_list,
-        substitute_teacher_names=teacher_names_list,
-        confirmed_teacher_id=lr.confirmed_teacher_id,
-        confirmed_teacher_name=confirmed_teacher.name if confirmed_teacher else None,
-        new_datetime=lr.new_datetime,
-        reason=lr.reason,
-        admin_comment=lr.admin_comment,
-        created_at=lr.created_at,
-        resolved_at=lr.resolved_at,
-        resolved_by=lr.resolved_by,
+
+def enrich_requests(lrs: Sequence[LessonRequest], db: Session) -> list[LessonRequestSchema]:
+    """Serialise a page of requests in a fixed number of queries.
+
+    The per-row version issued one ``SELECT`` per user it needed to name — requester,
+    proposed substitute, confirmed substitute, and one per candidate id — so a page of fifty
+    requests cost a few hundred round trips. Everything is prefetched here instead.
+
+    It also answers the question the page could not previously ask: *did the approval
+    actually take effect?* A request records a decision; the Event records what will happen.
+    They can disagree — schedule regeneration used to overwrite approved substitutions — and
+    a page rendering only the request cannot show that. So the live lesson is read too, and
+    the two are compared.
+    """
+    from src.services.lesson_teacher import (
+        APPROVED_STATUS,
+        SUBSTITUTION_REQUEST_TYPE,
+        approved_substitute_id,
     )
+    from src.services.attendance_status import marked_statuses_for_sql
+    from src.schemas.models import Attendance
+    from sqlalchemy import func
+
+    if not lrs:
+        return []
+
+    # ── one round trip per entity kind ────────────────────────────────────────────────
+    candidate_ids: set[int] = set()
+    for lr in lrs:
+        for value in (lr.requester_id, lr.substitute_teacher_id,
+                      lr.confirmed_teacher_id, lr.resolved_by):
+            if value:
+                candidate_ids.add(int(value))
+        for tid in (_parse_teacher_ids(lr.substitute_teacher_ids) or []):
+            if isinstance(tid, int):
+                candidate_ids.add(tid)
+
+    group_ids = {int(lr.group_id) for lr in lrs if lr.group_id}
+    event_ids = {int(lr.event_id) for lr in lrs if lr.event_id}
+
+    groups = {
+        g.id: g for g in db.query(Group).filter(Group.id.in_(group_ids)).all()
+    } if group_ids else {}
+    events = {
+        e.id: e for e in db.query(Event).filter(Event.id.in_(event_ids)).all()
+    } if event_ids else {}
+
+    # Group owners and live lesson teachers also need naming.
+    for group in groups.values():
+        if group.teacher_id:
+            candidate_ids.add(int(group.teacher_id))
+    for event in events.values():
+        if event.teacher_id:
+            candidate_ids.add(int(event.teacher_id))
+
+    users = {
+        u.id: u
+        for u in db.query(UserInDB).filter(UserInDB.id.in_(sorted(candidate_ids))).all()
+    } if candidate_ids else {}
+
+    marked_event_ids: set[int] = set()
+    if event_ids:
+        marked_event_ids = {
+            int(row[0])
+            for row in db.query(Attendance.event_id)
+            .filter(
+                Attendance.event_id.in_(sorted(event_ids)),
+                func.lower(func.coalesce(Attendance.status, "")).in_(marked_statuses_for_sql()),
+            )
+            .distinct()
+            .all()
+        }
+
+    def name_of(user_id) -> Optional[str]:
+        user = users.get(int(user_id)) if user_id else None
+        return user.name if user else None
+
+    out: list[LessonRequestSchema] = []
+    for lr in lrs:
+        group = groups.get(int(lr.group_id)) if lr.group_id else None
+        event = events.get(int(lr.event_id)) if lr.event_id else None
+        resolver = users.get(int(lr.resolved_by)) if lr.resolved_by else None
+
+        teacher_ids_list = _parse_teacher_ids(lr.substitute_teacher_ids)
+        teacher_names_list = (
+            [name_of(tid) or "Unknown" for tid in teacher_ids_list]
+            if teacher_ids_list is not None
+            else None
+        )
+
+        # The register is owed by whoever is actually assigned to the lesson, falling back to
+        # the group's regular teacher only when the lesson never recorded one.
+        attendance_owner_id = None
+        if event is not None:
+            attendance_owner_id = event.teacher_id or (group.teacher_id if group else None)
+
+        # Does the schedule agree with the decision? Only meaningful once approved.
+        is_applied: Optional[bool] = None
+        consistency_note: Optional[str] = None
+        if lr.status == APPROVED_STATUS and lr.request_type == SUBSTITUTION_REQUEST_TYPE:
+            approved_id = approved_substitute_id(lr)
+            if event is None:
+                is_applied, consistency_note = False, _NO_LESSON_NOTE
+            elif approved_id is None:
+                is_applied, consistency_note = False, _NO_LESSON_NOTE
+            else:
+                is_applied = event.teacher_id == approved_id
+                if not is_applied:
+                    consistency_note = _NOT_APPLIED_NOTE
+
+        out.append(LessonRequestSchema(
+            id=lr.id,
+            request_type=lr.request_type,
+            status=lr.status,
+            requester_id=lr.requester_id,
+            requester_name=name_of(lr.requester_id),
+            lesson_schedule_id=lr.lesson_schedule_id,
+            event_id=lr.event_id,
+            group_id=lr.group_id,
+            group_name=group.name if group else None,
+            original_datetime=lr.original_datetime,
+            substitute_teacher_id=lr.substitute_teacher_id,
+            substitute_teacher_name=name_of(lr.substitute_teacher_id),
+            substitute_teacher_ids=teacher_ids_list,
+            substitute_teacher_names=teacher_names_list,
+            confirmed_teacher_id=lr.confirmed_teacher_id,
+            confirmed_teacher_name=name_of(lr.confirmed_teacher_id),
+            new_datetime=lr.new_datetime,
+            reason=lr.reason,
+            admin_comment=lr.admin_comment,
+            created_at=lr.created_at,
+            resolved_at=lr.resolved_at,
+            resolved_by=lr.resolved_by,
+            resolver_name=resolver.name if resolver else None,
+            resolver_role=resolver.role if resolver else None,
+            lesson_title=event.title if event else None,
+            current_event_teacher_id=event.teacher_id if event else None,
+            current_event_teacher_name=name_of(event.teacher_id) if event else None,
+            group_teacher_id=group.teacher_id if group else None,
+            group_teacher_name=name_of(group.teacher_id) if group else None,
+            attendance_owner_id=attendance_owner_id,
+            attendance_owner_name=name_of(attendance_owner_id),
+            attendance_marked=(int(lr.event_id) in marked_event_ids) if lr.event_id else None,
+            is_applied=is_applied,
+            consistency_note=consistency_note,
+            lesson_is_active=event.is_active if event else None,
+        ))
+    return out
+
+
+def enrich_request(lr: LessonRequest, db: Session) -> LessonRequestSchema:
+    """Single-request convenience wrapper. Callers rendering a list must use
+    :func:`enrich_requests`, which is the same work without the round trips."""
+    return enrich_requests([lr], db)[0]
 
 
 def apply_substitution(db: Session, lr: LessonRequest, resolver_id: int) -> None:

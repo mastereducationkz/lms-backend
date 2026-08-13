@@ -26,6 +26,35 @@ class LessonRequestSchema(BaseModel):
     created_at: datetime
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[int] = None
+    # Who decided, in words. `resolved_by` alone is an integer the UI printed as an id or,
+    # more often, not at all — so an approved request named nobody accountable for it.
+    resolver_name: Optional[str] = None
+    resolver_role: Optional[str] = None
+
+    # ── the live schedule, not just what was asked for ──────────────────────────────────
+    #
+    # A request is a decision; the Event is what actually happens. They can disagree — that
+    # is exactly the bug this wave repairs — and a page that shows only the request cannot
+    # reveal it. These say what the schedule *currently* holds.
+    lesson_title: Optional[str] = None
+    #: The teacher the lesson is actually assigned to right now.
+    current_event_teacher_id: Optional[int] = None
+    current_event_teacher_name: Optional[str] = None
+    #: The group's regular teacher — the owner, who does not change on a substitution.
+    group_teacher_id: Optional[int] = None
+    group_teacher_name: Optional[str] = None
+    #: Who owes the register for this lesson. The actual lesson teacher, by definition.
+    attendance_owner_id: Optional[int] = None
+    attendance_owner_name: Optional[str] = None
+    #: Whether the register has already been taken.
+    attendance_marked: Optional[bool] = None
+    #: True when an approved request's decision is reflected in the Event. False means the
+    #: schedule disagrees with an approval — shown to staff as a red consistency warning.
+    is_applied: Optional[bool] = None
+    #: A human sentence explaining a False `is_applied`, for the people who are not staff.
+    consistency_note: Optional[str] = None
+    #: Whether the lesson is still active (a cancel request that took effect sets this False).
+    lesson_is_active: Optional[bool] = None
 
     class Config:
         from_attributes = True
