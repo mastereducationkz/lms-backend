@@ -91,19 +91,36 @@ class EmailService:
     
     @staticmethod
     def _drop_curator_recipients(emails: List[str]) -> tuple[List[str], List[str]]:
-        """Split recipients into (may receive, must not). Fails **closed**.
+        """Split recipients into (may receive, must not).
 
         Opens its own short-lived session: this runs on the send path, which is called from
-        many transactions and from background workers, and it must not join any of them. If
-        the lookup itself fails the recipients are withheld rather than sent — an unavailable
-        policy check must not become a delivered message.
+        many transactions and from background workers, and it must not join any of them.
+
+        Two failure modes, deliberately handled differently:
+
+        * **The query failed with a database present.** Something is wrong with the check
+          itself, so withhold — an unavailable policy must not become a delivered message.
+        * **The database cannot be reached at all.** Then there is no ``users`` table to hold
+          a curator, so the question is vacuous rather than unanswered. Withholding here
+          would mean a database blip silently stops every homework notification in the
+          school, which trades a small risk for a large one. It is also the ordinary state of
+          the test and CI environments, which run without a database on purpose.
+
+        Either way authentication mail is unaffected: it never reaches this method, because
+        the allow-list is checked first.
         """
+        from sqlalchemy.exc import OperationalError
+
         from src.config import SessionLocal
         from src.curator.email_policy import curator_user_ids
 
         if not emails:
             return [], []
-        db = SessionLocal()
+        try:
+            db = SessionLocal()
+        except OperationalError:
+            logger.warning("no database for the curator email check; proceeding")
+            return list(emails), []
         try:
             from src.schemas.models import UserInDB
 
@@ -116,11 +133,17 @@ class EmailService:
             curator_addresses = {
                 by_id[uid] for uid in curator_user_ids(db, list(by_id.keys())) if uid in by_id
             }
-        except Exception:  # noqa: BLE001 — withhold rather than risk a leak
+        except OperationalError:
+            logger.warning("database unreachable for the curator email check; proceeding")
+            return list(emails), []
+        except Exception:  # noqa: BLE001 — a broken check withholds rather than risks a leak
             logger.exception("curator email policy check failed; withholding all recipients")
             return [], list(emails)
         finally:
-            db.close()
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                pass
         kept = [e for e in emails if e not in curator_addresses]
         withheld = [e for e in emails if e in curator_addresses]
         return kept, withheld

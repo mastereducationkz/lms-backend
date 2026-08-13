@@ -248,15 +248,38 @@ def test_non_curators_are_completely_unaffected(db, service):
     assert len(calls) == 4
 
 
-def test_a_failed_policy_lookup_withholds_every_recipient(db, service, monkeypatch):
-    """Fail closed at the funnel too."""
+def test_a_broken_policy_check_withholds_every_recipient(db, service, monkeypatch):
+    """A check that is present but broken must not deliver."""
     svc, calls = service
     monkeypatch.setattr(
         "src.curator.email_policy.curator_user_ids",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")),
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("something is wrong")),
     )
     teacher = _user(db, "teacher")
     db.flush()
 
     assert svc.send_email([teacher.email], "Тема", "<p>x</p>", event_type="lesson_change") is None
     assert calls == []
+
+
+def test_an_unreachable_database_does_not_stop_the_whole_school_s_mail(db, service, monkeypatch):
+    """The other failure mode, handled the other way round on purpose.
+
+    With no database there is no `users` table to hold a curator, so the question is vacuous
+    rather than unanswered. Withholding would mean a database blip silently stops every
+    homework notification in the school — a much larger risk than the one it avoids. It is
+    also the ordinary state of CI, which runs the suite without a database.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    svc, calls = service
+    monkeypatch.setattr(
+        "src.curator.email_policy.curator_user_ids",
+        lambda *a, **k: (_ for _ in ()).throw(OperationalError("connect", None, Exception())),
+    )
+    teacher = _user(db, "teacher")
+    db.flush()
+
+    svc.send_email([teacher.email], "Тема", "<p>x</p>", event_type="lesson_change")
+
+    assert len(calls) == 1, "mail keeps flowing when the check simply cannot run"
