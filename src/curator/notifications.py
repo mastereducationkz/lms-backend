@@ -169,6 +169,26 @@ def send_curator_email(
     """
     if not to_email or "@" not in to_email:
         return False
+
+    # The last line of defence, and the only one that sees every composed curator email
+    # regardless of which of the five paths produced it. Curators are notified in-app only;
+    # this function exists solely to send them operational mail, so refusing here cannot
+    # affect authentication or account-recovery messages — those are composed elsewhere and
+    # never reach this call.
+    from src.config import SessionLocal
+    from src.curator.email_policy import SUPPRESSION_REASON, is_curator_email
+
+    db = SessionLocal()
+    try:
+        if is_curator_email(db, to_email):
+            logger.info("curator operational email withheld (%s)", SUPPRESSION_REASON)
+            return False
+    except Exception:  # noqa: BLE001 — a lookup failure must not become a delivery
+        logger.exception("curator email policy check failed; withholding to be safe")
+        return False
+    finally:
+        db.close()
+
     html = "".join(_para(line) for line in lines)
     if link:
         html += f'<div style="margin-top:20px;">{_link_button(link, link_label)}</div>'

@@ -29,6 +29,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from src.config import get_db
+from src.curator.email_policy import SUPPRESSION_REASON, is_curator
 from src.curator.notifications import (
     notify_once,
     send_curator_email,
@@ -666,7 +667,7 @@ def notify_curators(
         .filter(UserInDB.id.in_([i.curator_id for i in body.items] or [0]))
         .all()
     }
-    created = emailed = 0
+    created = emailed = suppressed = 0
     for item in body.items:
         user = users.get(item.curator_id)
         if user is None:
@@ -681,6 +682,13 @@ def notify_curators(
             within_hours=item.within_hours,
         ) is not None:
             created += 1
+        # Defence in depth. The CRM clears this flag before calling, but that check lives in
+        # another repository behind an HTTP boundary and can be redeployed independently —
+        # an older build, a replayed request or any future direct caller would otherwise get
+        # through. The in-app notification above is unaffected.
+        if item.email and is_curator(db, item.curator_id):
+            suppressed += 1
+            continue
         if item.email and send_curator_email(
             user.email,
             item.email_subject or item.title,
@@ -689,7 +697,13 @@ def notify_curators(
         ):
             emailed += 1
     db.commit()
-    return {"in_app": created, "emails": emailed, "requested": len(body.items)}
+    return {
+        "in_app": created,
+        "emails": emailed,
+        "suppressed": suppressed,
+        "suppression_reason": SUPPRESSION_REASON if suppressed else None,
+        "requested": len(body.items),
+    }
 
 
 class FreezeStateItem(BaseModel):
