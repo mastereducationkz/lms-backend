@@ -777,6 +777,14 @@ def push_freeze_return_tasks(
 
 class FreezeStateItem(BaseModel):
     lms_student_id: int
+    #: The frozen group. Absent — which is what a CRM build predating scoped freezes
+    #: sends — means student-wide, i.e. every group, exactly as it always has.
+    group_id: Optional[int] = None
+    #: Snapshots the CRM takes at freeze time: the membership they were read from is
+    #: deleted moments later, so nothing is left to join to. Staff labels; a student
+    #: is never shown them.
+    scope_group_name: Optional[str] = None
+    scope_product: Optional[str] = None
     status: str = "active"
     freeze_start: Optional[str] = None
     planned_resume_date: Optional[str] = None
@@ -826,9 +834,43 @@ class HealthFactsRequest(BaseModel):
     activity_days: int = 7
     homework_window_days: int = 7
     progress_days: int = 7
-    #: student id -> [[freeze_start, freeze_end], ...] in ISO dates. Supplied by the CRM,
-    #: which owns the freeze lifecycle; lessons inside these spans leave every denominator.
-    frozen_windows: dict[str, list[list[Optional[str]]]] = Field(default_factory=dict)
+    #: Supplied by the CRM, which owns the freeze lifecycle. Two shapes are accepted —
+    #: see :func:`_normalize_frozen_windows`. Typed loosely because a union that still
+    #: round-trips the legacy shape is not expressible as an annotation worth reading.
+    frozen_windows: dict[str, Any] = Field(default_factory=dict)
+
+
+def _normalize_frozen_windows(
+    raw: Optional[dict[str, Any]]
+) -> dict[int, dict[int, list[tuple[Optional[str], Optional[str]]]]]:
+    """One internal shape out of the two the CRM may send.
+
+    * ``{student_id: [[start, end], ...]}`` — the legacy shape, meaning **every group**. It is
+      what a CRM build predating scoped freezes sends, and reading it any other way would
+      silently stop suppressing anything for those payloads halfway through the rollout.
+    * ``{student_id: {group_id: [[start, end], ...]}}`` — one entry per frozen enrollment, so
+      a SAT freeze leaves the student's IELTS denominators exactly as they were.
+
+    Both collapse to the scoped shape, with group ``0`` carrying the student-wide meaning.
+    """
+    from src.curator.freeze_mirror import GROUP_WIDE
+
+    out: dict[int, dict[int, list[tuple[Optional[str], Optional[str]]]]] = {}
+    for sid, value in (raw or {}).items():
+        if not str(sid).lstrip("-").isdigit():
+            continue
+        per_group = value if isinstance(value, dict) else {GROUP_WIDE: value}
+        scoped: dict[int, list[tuple[Optional[str], Optional[str]]]] = {}
+        for gid, spans in (per_group or {}).items():
+            if not str(gid).lstrip("-").isdigit():
+                continue
+            scoped[int(gid)] = [
+                (span[0] if span else None, span[1] if span and len(span) > 1 else None)
+                for span in (spans or [])
+            ]
+        if scoped:
+            out[int(sid)] = scoped
+    return out
 
 
 @router.post("/students/health-facts")
@@ -851,11 +893,6 @@ def students_health_facts(
     """
     from src.curator.health_facts import health_facts
 
-    windows = {
-        int(sid): [(span[0] if span else None, span[1] if len(span) > 1 else None) for span in spans]
-        for sid, spans in (body.frozen_windows or {}).items()
-        if str(sid).lstrip("-").isdigit()
-    }
     return health_facts(
         db,
         body.lms_student_ids,
@@ -863,7 +900,7 @@ def students_health_facts(
         activity_days=body.activity_days,
         homework_window_days=body.homework_window_days,
         progress_days=body.progress_days,
-        frozen_windows=windows,
+        frozen_windows=_normalize_frozen_windows(body.frozen_windows),
     )
 
 
