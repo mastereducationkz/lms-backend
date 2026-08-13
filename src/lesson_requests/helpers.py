@@ -76,19 +76,65 @@ def enrich_request(lr: LessonRequest, db: Session) -> LessonRequestSchema:
 
 
 def apply_substitution(db: Session, lr: LessonRequest, resolver_id: int) -> None:
+    """Pin the approved substitute to the exact occurrence, and say so in the audit trail.
+
+    Approval is one atomic act: resolve (materialising the lesson if it only existed as a
+    schedule row), assign, and record. It runs inside the caller's transaction, so a
+    substitution that is approved is also applied, or neither happened.
+
+    ``groups.teacher_id`` is deliberately not touched. The regular teacher still owns the
+    group; they simply are not teaching this one lesson. See
+    :mod:`src.services.lesson_teacher` for why those two facts have to stay separate.
+    """
+    from src.services.lesson_teacher import approved_substitute_id, record_lesson_teacher_audit
+
     event_id = lr.event_id
     if not event_id and lr.lesson_schedule_id:
         event_id = EventService.materialize_lesson_schedule(db, lr.lesson_schedule_id, user_id=resolver_id)
         lr.event_id = event_id
         db.add(lr)
 
-    if event_id:
-        event = db.query(Event).filter(Event.id == event_id).first()
-        if event:
-            new_teacher_id = lr.confirmed_teacher_id or lr.substitute_teacher_id
-            if new_teacher_id:
-                event.teacher_id = new_teacher_id
-                db.flush()
+    new_teacher_id = approved_substitute_id(lr)
+
+    if not event_id:
+        # Approving something with no lesson to point at leaves the request "approved" and
+        # the schedule unchanged — the exact silent divergence `/lesson-requests` now shows
+        # as a consistency warning. Loud in the log so it is not discovered via payroll.
+        logger.error(
+            "substitution request %s approved but no event could be resolved "
+            "(lesson_schedule_id=%s)",
+            lr.id, lr.lesson_schedule_id,
+        )
+        return
+
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        logger.error(
+            "substitution request %s references event %s, which does not exist", lr.id, event_id
+        )
+        return
+    if not new_teacher_id:
+        logger.error("substitution request %s approved without naming a substitute", lr.id)
+        return
+
+    before_teacher_id = event.teacher_id
+    if before_teacher_id == new_teacher_id:
+        # Idempotent: re-approving, or re-running the repair, must not churn the audit trail.
+        return
+
+    event.teacher_id = new_teacher_id
+    record_lesson_teacher_audit(
+        db,
+        event_id=event.id,
+        before_teacher_id=before_teacher_id,
+        after_teacher_id=new_teacher_id,
+        action="lesson.substitution.applied",
+        actor_id=resolver_id,
+        requester_id=lr.requester_id,
+        lesson_request_id=lr.id,
+        reason=lr.reason,
+    )
+    db.flush()
 
 
 def apply_reschedule(db: Session, lr: LessonRequest, resolver_id: int) -> None:

@@ -1596,7 +1596,18 @@ def update_event_attendance(
 
     if not check_event_access(event_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this event")
-        
+
+    # Seeing a lesson and being the one who takes its register are different rights. The
+    # check above passes for the group's regular teacher, which is correct for reading and
+    # wrong for writing once the lesson has been handed to a substitute.
+    from src.utils.permissions import can_mark_event_attendance
+
+    if not can_mark_event_attendance(event, current_user, db):
+        raise HTTPException(
+            status_code=403,
+            detail="Посещаемость отмечает педагог, который проводит это занятие",
+        )
+
     # 2. Bulk upsert via AttendanceService (single source of truth)
     updates = [
         {

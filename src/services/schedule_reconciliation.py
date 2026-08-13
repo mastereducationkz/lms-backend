@@ -30,16 +30,11 @@ def sync_future_lesson_teachers(db: Session, group_id: int, new_teacher_id: Opti
 
     Returns the number of events updated.
     """
-    from sqlalchemy import exists as sa_exists
     from src.events.models import Event, EventGroup
-    from src.lesson_requests.models import LessonRequest
+    from src.services.lesson_teacher import approved_substitution_exists_clause
 
     now_utc = datetime.utcnow()
-    approved_sub = sa_exists().where(
-        (LessonRequest.event_id == Event.id)
-        & (LessonRequest.request_type == "substitution")
-        & (LessonRequest.status == "approved")
-    )
+    approved_sub = approved_substitution_exists_clause()
     updated = (
         db.query(Event)
         .filter(
@@ -75,8 +70,17 @@ def reconcile_group_schedule(
     - Returns counters: updated, created, deactivated, rebound
     """
     from src.events.models import Event, EventGroup
+    from src.services.lesson_teacher import (
+        assign_lesson_teacher_preserving_overrides,
+        protected_event_teachers,
+    )
 
     now_utc = datetime.now(timezone.utc)
+
+    # Occurrence-level overrides — an approved substitution pins a teacher to one lesson and
+    # outranks the group's regular teacher for it. Read once, before anything is moved, so
+    # the decision does not depend on the order events happen to be paired in.
+    protected = protected_event_teachers(db, group_id)
 
     def _as_utc(dt: datetime) -> datetime:
         if dt.tzinfo is None:
@@ -126,7 +130,10 @@ def reconcile_group_schedule(
             event.end_datetime = end_dt
             event.updated_at = now_utc
             updated += 1
-        event.teacher_id = teacher_id
+        # NOT `event.teacher_id = teacher_id`. That line handed a substituted lesson back to
+        # the group's regular teacher on the next schedule edit, undoing an approved
+        # substitution without anybody asking for it.
+        assign_lesson_teacher_preserving_overrides(event, teacher_id, protected)
 
     # Extra new slots (schedule now has more future lessons) -> create.
     for target_dt, _ln in future_desired[pair_count:]:

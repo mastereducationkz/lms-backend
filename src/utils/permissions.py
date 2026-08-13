@@ -405,6 +405,43 @@ def check_event_access(event_id: int, user: UserInDB, db: Session) -> bool:
 
     return False
 
+def can_mark_event_attendance(event, user: UserInDB, db: Session) -> bool:
+    """Who may *write* the register for one lesson.
+
+    Deliberately stricter than :func:`check_event_access`, which answers "may this person see
+    this lesson" and lets a teacher through on group ownership. Ownership is the wrong test
+    for marking: the person who can say who was in the room is the person who was in the room.
+    After Azamat hands a lesson to Nuray he still owns the group, so the read check keeps
+    passing for him — and he could mark her lesson by posting the event id directly, even
+    though the UI had already stopped offering it. Hiding it in the UI is not access control.
+
+    * admin / head_teacher — yes. Supervisory correction has to remain possible, and both are
+      accountable roles.
+    * teacher — only when they are the lesson's actual teacher. Lessons that never recorded
+      one fall back to the group's regular teacher, matching
+      :func:`~src.services.payable_lessons.teacher_lesson_clause`, so legacy rows keep working.
+    * anyone else (curators included) — no.
+    """
+    role = (user.role or "").strip().lower()
+    if role in ("admin", "head_teacher"):
+        return True
+    if role != "teacher":
+        return False
+
+    if event.teacher_id is not None:
+        return event.teacher_id == user.id
+
+    from src.schemas.models import EventGroup
+
+    owned = (
+        db.query(EventGroup.event_id)
+        .join(Group, Group.id == EventGroup.group_id)
+        .filter(EventGroup.event_id == event.id, Group.teacher_id == user.id)
+        .first()
+    )
+    return owned is not None
+
+
 def require_group_access(group_id: int):
     """
     Dependency to require access to a specific group

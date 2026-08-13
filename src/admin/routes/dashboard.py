@@ -53,6 +53,7 @@ def _missing_attendance_reminders(
     expected_within_groups: bool = False,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    teacher_id: Optional[int] = None,
 ) -> List[dict]:
     """Past class events where fewer attendance records exist than expected students.
 
@@ -63,9 +64,18 @@ def _missing_attendance_reminders(
     across all of an event's groups (admin/teacher semantics). ``start``/``end`` are
     optional naive-UTC bounds on the lesson's start; when given, only lessons that
     started within ``[start, end)`` are considered.
+
+    ``teacher_id`` asks the *ownership* question — "which lessons does this person owe a
+    register for" — and is answered from ``events.teacher_id``, the teacher who actually
+    conducted the lesson. It is not the same question as ``group_ids=<their groups>``, which
+    is what this was called with before: that asks "lessons in groups this person runs", and
+    those two sets differ by exactly the substitutions. A lesson Azamat handed to Nuray stayed
+    in Azamat's queue (he could not mark it and had no reason to) and never reached Nuray's.
+    Pass ``teacher_id``, not ``group_ids``, for a teacher.
     """
     from src.schemas.models import Event, EventGroup, Group
     from src.events.models import Attendance
+    from src.services.payable_lessons import teacher_lesson_clause
 
     if group_ids is not None and not group_ids:
         return []
@@ -86,6 +96,11 @@ def _missing_attendance_reminders(
         events_q = events_q.filter(Event.start_datetime < end)
     if group_ids is not None:
         events_q = events_q.filter(EventGroup.group_id.in_(group_ids))
+    if teacher_id is not None:
+        # Join Group so the NULL-teacher fallback inside teacher_lesson_clause can resolve.
+        events_q = events_q.join(Group, Group.id == EventGroup.group_id).filter(
+            teacher_lesson_clause(teacher_id)
+        )
     past_event_ids_sq = events_q.distinct().subquery()
 
     # Expected headcount is join-date-aware: a student added to the group AFTER an
@@ -146,6 +161,13 @@ def _missing_attendance_reminders(
     )
     if group_ids is not None:
         active_gq = active_gq.filter(EventGroup.group_id.in_(group_ids))
+    else:
+        # Only the groups the flagged lessons actually belong to can affect the outcome.
+        # Bounding the scan here matters for the teacher_id mode, which has no group list to
+        # narrow by and would otherwise sweep every group that marked attendance this month.
+        candidate_group_ids = {g_id for _e, _t, _s, g_id, _n in flagged_rows}
+        if candidate_group_ids:
+            active_gq = active_gq.filter(EventGroup.group_id.in_(list(candidate_group_ids)))
     active_group_ids = {gid for (gid,) in active_gq.distinct().all()}
 
     reminders = []
@@ -567,7 +589,10 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
     grading_progress = round((graded_submissions_count / total_submissions) * 100) if total_submissions > 0 else 0
 
     # Find past events with missing attendance (for reminders)
-    missing_attendance_reminders = _missing_attendance_reminders(db, group_ids=teacher_group_ids)
+    # Keyed on the teacher who actually conducts each lesson, not on group ownership. A
+    # lesson Azamat handed to Nuray is Nuray's register to take: it belongs in her queue and
+    # must be gone from his, even though the group is still his.
+    missing_attendance_reminders = _missing_attendance_reminders(db, teacher_id=user.id)
     
     return DashboardStatsSchema(
         user={
@@ -2956,32 +2981,27 @@ def get_teacher_salary_breakdown(
         raise HTTPException(status_code=400, detail="period_start must be before or equal to period_end")
 
     from src.schemas.models import Event, EventGroup, Group
-
-    start_dt = datetime.combine(start_d, datetime.min.time())
-    end_dt = datetime.combine(end_d, datetime.max.time())
-
-    # A payslip lists work already done. Without the `end_datetime <= now` bound a breakdown
-    # for the second half of the month, generated on the 13th, quietly billed lessons that
-    # have not happened yet — the CRM's own payroll has always had this filter and this copy
-    # did not.
-    now_utc = datetime.utcnow()
-    event_rows = (
-        db.query(Event, Group)
-        .join(EventGroup, EventGroup.event_id == Event.id)
-        .join(Group, Group.id == EventGroup.group_id)
-        .filter(
-            Event.event_type == "class",
-            Event.is_active == True,
-            Event.start_datetime >= start_dt,
-            Event.start_datetime <= end_dt,
-            Event.end_datetime <= now_utc,
-            or_(
-                Event.teacher_id == current_user.id,
-                and_(Event.teacher_id.is_(None), Group.teacher_id == current_user.id),
-            ),
-        )
-        .all()
+    from src.services.payable_lessons import (
+        OMISSION_REASONS,
+        almaty_period_bounds,
+        conducted_lessons_query,
+        marked_attendance_clause,
     )
+
+    # The period edges are Almaty midnights, not UTC ones. Combining the dates with UTC
+    # midnight moved five hours of lessons into the neighbouring period — a lesson at 22:00
+    # Almaty on the 15th belongs to the first half of the month and was landing in the second.
+    start_dt, end_dt = almaty_period_bounds(start_d, end_d)
+
+    # A payslip lists work already done AND actually registered. Both bounds live in
+    # `conducted_lessons_query`, which the payable set and the unmarked set are both drawn
+    # from, so the two lists cannot disagree about their own total.
+    now_utc = datetime.utcnow()
+    conducted_q = conducted_lessons_query(db, current_user.id, start_dt, end_dt, now_utc)
+    event_rows = conducted_q.filter(marked_attendance_clause()).all()
+    # Completed, taught by this teacher, but nobody took the register: real work, not yet
+    # payable. Shown as its own section instead of silently vanishing from the total.
+    unmarked_rows = conducted_q.filter(~marked_attendance_clause()).all()
 
     # Rates the CRM computed for this teacher (level × lesson kind × group count). An
     # explicit `lesson_rate` still wins — a manager recalculating an old period needs to be
@@ -3060,6 +3080,40 @@ def get_teacher_salary_breakdown(
             "amount_tenge": amount,
         })
 
+    # Completed-but-unmarked, grouped the same way. Kept strictly apart from the payable
+    # figure: it is the difference between "we owe you this" and "mark these and we will".
+    pending_by_group: dict[int, dict] = {}
+    for event, group in unmarked_rows:
+        bucket = pending_by_group.setdefault(
+            group.id,
+            {
+                "group_id": group.id,
+                "group_name": group.name,
+                "lesson_dates": [],
+                "minutes": 0,
+                "is_substitution": bool(
+                    group.teacher_id is not None and group.teacher_id != current_user.id
+                ),
+            },
+        )
+        bucket["lesson_dates"].append(event.start_datetime.date())
+        bucket["minutes"] += lesson_minutes(event.start_datetime, event.end_datetime)
+
+    pending_groups = [
+        {
+            "group_id": item["group_id"],
+            "group_name": item["group_name"],
+            "lesson_dates": [d.isoformat() for d in sorted(item["lesson_dates"])],
+            "lesson_count": len(item["lesson_dates"]),
+            "lesson_minutes": item["minutes"],
+            "lesson_hours": format_hours(item["minutes"]),
+            "is_substitution": item["is_substitution"],
+            "reason": OMISSION_REASONS["unmarked"],
+        }
+        for _, item in sorted(pending_by_group.items(), key=lambda x: x[1]["group_name"].lower())
+    ]
+    pending_lessons_total = sum(g["lesson_count"] for g in pending_groups)
+
     period_text = f"{start_d.strftime('%d.%m.%Y')} — {end_d.strftime('%d.%m.%Y')}"
     lines = [
         "Здравствуйте!",
@@ -3129,6 +3183,26 @@ def get_teacher_salary_breakdown(
     if any(g["is_substitution"] for g in groups):
         lines.append("«Замена» — урок в группе другого педагога; он оплачивается вам.")
 
+    # Naming the omitted lessons is the whole point: a teacher who taught eight lessons and
+    # sees six paid needs to be told the other two are waiting on the register, not left to
+    # conclude the payslip is wrong.
+    if pending_groups:
+        lines.extend([
+            "",
+            f"Ожидают отметки посещаемости — {pending_lessons_total} уроков:",
+        ])
+        for g in pending_groups:
+            dates_text = "; ".join(
+                datetime.fromisoformat(d).strftime("%d.%m") for d in g["lesson_dates"]
+            )
+            lines.append(
+                f"— {g['group_name']}{' · замена' if g['is_substitution'] else ''}"
+                f" — {g['lesson_count']} уроков ({dates_text})"
+            )
+        lines.append(
+            "Пока посещаемость не отмечена, эти занятия не попадают в расчёт зарплаты."
+        )
+
     return {
         "teacher_id": current_user.id,
         "teacher_name": current_user.name,
@@ -3143,6 +3217,11 @@ def get_teacher_salary_breakdown(
         "groups": groups,
         "total_lessons": total_lessons,
         "total_amount_tenge": total_amount,
+        # Payable / awaiting-register kept as separate totals so no screen has to derive one
+        # from the other and get it wrong.
+        "pending_groups": pending_groups,
+        "pending_lessons": pending_lessons_total,
+        "pending_note": OMISSION_REASONS["unmarked"],
         "message_text": "\n".join(lines),
         "contacts": {
             "telegram": telegram_username,
