@@ -310,16 +310,21 @@ def _finish_homework_and_progress(
             )
             .all()
         }
+        # `student_id`, not `user_id`. `AssignmentSubmission` above really does call its
+        # column `user_id`, and this query was written to match its neighbour rather than the
+        # model — so every call raised AttributeError before touching the database. The whole
+        # endpoint 500'd, the CRM saw 502, and the health engine concluded that nobody had a
+        # group: 1480 of 1493 students came out "critical", which blocked activation.
         extensions: dict[tuple[int, int], datetime] = {
             (int(aid), int(uid)): deadline
             for aid, uid, deadline in db.query(
                 AssignmentExtension.assignment_id,
-                AssignmentExtension.user_id,
+                AssignmentExtension.student_id,
                 AssignmentExtension.extended_deadline,
             )
             .filter(
                 AssignmentExtension.assignment_id.in_(assignment_ids),
-                AssignmentExtension.user_id.in_(ids),
+                AssignmentExtension.student_id.in_(ids),
             )
             .all()
         }

@@ -218,6 +218,51 @@ def test_future_lessons_are_counted_separately_and_never_as_absences(world):
     assert facts["marked_lessons"] == 0
 
 
+def test_homework_facts_are_produced_when_the_group_has_assignments(world):
+    """The branch that 500'd in production for months.
+
+    Everything under ``if assignment_ids:`` was unreachable in tests because no fixture ever
+    created an assignment — so a query naming a column the model does not have
+    (``AssignmentExtension.user_id``; it is ``student_id``) raised AttributeError on every
+    real call. The endpoint returned 500, the CRM read that as 502, and the health engine,
+    seeing no facts, judged 1480 of 1493 students "critical" and refused to activate.
+
+    Asserting the numbers matters less than reaching the code at all.
+    """
+    from src.schemas.models import Assignment, AssignmentExtension, GroupAssignment
+
+    db = world["db"]
+    assignment = Assignment(
+        title="ДЗ 1",
+        description="",
+        assignment_type="text",
+        content="",
+        due_date=datetime.utcnow() - timedelta(days=2),
+        is_active=True,
+    )
+    db.add(assignment)
+    db.flush()
+    db.add(GroupAssignment(assignment_id=assignment.id, group_id=world["group"].id))
+    # An individual deadline extension — the row whose column name was wrong.
+    db.add(
+        AssignmentExtension(
+            assignment_id=assignment.id,
+            student_id=world["student"].id,
+            extended_deadline=datetime.utcnow() + timedelta(days=3),
+            granted_by=world["curator"].id,
+        )
+    )
+    db.commit()
+
+    facts = _facts(world)
+
+    assert facts["has_homework_data"] is True, "the assignment branch actually ran"
+    # A deadline extension is a deliberate act by a teacher: the homework is not yet due for
+    # this student, so it must not be counted as missed.
+    assert facts["missed_homework_recent"] == 0
+    assert facts["missed_homework_details"] == []
+
+
 def test_the_endpoint_returns_the_same_facts_over_http(client, world):
     _lesson(world, days_ago=2, status="absent")
     response = client.post(
