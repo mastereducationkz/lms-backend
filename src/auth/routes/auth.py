@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Response, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -19,6 +19,7 @@ from src.services.email_service import (
     send_password_changed_email,
     _get_lms_base_url,
 )
+from src.services import email_log
 from src.config import get_db
 from src.schemas.models import UserInDB, Token, UserSchema
 from src.auth.user_schema import build_user_schema_response
@@ -249,6 +250,23 @@ def require_teacher_or_admin(current_user: UserInDB = Depends(get_current_user_d
 
 # ── Self-service password flows ───────────────────────────────────────────────
 
+#: One sentence for every outcome — found, not found, throttled. Any variation between
+#: them turns this endpoint into an account-existence oracle.
+_FORGOT_PASSWORD_RESPONSE = (
+    "Если такой аккаунт существует, на почту отправлена ссылка для сброса пароля."
+)
+
+
+def _client_ip(request: Request) -> str | None:
+    """Best-effort caller IP. The app sits behind a reverse proxy, so prefer the
+    left-most X-Forwarded-For entry and fall back to the socket peer."""
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded[:320]
+    client = request.client
+    return client.host if client else None
+
+
 class ForgotPasswordRequest(BaseModel):
     email: str
 
@@ -265,15 +283,31 @@ class ChangePasswordRequest(BaseModel):
 def forgot_password(
     payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Send a password-reset link. Always returns a generic response (no user enumeration)."""
+    """Send a password-reset link. Always returns a generic response (no user enumeration).
+
+    Throttled at 3 requests per address and 10 per client IP per hour. Unlimited, this
+    endpoint was a mail bomb anyone could point at a known address, and it sends a real
+    email for every request. The counters live in the database because production runs
+    four uvicorn workers — a per-process counter would hand out four times the budget.
+
+    A throttled request still returns the same sentence as an accepted one. The generic
+    response is what stops the endpoint confirming which addresses exist, and a distinct
+    429 would give that away just as effectively as a distinct 404.
+    """
+    if not email_log.password_reset_allowed(payload.email, _client_ip(request)):
+        logger.warning("Password reset throttled for %s", payload.email)
+        return {"detail": _FORGOT_PASSWORD_RESPONSE}
     user = db.query(UserInDB).filter(func.lower(UserInDB.email) == payload.email.lower()).first()
     if user and user.is_active:
         token = create_password_reset_token(user.email, user.id, user.hashed_password)
         reset_url = f"{_get_lms_base_url()}/reset-password?token={token}"
-        background_tasks.add_task(send_password_reset_email, user.email, user.name or "", reset_url)
-    return {"detail": "Если такой аккаунт существует, на почту отправлена ссылка для сброса пароля."}
+        background_tasks.add_task(
+            send_password_reset_email, user.email, user.name or "", reset_url, user.id
+        )
+    return {"detail": _FORGOT_PASSWORD_RESPONSE}
 
 
 @router.post("/reset-password")
@@ -296,7 +330,7 @@ def reset_password(
     user.refresh_token = None
     user.updated_at = datetime.utcnow()
     db.commit()
-    background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None)
+    background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None, user.id)
     # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
     from src.services.zitadel_provisioning import mirror_password
 
@@ -323,7 +357,10 @@ def change_password(
     current_user.refresh_token = None
     current_user.updated_at = datetime.utcnow()
     db.commit()
-    background_tasks.add_task(send_password_changed_email, current_user.email, current_user.name or "", None)
+    background_tasks.add_task(
+        send_password_changed_email, current_user.email, current_user.name or "", None,
+        current_user.id,
+    )
     # Keep the Master Education (Zitadel) password in step — best-effort, off the response path.
     from src.services.zitadel_provisioning import mirror_password
 

@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 
 from src.config import SessionLocal
 from src.schemas.models import Event, EventGroup, EventParticipant, UserInDB, Group, GroupStudent
-from src.services.email_service import send_lesson_reminder_notification
+from src.services import email_log
+from src.services.email_service import (
+    reminder_idempotency_key,
+    send_lesson_reminder_notification,
+)
 from src.utils.push_notifications import send_push_notification
 
 logger = logging.getLogger(__name__)
@@ -30,8 +34,13 @@ class LessonReminderScheduler:
         self.check_interval = check_interval
         self.running = False
         self.thread = None
-        self.sent_reminders = set()  # Track sent reminders to avoid duplicates
-        
+        # Fast path only. This set is what stops the scheduler re-querying an event it
+        # already handled during the 4-minute reminder window; it is *not* what stops
+        # duplicate mail, because it dies with the process and this scheduler runs in its
+        # own container that restarts on every deploy. The durable guarantee is the
+        # unique idempotency_key claimed in email_log before each send.
+        self.sent_reminders = set()
+
     def start(self):
         """Start the scheduler in a background thread"""
         if self.running:
@@ -265,7 +274,23 @@ class LessonReminderScheduler:
             
             sent_count = 0
             failed_count = 0
-            
+            skipped_count = 0
+
+            def _record(result, event_id: int, user_id: int, who: str) -> None:
+                """Classify one send. A ``None`` result is ambiguous — a genuine failure
+                and an already-claimed reminder look identical to the caller — so ask the
+                journal which it was. Only reached on the rare non-success path."""
+                nonlocal sent_count, failed_count, skipped_count
+                if result:
+                    sent_count += 1
+                    return
+                key = reminder_idempotency_key(event_id, user_id)
+                if key and email_log.claimed_elsewhere(key):
+                    skipped_count += 1
+                    logger.debug("⏭️  [REMINDER] %s already reminded for event %s", who, event_id)
+                else:
+                    failed_count += 1
+
             # Collect unique teachers from groups (teacher_id)
             teacher_ids = set()
             for event_group in event_groups:
@@ -314,12 +339,11 @@ class LessonReminderScheduler:
                             lesson_title=event.title,
                             lesson_datetime=event_datetime_str,
                             group_name=group.name,
-                            role="student"
+                            role="student",
+                            event_id=event.id,
+                            user_id=student.id,
                         )
-                        if result:
-                            sent_count += 1
-                        else:
-                            failed_count += 1
+                        _record(result, event.id, student.id, f"student {student.id}")
                     except Exception as e:
                         logger.error(f"❌ [REMINDER] Failed to send reminder to student {student.email}: {e}")
                         failed_count += 1
@@ -349,13 +373,13 @@ class LessonReminderScheduler:
                             lesson_title=event.title,
                             lesson_datetime=event_datetime_str,
                             group_name=group_name,
-                            role="teacher"
+                            role="teacher",
+                            event_id=event.id,
+                            user_id=teacher.id,
                         )
                         if result:
-                            sent_count += 1
                             logger.info(f"      ✅ Sent to teacher: {teacher.email} (Group: {group_name})")
-                        else:
-                            failed_count += 1
+                        _record(result, event.id, teacher.id, f"teacher {teacher.id}")
                     except Exception as e:
                         logger.error(f"❌ [REMINDER] Failed to send reminder to teacher {teacher.email}: {e}")
                         failed_count += 1
@@ -366,9 +390,15 @@ class LessonReminderScheduler:
                 f"✅ [REMINDER] Completed for event '{event.title}' "
                 f"(Time: {event_datetime_str})"
             )
-            logger.info(f"   📊 Sent: {sent_count}, Failed: {failed_count}")
-            
-            return sent_count > 0
+            logger.info(
+                f"   📊 Sent: {sent_count}, Failed: {failed_count}, Skipped: {skipped_count}"
+            )
+
+            # True means "this event has been dealt with", not "every email landed". A
+            # failed send is already claimed in the journal and will never be retried, so
+            # re-processing the event on the next tick could only re-query the database to
+            # reach the same conclusion.
+            return (sent_count + failed_count + skipped_count) > 0
             
         except Exception as e:
             logger.error(f"❌ [REMINDER] Error sending event reminders for event {event.id}: {e}", exc_info=True)

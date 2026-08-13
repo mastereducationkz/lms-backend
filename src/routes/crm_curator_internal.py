@@ -969,7 +969,7 @@ def post_reconcile_student(
             db.commit()
 
     if emails:
-        background_tasks.add_task(dispatch_emails, emails)
+        background_tasks.add_task(dispatch_emails, emails, "curator_transfer")
     return {**result, "notified": len(emails)}
 
 
@@ -1007,7 +1007,7 @@ def alert_unassigned_groups(
     )
     db.commit()
     if emails:
-        background_tasks.add_task(dispatch_emails, emails)
+        background_tasks.add_task(dispatch_emails, emails, "unassigned_groups")
     return {"notified": len(emails)}
 
 
@@ -1063,7 +1063,7 @@ def overdue_sweep(
         )
     db.commit()
     if emails:
-        background_tasks.add_task(dispatch_emails, emails)
+        background_tasks.add_task(dispatch_emails, emails, "overdue_sweep")
     return {"cards": len(overdue), "notified": len(emails)}
 
 
@@ -1131,7 +1131,7 @@ def assign_group_curator(
         )
         db.commit()
         if emails:
-            background_tasks.add_task(dispatch_emails, emails)
+            background_tasks.add_task(dispatch_emails, emails, "curator_removed")
 
     return {
         "group_id": group_id,

@@ -242,6 +242,7 @@ def notify_resolution(db: Session, lr: LessonRequest, approved: bool) -> None:
     group = db.query(Group).filter(Group.id == lr.group_id).first()
     group_name = group.name if group else "Unknown Group"
     requester = db.query(UserInDB).filter(UserInDB.id == lr.requester_id).first()
+    pending_curator_email: dict | None = None
 
     db.add(
         Notification(
@@ -301,16 +302,33 @@ def notify_resolution(db: Session, lr: LessonRequest, approved: bool) -> None:
                     if sub_teacher_id
                     else None
                 )
-                send_lesson_change_curator_notification(
-                    curator.email,
-                    curator.name or curator.email,
-                    group_name,
-                    lr.request_type,
-                    _format_dt(lr.original_datetime),
+                # Read everything the email needs now, while the objects are loaded, but
+                # send after the commit — see below.
+                pending_curator_email = dict(
+                    curator_email=curator.email,
+                    curator_name=curator.name or curator.email,
+                    group_name=group_name,
+                    request_type=lr.request_type,
+                    original_datetime=_format_dt(lr.original_datetime),
                     new_datetime=_format_dt(lr.new_datetime) if lr.new_datetime else None,
                     substitute_name=sub_teacher.name if sub_teacher else None,
                     requester_name=requester.name if requester else None,
                     reason=lr.reason,
+                    curator_id=curator.id,
+                    lesson_request_id=lr.id,
                 )
 
     db.commit()
+
+    # After the commit, never before. Sending inside the transaction meant a curator could
+    # be told a lesson had moved and then have the write roll back underneath them —
+    # and the send is a 10-second blocking HTTP call holding the transaction open while
+    # Resend answers. A failure here is logged and dropped: the schedule change is
+    # already durable, and an email problem must not surface as a failed approval.
+    if pending_curator_email is not None:
+        try:
+            send_lesson_change_curator_notification(**pending_curator_email)
+        except Exception:
+            logger.exception(
+                "Curator lesson-change email failed for request %s", lr.id
+            )

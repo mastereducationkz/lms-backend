@@ -116,7 +116,9 @@ def notify_once(
 # --- email --------------------------------------------------------------------------------
 
 
-def _send_email_safe(to_email: str, subject: str, html: str) -> bool:
+def _send_email_safe(
+    to_email: str, subject: str, html: str, event_type: str = "curator_notify"
+) -> bool:
     """Send one email; never raise. Returns whether Resend accepted it.
 
     Deliberately logs the recipient and outcome but never the body, which can carry a
@@ -126,10 +128,11 @@ def _send_email_safe(to_email: str, subject: str, html: str) -> bool:
         from src.services.email_service import _email_shell, get_email_service
 
         service = get_email_service()
-        if not getattr(service, "is_configured", False):
-            logger.info("[CURATOR-NOTIFY] email skipped (RESEND_API_KEY not configured)")
-            return False
-        result = service.send_email([to_email], subject, _email_shell(subject, html))
+        # An unconfigured service is send_email's call, not ours: it records the skip in
+        # the email journal and returns None, which is the same False we would return.
+        result = service.send_email(
+            [to_email], subject, _email_shell(subject, html), event_type=event_type
+        )
         ok = result is not None
         logger.info("[CURATOR-NOTIFY] email to=%s subject=%r delivered=%s", to_email, subject, ok)
         return ok
@@ -157,6 +160,7 @@ def send_curator_email(
     lines: Sequence[str],
     link: Optional[str] = None,
     link_label: str = "Открыть в CRM",
+    event_type: str = "curator_notify",
 ) -> bool:
     """Compose and send a curator notification email.
 
@@ -168,7 +172,7 @@ def send_curator_email(
     html = "".join(_para(line) for line in lines)
     if link:
         html += f'<div style="margin-top:20px;">{_link_button(link, link_label)}</div>'
-    return _send_email_safe(to_email, subject, html)
+    return _send_email_safe(to_email, subject, html, event_type)
 
 
 # --- high-level events --------------------------------------------------------------------
@@ -261,10 +265,18 @@ def head_curators(db: Session) -> list[UserInDB]:
     )
 
 
-def dispatch_emails(payloads: Iterable[tuple[str, str, list[str], str]]) -> int:
-    """Send a batch of prepared emails. Never raises; returns the delivered count."""
+def dispatch_emails(
+    payloads: Iterable[tuple[str, str, list[str], str]],
+    event_type: str = "curator_notify",
+) -> int:
+    """Send a batch of prepared emails. Never raises; returns the delivered count.
+
+    ``event_type`` is per batch rather than per payload because each caller dispatches one
+    kind of event, and threading it through the payload tuple would change a shape four
+    call sites already build.
+    """
     delivered = 0
     for to_email, subject, lines, link in payloads:
-        if send_curator_email(to_email, subject, lines, link):
+        if send_curator_email(to_email, subject, lines, link, event_type=event_type):
             delivered += 1
     return delivered

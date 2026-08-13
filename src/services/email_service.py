@@ -9,6 +9,8 @@ from typing import List, Optional
 import requests
 from dotenv import load_dotenv
 
+from src.services import email_log
+
 # Load environment variables
 load_dotenv()
 
@@ -84,86 +86,153 @@ class EmailService:
         }
     
     def send_email(
-        self, 
-        to_emails: List[str], 
-        subject: str, 
+        self,
+        to_emails: List[str],
+        subject: str,
         html_content: str,
-        text_content: Optional[str] = None
+        text_content: Optional[str] = None,
+        *,
+        event_type: str = "other",
+        recipient_user_id: Optional[int] = None,
+        related_type: Optional[str] = None,
+        related_id: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Optional[dict]:
         """
         Send email using Resend API
-        
+
         Args:
             to_emails: List of recipient email addresses
             subject: Email subject
             html_content: HTML body of the email
             text_content: Optional plain text version
-            
+            event_type: Journal slug for this kind of mail (see email_log.EVENT_TYPES)
+            recipient_user_id: LMS user this is addressed to, when known
+            related_type/related_id: what the mail is about (assignment, event, …)
+            idempotency_key: claim this key before sending; if another process already
+                holds it the send is skipped and ``None`` is returned. Single-recipient
+                sends only — a shared key across a list could not be reasoned about.
+
         Returns:
             Response from Resend API or None if failed
+
+        Every recipient gets one journal row, claimed *before* the HTTP call so a crash
+        mid-send still leaves evidence. Journal failures are contained inside
+        :mod:`src.services.email_log` and never stop the send.
         """
         logger.info(f"📧 [EMAIL] Attempting to send email: '{subject}'")
         logger.info(f"   Recipients: {to_emails}")
-        
-        if not self.is_configured:
-            logger.error("❌ [EMAIL] Email service not configured - RESEND_API_KEY is missing!")
-            logger.error(f"   Current RESEND_API_KEY value: {self.api_key or 'None'}")
-            return None
-            
+
         if not to_emails:
             logger.warning("⚠️  [EMAIL] No recipients provided for email")
             return None
-        
+
         # Filter out empty/invalid emails
         valid_emails = [e.strip() for e in to_emails if e and "@" in e]
         if not valid_emails:
             logger.warning(f"⚠️  [EMAIL] No valid email addresses provided. Input was: {to_emails}")
             return None
-        
+
         if len(valid_emails) < len(to_emails):
             logger.warning(f"⚠️  [EMAIL] Filtered {len(to_emails) - len(valid_emails)} invalid emails")
-        
+
+        if idempotency_key and len(valid_emails) > 1:
+            logger.error(
+                "❌ [EMAIL] idempotency_key given with %s recipients; refusing to send",
+                len(valid_emails),
+            )
+            return None
+
+        def _journal(email: str, key: Optional[str]) -> Optional[int]:
+            return email_log.claim(
+                event_type=event_type,
+                recipient_email=email,
+                subject=subject,
+                recipient_user_id=recipient_user_id,
+                related_type=related_type,
+                related_id=related_id,
+                idempotency_key=key,
+            )
+
+        if not self.is_configured:
+            logger.error("❌ [EMAIL] Email service not configured - RESEND_API_KEY is missing!")
+            logger.error(f"   Current RESEND_API_KEY value: {self.api_key or 'None'}")
+            # Recorded without the idempotency key: nothing was sent, so a later run with a
+            # working key must still be allowed to claim it.
+            for email in valid_emails:
+                email_log.finish(
+                    _journal(email, None),
+                    status="suppressed",
+                    error="email service not configured",
+                    event_type=event_type,
+                )
+            return None
+
+        claims = [_journal(email, idempotency_key) for email in valid_emails]
+        if idempotency_key and claims[0] is None:
+            logger.info(f"⏭️  [EMAIL] '{idempotency_key}' already claimed; not sending again")
+            return None
+
         payload = {
             "from": self.from_email,
             "to": valid_emails,
             "subject": subject,
             "html": html_content
         }
-        
+
         if text_content:
             payload["text"] = text_content
-        
+
         logger.info(f"📤 [EMAIL] Sending to Resend API ({self.RESEND_API_URL})...")
         logger.info(f"   📧 From: '{payload['from']}'")
         logger.info(f"   📬 To: {payload['to']}")
         logger.info(f"   📝 Subject: '{payload['subject']}'")
         logger.debug(f"   Full payload keys: {list(payload.keys())}")
-        
+
+        def _close(status: str, message_id: Optional[str] = None, error: object = None) -> None:
+            for claim_id in claims:
+                email_log.finish(
+                    claim_id,
+                    status=status,
+                    provider_message_id=message_id,
+                    error=error,
+                    event_type=event_type,
+                )
+
         try:
             response = requests.post(
-                self.RESEND_API_URL, 
-                json=payload, 
+                self.RESEND_API_URL,
+                json=payload,
                 headers=self._get_headers(),
                 timeout=10
             )
-            
+
             logger.info(f"📥 [EMAIL] Resend API response status: {response.status_code}")
-            
+
             response.raise_for_status()
-            
+
             response_data = response.json()
             logger.info(f"✅ [EMAIL] Successfully sent to {len(valid_emails)} recipient(s)")
             logger.debug(f"   Response data: {response_data}")
-            
+
+            _close("sent", message_id=(response_data or {}).get("id"))
             return response_data
-        except requests.exceptions.Timeout:
+        except requests.exceptions.Timeout as e:
             logger.error("❌ [EMAIL] Request timed out after 10 seconds")
+            _close("failed", error=e)
             return None
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ [EMAIL] Failed to send email: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"   Response status: {e.response.status_code}")
                 logger.error(f"   Response body: {e.response.text}")
+            _close("failed", error=e)
+            return None
+        except Exception as e:
+            # A malformed success body (json() raising) would otherwise leave the row stuck
+            # at "queued" forever with no explanation.
+            logger.error(f"❌ [EMAIL] Unexpected error sending email: {e}")
+            _close("failed", error=e)
             return None
 
 
@@ -344,6 +413,7 @@ def build_invite_email(
 def send_invite_email(
     to_email: str, name: str, login_email: str, password: str,
     access_until: Optional[str] = None,
+    user_id: Optional[int] = None,
 ) -> Optional[dict]:
     """Welcome/invite email with platform link and login credentials (students).
 
@@ -356,10 +426,15 @@ def send_invite_email(
         subject=content["subject"],
         html_content=content["html"],
         text_content=content["text"],
+        event_type="trial_invite" if access_until else "invite",
+        recipient_user_id=user_id,
     )
 
 
-def send_password_changed_email(to_email: str, name: str, new_password: Optional[str] = None) -> Optional[dict]:
+def send_password_changed_email(
+    to_email: str, name: str, new_password: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> Optional[dict]:
     """Password-changed email. If new_password is given (admin-set), include it + login link."""
     base_url = _get_lms_base_url()
     greeting = (", " + name) if name else ""
@@ -396,10 +471,14 @@ def send_password_changed_email(to_email: str, name: str, new_password: Optional
         subject="Ваш пароль изменён / Your password was changed",
         html_content=_email_shell("🔑 Пароль изменён / Password changed", inner),
         text_content=text,
+        event_type="password_changed",
+        recipient_user_id=user_id,
     )
 
 
-def send_password_reset_email(to_email: str, name: str, reset_url: str) -> Optional[dict]:
+def send_password_reset_email(
+    to_email: str, name: str, reset_url: str, user_id: Optional[int] = None,
+) -> Optional[dict]:
     """Self-service password reset link (valid 1 hour)."""
     greeting = (", " + name) if name else ""
     inner = (
@@ -416,6 +495,8 @@ def send_password_reset_email(to_email: str, name: str, reset_url: str) -> Optio
         subject="Восстановление пароля / Reset your password",
         html_content=_email_shell("🔒 Сброс пароля / Reset password", inner),
         text_content=f"Сброс пароля / Reset your password: {reset_url} (1 час / 1 hour)",
+        event_type="password_reset",
+        recipient_user_id=user_id,
     )
 
 
@@ -429,22 +510,28 @@ def send_homework_notification(
 ) -> Optional[dict]:
     """
     Send notification about homework creation or update
-    
+
     Args:
         student_emails: List of student email addresses
         assignment_title: Title of the assignment
         course_name: Name of the course
         due_date: Due date as formatted string
         action: Either "created" or "updated"
-        
+
     Returns:
-        Response from email API or None
+        The last provider response, or None if nothing was accepted.
+
+    One message **per student**. This used to hand Resend the whole class in a single
+    ``to:`` list, which put every classmate's address in every classmate's inbox — a
+    standing privacy leak on the largest mailing the LMS does. The fan-out lives here
+    rather than at the two call sites so no future caller can reintroduce it.
     """
+    # No is_configured guard here (nor in the siblings below): send_email owns that
+    # decision and records a `suppressed` row for it. Returning early would make "mail is
+    # switched off" the one outcome the journal cannot show, which is the question it
+    # exists to answer.
     service = get_email_service()
-    
-    if not service.is_configured:
-        return None
-    
+
     action_text = "New Homework" if action == "created" else "Homework Updated"
     subject = f"{action_text}: {assignment_title}"
     
@@ -564,8 +651,22 @@ def send_homework_notification(
     Best regards,
     Master Education Team
     """
-    
-    return service.send_email(student_emails, subject, html_content, text_content)
+
+    event_type = "homework_new" if action == "created" else "homework_updated"
+    last_result: Optional[dict] = None
+    for recipient in student_emails:
+        result = service.send_email(
+            [recipient],
+            subject,
+            html_content,
+            text_content,
+            event_type=event_type,
+            related_type="assignment",
+            related_id=assignment_id,
+        )
+        if result is not None:
+            last_result = result
+    return last_result
 
 
 def send_submission_graded_notification(
@@ -592,10 +693,7 @@ def send_submission_graded_notification(
         Response from email API or None
     """
     service = get_email_service()
-    
-    if not service.is_configured:
-        return None
-        
+
     subject = f"Graded: {assignment_title}"
     
     html_content = f"""
@@ -712,12 +810,30 @@ def send_submission_graded_notification(
     {f"Feedback: {feedback}" if feedback else ""}
     
     Please log in to the LMS to view details.
-    
+
     Best regards,
     Master Education Team
     """
-    
-    return service.send_email([student_email], subject, html_content, text_content)
+
+    return service.send_email(
+        [student_email], subject, html_content, text_content,
+        event_type="submission_graded",
+        related_type="assignment",
+        related_id=assignment_id,
+    )
+
+
+def reminder_idempotency_key(event_id: Optional[int], user_id: Optional[int]) -> Optional[str]:
+    """The claim key for one lesson reminder to one person.
+
+    The scheduler's in-memory set forgets everything on restart, and production runs the
+    reminder in its own container: without a durable key, a deploy inside the 28–32 minute
+    window re-mails the whole cohort. Keyed on the event rather than the datetime so a
+    rescheduled lesson does not silently earn a second reminder.
+    """
+    if event_id is None or user_id is None:
+        return None
+    return f"lesson-reminder:{event_id}:{user_id}"
 
 
 def send_lesson_reminder_notification(
@@ -726,11 +842,14 @@ def send_lesson_reminder_notification(
     lesson_title: str,
     lesson_datetime: str,
     group_name: str,
-    role: str = "student"
+    role: str = "student",
+    *,
+    event_id: Optional[int] = None,
+    user_id: Optional[int] = None,
 ) -> Optional[dict]:
     """
     Send email reminder about upcoming lesson (30 minutes before)
-    
+
     Args:
         to_email: Recipient email address
         recipient_name: Name of the recipient
@@ -738,7 +857,10 @@ def send_lesson_reminder_notification(
         lesson_datetime: Formatted datetime string of the lesson
         group_name: Name of the group
         role: Role of the recipient (student/teacher)
-        
+        event_id/user_id: identify this reminder so it is sent at most once — see
+            :func:`reminder_idempotency_key`. Without both, no claim is made and the
+            caller's own deduplication is all that protects the recipient.
+
     Returns:
         Response from email API or None
     """
@@ -746,11 +868,7 @@ def send_lesson_reminder_notification(
     logger.info(f"   📚 Lesson: '{lesson_title}' | 👥 Group: '{group_name}' | ⏰ Time: {lesson_datetime}")
     
     service = get_email_service()
-    
-    if not service.is_configured:
-        logger.error("❌ [REMINDER] Email service not configured - RESEND_API_KEY missing!")
-        return None
-    
+
     # Customize content based on role
     if role == "teacher":
         subject = f"Reminder: Lesson in 30 minutes - {lesson_title}"
@@ -894,8 +1012,15 @@ def send_lesson_reminder_notification(
     """
     
     logger.info(f"📤 [REMINDER] Sending email to {to_email}...")
-    result = service.send_email([to_email], subject, html_content, text_content)
-    
+    result = service.send_email(
+        [to_email], subject, html_content, text_content,
+        event_type="lesson_reminder",
+        recipient_user_id=user_id,
+        related_type="event",
+        related_id=event_id,
+        idempotency_key=reminder_idempotency_key(event_id, user_id),
+    )
+
     if result:
         logger.info(f"✅ [REMINDER] Successfully sent reminder to {to_email}")
     else:
@@ -915,12 +1040,11 @@ def send_lesson_change_curator_notification(
     substitute_name: Optional[str] = None,
     requester_name: Optional[str] = None,
     reason: Optional[str] = None,
+    curator_id: Optional[int] = None,
+    lesson_request_id: Optional[int] = None,
 ) -> Optional[dict]:
     """Notify group curator by email when a lesson change request is approved."""
     service = get_email_service()
-    if not service.is_configured:
-        logger.error("Email service not configured — curator notification skipped")
-        return None
 
     type_labels = {
         "cancel": "отмена урока",
@@ -995,4 +1119,10 @@ def send_lesson_change_curator_notification(
     if reason:
         text_lines.append(f"Причина: {reason}")
 
-    return service.send_email([curator_email], subject, html_content, "\n".join(text_lines))
+    return service.send_email(
+        [curator_email], subject, html_content, "\n".join(text_lines),
+        event_type="lesson_change",
+        recipient_user_id=curator_id,
+        related_type="lesson_request",
+        related_id=lesson_request_id,
+    )

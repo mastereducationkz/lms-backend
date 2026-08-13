@@ -3,6 +3,13 @@ from src.models.base import Base
 # Registered here so `Base.metadata.create_all` and Alembic autogenerate both see it.
 from src.crm_audit.models import CrmAuditOutbox
 
+# Imported as a module rather than by name. Unlike the domain models below, this one also
+# carries the journal's helper functions, so `from src.services.email_log import ...` is a
+# plausible *first* import in a script — and binding names out of it here would turn that
+# into a circular-import error. Importing the module is enough: defining the classes is
+# what registers their tables on Base.metadata.
+from src.services import email_log as _email_log  # noqa: F401
+
 from src.auth.models import UserInDB, PointHistory, UserPushToken
 from src.courses.models import (
     Group, GroupStudent, Step, Course, CourseHeadTeacher,
@@ -60,4 +67,5 @@ __all__ = [
     "ParentStudent",
     "ExamResult", "BluebookResult", "StudentTestimonial",
     "TrialAccess",
+    "CrmAuditOutbox",
 ]
