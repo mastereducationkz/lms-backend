@@ -706,6 +706,75 @@ def notify_curators(
     }
 
 
+class FreezeTaskItem(BaseModel):
+    """One freeze's curator task, as the CRM sees it."""
+
+    crm_freeze_period_id: int
+    curator_id: int
+    lms_student_id: Optional[int] = None
+    #: Almaty civil date the return is planned for; it is the task's deadline.
+    due_date: Optional[str] = None
+    title: str = "Возвращение из заморозки"
+    body: str = ""
+    #: ``upsert`` while the freeze is running, ``resumed`` / ``cancelled`` when it ends.
+    action: str = "upsert"
+
+
+class FreezeTaskRequest(BaseModel):
+    items: list[FreezeTaskItem] = Field(default_factory=list)
+
+
+@router.post("/curator-tasks/freeze-return")
+def push_freeze_return_tasks(
+    body: FreezeTaskRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Create or update the single curator task a freeze produces.
+
+    Idempotent on ``freeze_return:{crm_freeze_period_id}``, which the database enforces —
+    the caller is a scheduler that can run in several workers at once and may retry after a
+    network failure, so "create unless it exists" decided by the caller would be a race.
+
+    Replaying the whole batch is therefore safe and is the intended recovery: the CRM does
+    not have to remember which items it managed to deliver.
+    """
+    from src.curator.freeze_tasks import close_freeze_return_task, upsert_freeze_return_task
+
+    results: list[dict[str, Any]] = []
+    for item in body.items:
+        try:
+            if item.action in ("resumed", "cancelled"):
+                outcome = close_freeze_return_task(
+                    db, freeze_period_id=item.crm_freeze_period_id, outcome=item.action
+                )
+            else:
+                due = None
+                if item.due_date:
+                    try:
+                        due = datetime.fromisoformat(item.due_date)
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid due_date")
+                outcome = upsert_freeze_return_task(
+                    db,
+                    freeze_period_id=item.crm_freeze_period_id,
+                    curator_id=item.curator_id,
+                    student_id=item.lms_student_id,
+                    due_date=due,
+                    title=item.title,
+                    body=item.body,
+                )
+            results.append({"crm_freeze_period_id": item.crm_freeze_period_id, **outcome})
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — one bad item must not lose the rest of the batch
+            logger.exception("freeze task upsert failed for %s", item.crm_freeze_period_id)
+            results.append(
+                {"crm_freeze_period_id": item.crm_freeze_period_id, "action": "error"}
+            )
+    db.commit()
+    return {"results": results, "requested": len(body.items)}
+
+
 class FreezeStateItem(BaseModel):
     lms_student_id: int
     status: str = "active"

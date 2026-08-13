@@ -53,6 +53,14 @@ class CuratorTaskInstance(Base):
     week_reference = Column(String, nullable=True)
     program_week = Column(Integer, nullable=True)
     custom_title = Column(String, nullable=True)
+    #: Durable identity for tasks created by another service, e.g. ``freeze_return:{id}``.
+    #:
+    #: The CRM owns the freeze lifecycle and the LMS owns the task list, so "has this task
+    #: already been created?" is a question asked across a network boundary that may retry.
+    #: A name or a (curator, student, date) tuple is not an identity — the date can change and
+    #: the curator can be reassigned. A unique key supplied by the originator is, and the
+    #: uniqueness is enforced by the database rather than by the caller remembering to check.
+    source_key = Column(String(128), nullable=True, unique=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
