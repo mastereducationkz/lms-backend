@@ -18,7 +18,6 @@ So there is one definition here and every operational surface asks it:
 
 * ``is_active`` is the switch somebody flips when a group stops;
 * ``is_over`` marks a finished course;
-* ``is_special`` marks test and administrative groups that exist for plumbing, not teaching;
 * and at least one *active* student is still enrolled — a register with nobody to call is not
   a task. Membership alone is not enough, because a group whose last member was deactivated
   still looks populated to a naive ``COUNT(*)`` over ``group_students``.
@@ -49,10 +48,29 @@ def group_is_operational_clause():
     from src.schemas.models import Group
 
     return and_(
-        Group.is_active == True,  # noqa: E712
+        or_(Group.is_active == True, Group.is_active.is_(None)),  # noqa: E712
         or_(Group.is_over == False, Group.is_over.is_(None)),  # noqa: E712
-        or_(Group.is_special == False, Group.is_special.is_(None)),  # noqa: E712
     )
+
+
+def group_is_not_special_clause():
+    """The group is ordinary teaching, not a special-programme container.
+
+    `is_special` was read here as "test and administrative plumbing", and on that reading it
+    belonged with the other two flags. Measuring which groups it actually removes said
+    otherwise: in this database it names a *programme* — `NUET Special`,
+    `10 grade - BIL Special`, `IELTS Special (Aigerim)` — carrying 30, 3 and 3 active students
+    and 191 lessons between them.
+
+    None of them has a teacher or a single attendance row. So they produce no attendance duty
+    — nobody can be asked to mark a register for a lesson with no teacher — while their
+    schedule remains a real schedule somebody's curator should be able to see.
+
+    It therefore narrows *actionable* queues and never calendars.
+    """
+    from src.schemas.models import Group
+
+    return or_(Group.is_special == False, Group.is_special.is_(None))  # noqa: E712
 
 
 def group_has_active_students_clause():
@@ -73,11 +91,16 @@ def group_has_active_students_clause():
 
 
 def operational_group_clause():
-    """The whole predicate: flags **and** a live roster.
+    """On a calendar: the group is running and somebody is in it.
 
-    Use inside a query that already selects from — or joins — ``Group``.
+    Deliberately does not ask `is_special` — a special-programme group's schedule is real.
     """
     return and_(group_is_operational_clause(), group_has_active_students_clause())
+
+
+def actionable_group_clause():
+    """In a work queue: operational **and** somebody can actually be asked to act."""
+    return and_(operational_group_clause(), group_is_not_special_clause())
 
 
 def event_has_operational_group_clause():

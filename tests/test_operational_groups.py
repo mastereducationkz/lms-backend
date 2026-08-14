@@ -119,7 +119,6 @@ def test_a_live_group_with_a_live_roster_is_operational(world):
 @pytest.mark.parametrize("flags", [
     pytest.param({"is_active": False}, id="switched-off"),
     pytest.param({"is_over": True}, id="finished"),
-    pytest.param({"is_special": True}, id="special-or-test"),
 ])
 def test_a_group_whose_flags_say_it_stopped_is_not_operational(world, flags):
     group = world["group"](**flags)
@@ -151,6 +150,70 @@ def test_legacy_null_flags_do_not_disqualify_a_group(world):
     world["enrol"](group)
 
     assert group.id in _operational(world)
+
+
+def test_a_null_is_active_means_on(world):
+    """The column is nullable and its model default is True, so NULL is "on".
+
+    Written as a decision rather than left to fall out of `== True`, which would drop such a
+    group from every calendar without anybody choosing that. Production has no NULLs today —
+    this is here so it stays harmless if one appears.
+    """
+    group = world["group"](is_active=None)
+    world["enrol"](group)
+
+    assert group.id in _operational(world)
+
+
+# --- special-programme groups ------------------------------------------------------------------
+#
+# `is_special` was read as "test and administrative plumbing" and used to hide groups from
+# calendars. Measuring which groups it actually removes said otherwise: in production it names
+# a *programme* — `NUET Special`, `10 grade - BIL Special`, `IELTS Special (Aigerim)` — with
+# 30, 3 and 3 active students and 191 lessons between them. None has a teacher or a single
+# attendance row.
+#
+# So it answers "can anybody be asked to act", not "is this real". It narrows queues, never
+# calendars.
+
+
+def test_a_special_group_is_still_on_the_calendar(world):
+    """The regression this split fixes. Thirty students' schedule is not plumbing."""
+    from src.services.operational_groups import actionable_group_clause
+
+    group = world["group"](name="10 grade - BIL Special", is_special=True)
+    world["enrol"](group)
+
+    assert group.id in _operational(world)
+
+
+def test_a_special_group_is_not_in_an_actionable_queue(world):
+    """No teacher, so there is nobody to ask for a register."""
+    from src.schemas.models import Group
+    from src.services.operational_groups import actionable_group_clause
+
+    group = world["group"](name="NUET Special", is_special=True)
+    world["enrol"](group)
+
+    actionable = {
+        row.id for row in world["db"].query(Group).filter(actionable_group_clause()).all()
+    }
+    assert group.id not in actionable
+
+
+def test_an_ordinary_group_is_both_operational_and_actionable(world):
+    """The control: the split must not have narrowed the normal case."""
+    from src.schemas.models import Group
+    from src.services.operational_groups import actionable_group_clause
+
+    group = world["group"]()
+    world["enrol"](group)
+
+    actionable = {
+        row.id for row in world["db"].query(Group).filter(actionable_group_clause()).all()
+    }
+    assert group.id in _operational(world)
+    assert group.id in actionable
 
 
 # --- the production case -------------------------------------------------------------------

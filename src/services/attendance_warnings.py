@@ -52,7 +52,9 @@ ATTENDANCE_CUTOFF = datetime(2026, 2, 16, 0, 0, 0)
 # was filtered by two of them. Re-exported rather than moved so the existing callers and
 # tests that import it from this module keep working; there is still only one definition.
 from src.services.operational_groups import (  # noqa: F401  (re-export)
+    actionable_group_clause,
     group_has_active_students_clause,
+    group_is_not_special_clause,
     group_is_operational_clause,
     operational_group_clause,
 )
@@ -110,8 +112,10 @@ def warning_eligible_events(
             Event.is_active == True,  # noqa: E712  — a cancelled lesson needs no register
             Event.end_datetime <= now,  # it has actually happened
             Event.end_datetime >= ATTENDANCE_CUTOFF,
-            group_is_operational_clause(),
-            group_has_active_students_clause(),
+            # `actionable`, not `operational`: a warning asks somebody to do something, and a
+            # special-programme group has no teacher to ask. A calendar makes the weaker
+            # demand and uses `operational_group_clause`.
+            actionable_group_clause(),
         )
     )
     # "No register at all" is the coarse test. A caller that compares *expected* students
