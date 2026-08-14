@@ -36,7 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import and_, exists, func, or_
+from sqlalchemy import and_, exists, func
 
 #: Kazakhstan is a single UTC+5 zone with no DST.
 ALMATY = timezone(timedelta(hours=5))
@@ -46,44 +46,16 @@ ALMATY = timezone(timedelta(hours=5))
 ATTENDANCE_CUTOFF = datetime(2026, 2, 16, 0, 0, 0)
 
 
-def group_is_operational_clause():
-    """The group is still something a teacher is expected to run.
-
-    ``is_active`` is the switch somebody flips when a group stops; ``is_over`` marks a
-    finished course; ``is_special`` marks the test and administrative groups that exist for
-    plumbing rather than teaching. None of the three produces work for a teacher, and the
-    warning query used to ignore all of them.
-
-    ``is_over``/``is_special`` are NULL on legacy rows, so both are compared with an explicit
-    NULL-tolerant test — ``!= True`` alone drops every legacy group and would have swung the
-    bug the other way.
-    """
-    from src.schemas.models import Group
-
-    return and_(
-        Group.is_active == True,  # noqa: E712
-        or_(Group.is_over == False, Group.is_over.is_(None)),  # noqa: E712
-        or_(Group.is_special == False, Group.is_special.is_(None)),  # noqa: E712
-    )
-
-
-def group_has_active_students_clause():
-    """At least one active student is still enrolled.
-
-    A register with nobody to call is not a task. This is the condition that produced the
-    reported symptom: the group had one membership row left, belonging to a deactivated
-    account, so it looked populated to a naive ``COUNT(*)`` over ``group_students``.
-    Membership alone is not enough — the *person* has to still be active.
-    """
-    from src.schemas.models import Group, GroupStudent, UserInDB
-
-    return exists().where(
-        and_(
-            GroupStudent.group_id == Group.id,
-            GroupStudent.student_id == UserInDB.id,
-            UserInDB.is_active == True,  # noqa: E712
-        )
-    )
+# The group predicate used to be defined here, because a warning was the first surface that
+# needed it. It is now shared with the calendars, which had each grown their own version —
+# see :mod:`src.services.operational_groups` for why group 79 appeared on three surfaces and
+# was filtered by two of them. Re-exported rather than moved so the existing callers and
+# tests that import it from this module keep working; there is still only one definition.
+from src.services.operational_groups import (  # noqa: F401  (re-export)
+    group_has_active_students_clause,
+    group_is_operational_clause,
+    operational_group_clause,
+)
 
 
 def attendance_missing_clause():
