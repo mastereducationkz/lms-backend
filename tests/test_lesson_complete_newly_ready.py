@@ -98,3 +98,23 @@ def test_completing_last_unit_reports_newly_ready(db):
     resp = mark_lesson_complete(l1.id, 0, student, db)
     ids = {x["id"] for x in resp["newly_ready_assignments"]}
     assert a.id in ids
+
+
+def test_other_group_assignment_linked_to_same_lesson_not_leaked(db):
+    """An assignment linked to the completed lesson but belonging to a group the
+    student is NOT in must not appear in newly_ready_assignments (cross-group leak)."""
+    student = _student(db)
+    group = _group_with_student(db, student)
+    other_group = Group(name="other-grp")
+    db.add(other_group); db.flush()
+
+    c1, l1 = _lesson(db, "Unit A")
+    _grant_course_access(db, group, c1, granted_by_user_id=student.id)
+
+    visible = _unit_assignment(db, group, linked_lessons=(l1,))
+    leaked = _unit_assignment(db, other_group, linked_lessons=(l1,))
+
+    resp = mark_lesson_complete(l1.id, 0, student, db)
+    ids = {x["id"] for x in resp["newly_ready_assignments"]}
+    assert visible.id in ids
+    assert leaked.id not in ids

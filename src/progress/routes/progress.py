@@ -500,14 +500,17 @@ def mark_lesson_complete(
     # Report assignments that just became ready-to-submit (all linked lessons now
     # completed) so the frontend can show a "you can submit this HW now" popup.
     from src.assignments.models import AssignmentLinkedLesson, AssignmentSubmission, Assignment
-    from src.assignments.routes.assignments import assignment_ready_for_student
+    from src.assignments.routes.assignments import assignment_ready_for_student, _student_assignments
 
     linked_assignment_ids = [
         row[0] for row in db.query(AssignmentLinkedLesson.assignment_id).filter(
             AssignmentLinkedLesson.lesson_id == lesson_id).all()
     ]
+    visible_ids = {a.id for a in _student_assignments(db, current_user.id)}
     newly_ready = []
     for aid in set(linked_assignment_ids):
+        if aid not in visible_ids:
+            continue
         assignment = db.query(Assignment).filter(Assignment.id == aid).first()
         if not assignment:
             continue
