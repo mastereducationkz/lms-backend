@@ -2552,7 +2552,18 @@ def get_assignment_status_for_student(
     # Add extension info if exists
     if extension:
         response_data["extended_deadline"] = extension.extended_deadline
-    
+
+    response_data["unit_gate"] = assignment_ready_for_student(current_user.id, assignment, db)
+    draft = db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id).first()
+    response_data["draft"] = None if not draft else {
+        "answers": json.loads(draft.answers) if draft.answers else None,
+        "file_url": draft.file_url,
+        "submitted_file_name": draft.submitted_file_name,
+        "updated_at": draft.updated_at,
+    }
+
     return response_data
 
 
