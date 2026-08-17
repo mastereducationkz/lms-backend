@@ -2578,6 +2578,11 @@ def get_draft(assignment_id: int,
               db: Session = Depends(get_db)):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students have drafts")
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
     draft = db.query(AssignmentDraft).filter(
         AssignmentDraft.assignment_id == assignment_id,
         AssignmentDraft.user_id == current_user.id).first()

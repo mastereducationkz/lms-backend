@@ -102,3 +102,24 @@ def test_draft_forbidden_without_active_access(db):
     with pytest.raises(HTTPException) as ei:
         save_draft(a.id, DraftUpsertSchema(answers={"tasks": {}}), outsider, db)
     assert ei.value.status_code == 403
+
+
+def test_get_draft_404_when_assignment_missing(db):
+    from fastapi import HTTPException
+    student = _student(db)
+    with pytest.raises(HTTPException) as ei:
+        get_draft(99999999, student, db)
+    assert ei.value.status_code == 404
+
+
+def test_get_draft_403_when_not_visible(db):
+    from fastapi import HTTPException
+    outsider = _student(db, email="outsider2@test.local")  # no group/enrollment access
+    course, lesson = _lesson(db)
+    a = Assignment(title="Lesson HW", assignment_type="multi_task",
+                    content=json.dumps({"tasks": []}), max_score=10,
+                    lesson_id=lesson.id, is_active=True, is_hidden=False)
+    db.add(a); db.flush()
+    with pytest.raises(HTTPException) as ei:
+        get_draft(a.id, outsider, db)
+    assert ei.value.status_code == 403
