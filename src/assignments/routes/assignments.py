@@ -141,6 +141,43 @@ def _build_student_assignment_status(submission: Optional[AssignmentSubmission],
     }
 
 
+def assignment_ready_for_student(user_id: int, assignment: Assignment, db: Session) -> Dict[str, Any]:
+    """Unit-based readiness: ready when ALL linked lessons are completed by the student.
+    Assignments with no linked lessons are always ready."""
+    from src.assignments.models import AssignmentLinkedLesson
+    from src.courses.models import Lesson
+    from src.progress.models import StudentProgress
+
+    links = db.query(AssignmentLinkedLesson).filter(
+        AssignmentLinkedLesson.assignment_id == assignment.id
+    ).all()
+    lesson_ids = [ln.lesson_id for ln in links]
+    if not lesson_ids:
+        return {"ready": True, "total": 0, "completed": 0, "missing": []}
+
+    completed_ids = {
+        row[0] for row in db.query(StudentProgress.lesson_id).filter(
+            StudentProgress.user_id == user_id,
+            StudentProgress.lesson_id.in_(lesson_ids),
+            StudentProgress.status == "completed",
+        ).all()
+    }
+    missing_ids = [lid for lid in lesson_ids if lid not in completed_ids]
+    titles = {}
+    if missing_ids:
+        for lid, title in db.query(Lesson.id, Lesson.title).filter(
+            Lesson.id.in_(missing_ids)
+        ).all():
+            titles[lid] = title
+    missing = [{"lesson_id": lid, "title": titles.get(lid, "")} for lid in missing_ids]
+    return {
+        "ready": len(missing) == 0,
+        "total": len(lesson_ids),
+        "completed": len(lesson_ids) - len(missing),
+        "missing": missing,
+    }
+
+
 def _to_enriched_schema(assignment: Assignment) -> AssignmentSchema:
     schema = AssignmentSchema.from_orm(assignment)
     if assignment.event:
