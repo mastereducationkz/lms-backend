@@ -1488,7 +1488,16 @@ def submit_assignment(
     
     if not has_access:
         raise HTTPException(status_code=403, detail="Access denied to this assignment")
-    
+
+    # Unit-based gate: block submission until all linked units are completed
+    readiness = assignment_ready_for_student(current_user.id, assignment, db)
+    if not readiness["ready"]:
+        missing = ", ".join(m["title"] for m in readiness["missing"])
+        raise HTTPException(
+            status_code=409,
+            detail=f"Complete linked units first: {missing}",
+        )
+
     # Check if assignment is overdue (with extension support)
     is_late = False
     if assignment.due_date:
@@ -1662,6 +1671,13 @@ def submit_assignment(
     db.add(submission)
     db.commit()
     db.refresh(submission)
+
+    # Drop the autosave draft now that the work is submitted
+    db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id,
+    ).delete()
+    db.commit()
 
     # Mirror any Bluebook task answers into the queryable projection that backs the
     # group grid. Non-blocking by design: the submission of record is already stored,
