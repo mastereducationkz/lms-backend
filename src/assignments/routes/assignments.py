@@ -20,7 +20,8 @@ from src.utils.permissions import require_teacher_or_admin, check_course_access
 from src.utils.assignment_checker import check_assignment_answers
 from src.services.email_service import send_homework_notification
 from src.schemas.models import GroupStudent
-from src.assignments.schemas import HomeworkUpdateSchema
+from src.assignments.schemas import HomeworkUpdateSchema, DraftUpsertSchema, DraftSchema
+from src.assignments.models import AssignmentDraft
 from src.parents.models import ParentStudent
 from src.services.event_service import EventService
 from src.routes.gamification import award_points
@@ -2537,6 +2538,55 @@ def get_assignment_status_for_student(
         response_data["extended_deadline"] = extension.extended_deadline
     
     return response_data
+
+
+@router.put("/{assignment_id}/draft", response_model=DraftSchema)
+def save_draft(assignment_id: int, payload: DraftUpsertSchema,
+               current_user: UserInDB = Depends(get_current_user_dependency),
+               db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can save drafts")
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+    if not _student_has_active_assignment_access(current_user, assignment, db):
+        raise HTTPException(status_code=403, detail="Assignment is read-only")
+
+    draft = db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id).first()
+    answers_str = json.dumps(payload.answers) if payload.answers is not None else None
+    if draft is None:
+        draft = AssignmentDraft(assignment_id=assignment_id, user_id=current_user.id)
+        db.add(draft)
+    draft.answers = answers_str
+    draft.file_url = payload.file_url
+    draft.submitted_file_name = payload.submitted_file_name
+    draft.updated_at = datetime.now(timezone.utc)
+    db.commit(); db.refresh(draft)
+    return DraftSchema(
+        answers=json.loads(draft.answers) if draft.answers else None,
+        file_url=draft.file_url, submitted_file_name=draft.submitted_file_name,
+        updated_at=draft.updated_at)
+
+
+@router.get("/{assignment_id}/draft", response_model=Optional[DraftSchema])
+def get_draft(assignment_id: int,
+              current_user: UserInDB = Depends(get_current_user_dependency),
+              db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students have drafts")
+    draft = db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id).first()
+    if not draft:
+        return None
+    return DraftSchema(
+        answers=json.loads(draft.answers) if draft.answers else None,
+        file_url=draft.file_url, submitted_file_name=draft.submitted_file_name,
+        updated_at=draft.updated_at)
 
 # =============================================================================
 # HELPER FUNCTIONS

@@ -402,6 +402,19 @@ class AssignmentZeroExamResultUpdateSchema(BaseModel):
     result_test_date: date
 
 
+class DraftUpsertSchema(BaseModel):
+    answers: Optional[dict] = None
+    file_url: Optional[str] = None
+    submitted_file_name: Optional[str] = None
+
+
+class DraftSchema(BaseModel):
+    answers: Optional[dict] = None
+    file_url: Optional[str] = None
+    submitted_file_name: Optional[str] = None
+    updated_at: Optional[datetime] = None
+
+
 class HomeworkUpdateSchema(BaseModel):
     """One item in the dashboard "homework updates" feed."""
     kind: str  # graded | assigned | due_soon
