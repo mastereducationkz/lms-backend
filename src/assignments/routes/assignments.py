@@ -1021,6 +1021,27 @@ def _naive(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+@router.get("/ready-to-submit", response_model=List[Dict[str, Any]])
+def get_ready_to_submit(current_user: UserInDB = Depends(get_current_user_dependency),
+                        db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students")
+    result = []
+    for assignment in _student_assignments(db, current_user.id):
+        has_sub = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id == assignment.id,
+            AssignmentSubmission.user_id == current_user.id,
+            AssignmentSubmission.is_hidden == False).first() is not None
+        if has_sub:
+            continue
+        if assignment_ready_for_student(current_user.id, assignment, db)["ready"]:
+            result.append({
+                "id": assignment.id, "title": assignment.title,
+                "group_id": assignment.group_id, "due_date": assignment.due_date,
+            })
+    return result
+
+
 @router.get("/updates", response_model=List[HomeworkUpdateSchema])
 def get_homework_updates(
     student_id: Optional[int] = None,
