@@ -491,10 +491,22 @@ def submit_assignment_zero(
     # Update user's assignment_zero_completed status
     current_user.assignment_zero_completed = True
     current_user.assignment_zero_completed_at = datetime.utcnow()
-    
+
+    # Keep the Bluebook grid's baseline column in sync: the grid reads
+    # bluebook_results (assignment_id IS NULL), not this questionnaire, and the
+    # 2026-08-08 one-off backfill left every later submission without a baseline.
+    from src.exams.baseline import record_assignment_zero_baseline
+
+    record_assignment_zero_baseline(
+        db,
+        current_user.id,
+        data.bluebook_practice_test_5_score,
+        screenshot_url=data.screenshot_url,
+    )
+
     db.commit()
     db.refresh(submission)
-    
+
     return AssignmentZeroSubmissionSchema.model_validate(submission)
 
 
