@@ -20,7 +20,8 @@ from src.utils.permissions import require_teacher_or_admin, check_course_access
 from src.utils.assignment_checker import check_assignment_answers
 from src.services.email_service import send_homework_notification
 from src.schemas.models import GroupStudent
-from src.assignments.schemas import HomeworkUpdateSchema
+from src.assignments.schemas import HomeworkUpdateSchema, DraftUpsertSchema, DraftSchema
+from src.assignments.models import AssignmentDraft
 from src.parents.models import ParentStudent
 from src.services.event_service import EventService
 from src.routes.gamification import award_points
@@ -138,6 +139,43 @@ def _build_student_assignment_status(submission: Optional[AssignmentSubmission],
         "submitted_at": submitted_at,
         "graded_at": graded_at,
         "has_file_submission": has_file_submission,
+    }
+
+
+def assignment_ready_for_student(user_id: int, assignment: Assignment, db: Session) -> Dict[str, Any]:
+    """Unit-based readiness: ready when ALL linked lessons are completed by the student.
+    Assignments with no linked lessons are always ready."""
+    from src.assignments.models import AssignmentLinkedLesson
+    from src.courses.models import Lesson
+    from src.progress.models import StudentProgress
+
+    links = db.query(AssignmentLinkedLesson).filter(
+        AssignmentLinkedLesson.assignment_id == assignment.id
+    ).all()
+    lesson_ids = [ln.lesson_id for ln in links]
+    if not lesson_ids:
+        return {"ready": True, "total": 0, "completed": 0, "missing": []}
+
+    completed_ids = {
+        row[0] for row in db.query(StudentProgress.lesson_id).filter(
+            StudentProgress.user_id == user_id,
+            StudentProgress.lesson_id.in_(lesson_ids),
+            StudentProgress.status == "completed",
+        ).all()
+    }
+    missing_ids = [lid for lid in lesson_ids if lid not in completed_ids]
+    titles = {}
+    if missing_ids:
+        for lid, title in db.query(Lesson.id, Lesson.title).filter(
+            Lesson.id.in_(missing_ids)
+        ).all():
+            titles[lid] = title
+    missing = [{"lesson_id": lid, "title": titles.get(lid, "")} for lid in missing_ids]
+    return {
+        "ready": len(missing) == 0,
+        "total": len(lesson_ids),
+        "completed": len(lesson_ids) - len(missing),
+        "missing": missing,
     }
 
 
@@ -983,6 +1021,27 @@ def _naive(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+@router.get("/ready-to-submit", response_model=List[Dict[str, Any]])
+def get_ready_to_submit(current_user: UserInDB = Depends(get_current_user_dependency),
+                        db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students")
+    result = []
+    for assignment in _student_assignments(db, current_user.id):
+        has_sub = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id == assignment.id,
+            AssignmentSubmission.user_id == current_user.id,
+            AssignmentSubmission.is_hidden == False).first() is not None
+        if has_sub:
+            continue
+        if assignment_ready_for_student(current_user.id, assignment, db)["ready"]:
+            result.append({
+                "id": assignment.id, "title": assignment.title,
+                "group_id": assignment.group_id, "due_date": assignment.due_date,
+            })
+    return result
+
+
 @router.get("/updates", response_model=List[HomeworkUpdateSchema])
 def get_homework_updates(
     student_id: Optional[int] = None,
@@ -1450,7 +1509,16 @@ def submit_assignment(
     
     if not has_access:
         raise HTTPException(status_code=403, detail="Access denied to this assignment")
-    
+
+    # Unit-based gate: block submission until all linked units are completed
+    readiness = assignment_ready_for_student(current_user.id, assignment, db)
+    if not readiness["ready"]:
+        missing = ", ".join(m["title"] for m in readiness["missing"])
+        raise HTTPException(
+            status_code=409,
+            detail=f"Complete linked units first: {missing}",
+        )
+
     # Check if assignment is overdue (with extension support)
     is_late = False
     if assignment.due_date:
@@ -1624,6 +1692,13 @@ def submit_assignment(
     db.add(submission)
     db.commit()
     db.refresh(submission)
+
+    # Drop the autosave draft now that the work is submitted
+    db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id,
+    ).delete()
+    db.commit()
 
     # Mirror any Bluebook task answers into the queryable projection that backs the
     # group grid. Non-blocking by design: the submission of record is already stored,
@@ -2498,8 +2573,73 @@ def get_assignment_status_for_student(
     # Add extension info if exists
     if extension:
         response_data["extended_deadline"] = extension.extended_deadline
-    
+
+    response_data["unit_gate"] = assignment_ready_for_student(current_user.id, assignment, db)
+    draft = db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id).first()
+    response_data["draft"] = None if not draft else {
+        "answers": json.loads(draft.answers) if draft.answers else None,
+        "file_url": draft.file_url,
+        "submitted_file_name": draft.submitted_file_name,
+        "updated_at": draft.updated_at,
+    }
+
     return response_data
+
+
+@router.put("/{assignment_id}/draft", response_model=DraftSchema)
+def save_draft(assignment_id: int, payload: DraftUpsertSchema,
+               current_user: UserInDB = Depends(get_current_user_dependency),
+               db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can save drafts")
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+    if not _student_has_active_assignment_access(current_user, assignment, db):
+        raise HTTPException(status_code=403, detail="Assignment is read-only")
+
+    draft = db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id).first()
+    answers_str = json.dumps(payload.answers) if payload.answers is not None else None
+    if draft is None:
+        draft = AssignmentDraft(assignment_id=assignment_id, user_id=current_user.id)
+        db.add(draft)
+    draft.answers = answers_str
+    draft.file_url = payload.file_url
+    draft.submitted_file_name = payload.submitted_file_name
+    draft.updated_at = datetime.now(timezone.utc)
+    db.commit(); db.refresh(draft)
+    return DraftSchema(
+        answers=json.loads(draft.answers) if draft.answers else None,
+        file_url=draft.file_url, submitted_file_name=draft.submitted_file_name,
+        updated_at=draft.updated_at)
+
+
+@router.get("/{assignment_id}/draft", response_model=Optional[DraftSchema])
+def get_draft(assignment_id: int,
+              current_user: UserInDB = Depends(get_current_user_dependency),
+              db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students have drafts")
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+    draft = db.query(AssignmentDraft).filter(
+        AssignmentDraft.assignment_id == assignment_id,
+        AssignmentDraft.user_id == current_user.id).first()
+    if not draft:
+        return None
+    return DraftSchema(
+        answers=json.loads(draft.answers) if draft.answers else None,
+        file_url=draft.file_url, submitted_file_name=draft.submitted_file_name,
+        updated_at=draft.updated_at)
 
 # =============================================================================
 # HELPER FUNCTIONS

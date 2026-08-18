@@ -65,6 +65,26 @@ class AssignmentSubmission(Base):
     )
 
 
+class AssignmentDraft(Base):
+    """Isolated server-side autosave of a student's in-progress answers.
+    Never counted as a submission; deleted on successful submit."""
+    __tablename__ = "assignment_drafts"
+    id = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    answers = Column(Text, nullable=True)
+    file_url = Column(String, nullable=True)
+    submitted_file_name = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint('assignment_id', 'user_id', name='uq_assignment_draft_user'),
+    )
+
+
 class AssignmentLinkedLesson(Base):
     """Denormalized table for fast lookup of lessons linked to assignments"""
     __tablename__ = "assignment_linked_lessons"

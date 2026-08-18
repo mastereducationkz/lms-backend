@@ -497,7 +497,37 @@ def mark_lesson_complete(
     # immediately instead of waiting out the 60s TTL.
     invalidate("courses:modules:*", "courses:module-lessons:*", "progress:*")
 
-    return {"detail": "Lesson marked as complete", "time_spent": time_spent}
+    # Report assignments that just became ready-to-submit (all linked lessons now
+    # completed) so the frontend can show a "you can submit this HW now" popup.
+    from src.assignments.models import AssignmentLinkedLesson, AssignmentSubmission, Assignment
+    from src.assignments.routes.assignments import assignment_ready_for_student, _student_assignments
+
+    linked_assignment_ids = [
+        row[0] for row in db.query(AssignmentLinkedLesson.assignment_id).filter(
+            AssignmentLinkedLesson.lesson_id == lesson_id).all()
+    ]
+    visible_ids = {a.id for a in _student_assignments(db, current_user.id)}
+    newly_ready = []
+    for aid in set(linked_assignment_ids):
+        if aid not in visible_ids:
+            continue
+        assignment = db.query(Assignment).filter(Assignment.id == aid).first()
+        if not assignment:
+            continue
+        has_sub = db.query(AssignmentSubmission).filter(
+            AssignmentSubmission.assignment_id == aid,
+            AssignmentSubmission.user_id == current_user.id,
+            AssignmentSubmission.is_hidden == False).first() is not None
+        if has_sub:
+            continue
+        if assignment_ready_for_student(current_user.id, assignment, db)["ready"]:
+            newly_ready.append({"id": assignment.id, "title": assignment.title})
+
+    return {
+        "detail": "Lesson marked as complete",
+        "time_spent": time_spent,
+        "newly_ready_assignments": newly_ready,
+    }
 
 @router.post("/lesson/{lesson_id}/start")
 def start_lesson(

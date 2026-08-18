@@ -19,6 +19,7 @@ from src.courses.models import (
 from src.assignments.models import (
     Assignment, AssignmentSubmission, AssignmentLinkedLesson,
     AssignmentExtension, GroupAssignment, AssignmentZeroSubmission,
+    AssignmentDraft,
 )
 from src.progress.models import (
     StudentProgress, StepProgress, ProgressSnapshot,
@@ -52,6 +53,7 @@ __all__ = [
     "LessonMaterial", "Enrollment", "ManualLessonUnlock",
     "Assignment", "AssignmentSubmission", "AssignmentLinkedLesson",
     "AssignmentExtension", "GroupAssignment", "AssignmentZeroSubmission",
+    "AssignmentDraft",
     "StudentProgress", "StepProgress", "ProgressSnapshot",
     "StudentCourseSummary", "CourseAnalyticsCache", "QuizAttempt",
     "Event", "EventGroup", "EventCourse", "EventParticipant",
