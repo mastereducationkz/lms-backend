@@ -104,3 +104,57 @@ def test_ready_when_all_units_completed(db):
     _complete_lesson(db, student, c1, l1); _complete_lesson(db, student, c2, l2)
     res = assignment_ready_for_student(student.id, a, db)
     assert res["ready"] is True and res["completed"] == 2 and res["missing"] == []
+
+
+# --- Regression: lesson completed via steps (no lesson-level StudentProgress row) ---
+from src.courses.models import Step
+from src.progress.models import StepProgress
+
+
+def _step(db, lesson, *, is_optional=False, order=0):
+    s = Step(lesson_id=lesson.id, title="S", content_type="text",
+             order_index=order, is_optional=is_optional)
+    db.add(s); db.flush()
+    return s
+
+
+def _complete_step(db, student, course, lesson, step):
+    db.add(StepProgress(user_id=student.id, course_id=course.id,
+                        lesson_id=lesson.id, step_id=step.id, status="completed"))
+    db.flush()
+
+
+def test_ready_when_all_steps_completed_without_lesson_progress(db):
+    """A student who finished every step of the linked lesson but has no lesson-level
+    StudentProgress row must still be considered ready (mirrors course is_completed)."""
+    student = _student(db); group = _group_with_student(db, student)
+    c1, l1 = _lesson(db, "Unit A")
+    s1 = _step(db, l1, order=0); s2 = _step(db, l1, order=1)
+    a = _unit_assignment(db, group, linked_lessons=(l1,))
+    _complete_step(db, student, c1, l1, s1)
+    _complete_step(db, student, c1, l1, s2)
+    # NO _complete_lesson() — deliberately no StudentProgress row
+    res = assignment_ready_for_student(student.id, a, db)
+    assert res["ready"] is True and res["completed"] == 1 and res["missing"] == []
+
+
+def test_not_ready_when_a_required_step_is_incomplete(db):
+    student = _student(db); group = _group_with_student(db, student)
+    c1, l1 = _lesson(db, "Unit A")
+    s1 = _step(db, l1, order=0); s2 = _step(db, l1, order=1)
+    a = _unit_assignment(db, group, linked_lessons=(l1,))
+    _complete_step(db, student, c1, l1, s1)  # only 1 of 2 steps done
+    res = assignment_ready_for_student(student.id, a, db)
+    assert res["ready"] is False
+    assert res["missing"] == [{"lesson_id": l1.id, "title": "Unit A"}]
+
+
+def test_optional_steps_do_not_block_readiness(db):
+    student = _student(db); group = _group_with_student(db, student)
+    c1, l1 = _lesson(db, "Unit A")
+    s_req = _step(db, l1, order=0, is_optional=False)
+    _step(db, l1, order=1, is_optional=True)  # optional, never completed
+    a = _unit_assignment(db, group, linked_lessons=(l1,))
+    _complete_step(db, student, c1, l1, s_req)  # only required step done
+    res = assignment_ready_for_student(student.id, a, db)
+    assert res["ready"] is True
