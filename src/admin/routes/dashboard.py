@@ -3212,6 +3212,14 @@ def get_teacher_salary_breakdown(
         "rate_source": "override" if lesson_rate is not None else ("crm" if stored else "default"),
         "level": (stored.level if stored else None),
         "group_band": (stored.group_band if stored else None),
+        # Flat published rates for work the LMS cannot yet attribute automatically
+        # (webinar events carry no teacher_id; trial lessons are not modelled).
+        # Shown to the teacher as a reference; the manager adds such lines by hand.
+        "reference_rates": {
+            "webinar_hourly": 4000,
+            "office_hours_hourly": 4000,
+            "trial_hourly": 3000,
+        },
         "groups": groups,
         "total_lessons": total_lessons,
         "total_amount_tenge": total_amount,
