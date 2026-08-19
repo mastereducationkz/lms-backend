@@ -120,6 +120,8 @@ def head_teacher_can_approve_group(db: Session, head_teacher_id: int, group_id: 
 def user_can_resolve_request(db: Session, user: UserInDB, group_id: int) -> bool:
     if user.role == "admin":
         return True
+    if user.role == "head_curator":
+        return True
     if user.role == "head_teacher":
         return head_teacher_can_approve_group(db, user.id, group_id)
     return False
