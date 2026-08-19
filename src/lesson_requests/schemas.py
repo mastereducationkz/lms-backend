@@ -79,3 +79,10 @@ class CreateLessonRequestSchema(BaseModel):
 
 class ResolveLessonRequestSchema(BaseModel):
     admin_comment: Optional[str] = None
+
+
+class TeacherRequestStatsSchema(BaseModel):
+    teacher_id: int
+    teacher_name: str
+    total: int
+    by_type: dict   # keys: substitution, reschedule, cancel
