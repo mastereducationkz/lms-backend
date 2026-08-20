@@ -113,12 +113,76 @@ def get_group_ids_in_head_teacher_scope(db: Session, head_teacher_id: int) -> li
     return sorted(group_ids)
 
 
+def get_teacher_request_stats(
+    db: Session,
+    year: int,
+    month: int,
+    min_count: int = 2,
+    scope_group_ids: Optional[list[int]] = None,
+) -> list[dict]:
+    """Per-teacher lesson-request counts for a month, keyed by requester.
+
+    Month bucket is by ``original_datetime`` (the lesson date). All statuses count.
+    ``scope_group_ids=None`` → no group filter (admin / head_curator). ``[]`` → empty.
+    Returns teachers with ``total >= min_count``, sorted by total desc then name asc.
+    """
+    if scope_group_ids is not None and len(scope_group_ids) == 0:
+        return []
+
+    month_start = datetime(year, month, 1)
+    if month == 12:
+        next_month = datetime(year + 1, 1, 1)
+    else:
+        next_month = datetime(year, month + 1, 1)
+
+    query = db.query(LessonRequest).filter(
+        LessonRequest.original_datetime >= month_start,
+        LessonRequest.original_datetime < next_month,
+    )
+    if scope_group_ids is not None:
+        query = query.filter(LessonRequest.group_id.in_(scope_group_ids))
+
+    rows = query.all()
+
+    # aggregate by requester
+    agg: dict[int, dict] = {}
+    for r in rows:
+        entry = agg.setdefault(
+            r.requester_id,
+            {"teacher_id": r.requester_id, "total": 0,
+             "by_type": {t: 0 for t in VALID_REQUEST_TYPES}},
+        )
+        entry["total"] += 1
+        if r.request_type in entry["by_type"]:
+            entry["by_type"][r.request_type] += 1
+
+    result = [e for e in agg.values() if e["total"] >= min_count]
+    if not result:
+        return []
+
+    # attach names
+    teacher_ids = [e["teacher_id"] for e in result]
+    names = {
+        uid: name
+        for uid, name in db.query(UserInDB.id, UserInDB.name).filter(
+            UserInDB.id.in_(teacher_ids)
+        ).all()
+    }
+    for e in result:
+        e["teacher_name"] = names.get(e["teacher_id"]) or f"#{e['teacher_id']}"
+
+    result.sort(key=lambda e: (-e["total"], e["teacher_name"]))
+    return result
+
+
 def head_teacher_can_approve_group(db: Session, head_teacher_id: int, group_id: int) -> bool:
     return group_id in get_group_ids_in_head_teacher_scope(db, head_teacher_id)
 
 
 def user_can_resolve_request(db: Session, user: UserInDB, group_id: int) -> bool:
     if user.role == "admin":
+        return True
+    if user.role == "head_curator":
         return True
     if user.role == "head_teacher":
         return head_teacher_can_approve_group(db, user.id, group_id)

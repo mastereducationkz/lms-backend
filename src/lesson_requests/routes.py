@@ -12,6 +12,7 @@ from src.config import get_db
 from src.schemas.models import (
     UserInDB, Group, LessonSchedule, Event,
     LessonRequest, LessonRequestSchema, CreateLessonRequestSchema, ResolveLessonRequestSchema,
+    TeacherRequestStatsSchema,
     Course, CourseGroupAccess,
 )
 from src.routes.auth import get_current_user_dependency
@@ -21,6 +22,7 @@ from src.lesson_requests.services import (
     get_group_ids_in_head_teacher_scope,
     user_can_resolve_request,
     requester_self_approves,
+    get_teacher_request_stats,
 )
 from src.lesson_requests.helpers import (
     enrich_request,
@@ -38,6 +40,14 @@ router = APIRouter()
 def _require_admin_or_head_teacher(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
     if current_user.role not in ("admin", "head_teacher"):
         raise HTTPException(status_code=403, detail="Admin or head teacher access required")
+    return current_user
+
+
+def _require_admin_head_teacher_or_head_curator(
+    current_user: UserInDB = Depends(get_current_user_dependency),
+) -> UserInDB:
+    if current_user.role not in ("admin", "head_teacher", "head_curator"):
+        raise HTTPException(status_code=403, detail="Admin, head teacher, or head curator access required")
     return current_user
 
 
@@ -217,7 +227,7 @@ async def decline_substitution_request(
 async def list_lesson_requests(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(_require_admin_or_head_teacher),
+    current_user: UserInDB = Depends(_require_admin_head_teacher_or_head_curator),
 ):
     """List lesson requests. Admin sees all; head teacher sees scoped groups."""
     query = db.query(LessonRequest)
@@ -240,7 +250,7 @@ async def list_lesson_requests(
 @router.get("/pending-approval", response_model=List[LessonRequestSchema])
 async def list_pending_approval(
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(_require_admin_or_head_teacher),
+    current_user: UserInDB = Depends(_require_admin_head_teacher_or_head_curator),
 ):
     """Pending requests awaiting head teacher or admin approval."""
     query = db.query(LessonRequest).filter(
@@ -255,6 +265,25 @@ async def list_pending_approval(
 
     requests = query.order_by(LessonRequest.created_at.desc()).all()
     return enrich_requests(requests, db)
+
+
+@router.get("/teacher-stats", response_model=List[TeacherRequestStatsSchema])
+async def teacher_request_stats(
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    min_count: int = Query(2, ge=1),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(_require_admin_head_teacher_or_head_curator),
+):
+    """Per-teacher lesson-request counts for a month (by lesson date).
+
+    Head teachers are limited to their course scope; admins and head curators see all.
+    Returns only teachers with total >= min_count (default 2).
+    """
+    scope_group_ids = None
+    if current_user.role == "head_teacher":
+        scope_group_ids = get_group_ids_in_head_teacher_scope(db, current_user.id)
+    return get_teacher_request_stats(db, year, month, min_count, scope_group_ids)
 
 
 @router.post("/{request_id}/approve", response_model=LessonRequestSchema)
