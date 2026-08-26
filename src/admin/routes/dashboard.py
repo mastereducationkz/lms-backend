@@ -2574,7 +2574,7 @@ def get_teacher_pending_submissions(
 # is completion-style and can be full-marked in bulk.
 # bluebook_task carries a self-reported score plus a screenshot that a human must
 # actually look at; bulk full-marking it would rubber-stamp unverified scores.
-_NEEDS_REVIEW_TASK_TYPES = {"audio", "audio_task", "file_task", "bluebook_task"}
+_NEEDS_REVIEW_TASK_TYPES = {"audio", "audio_task", "file_task", "bluebook_task", "text_task", "pdf_text_task"}
 
 
 def _is_auto_gradable_multitask(assignment) -> bool:
