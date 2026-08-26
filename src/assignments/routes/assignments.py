@@ -324,9 +324,21 @@ def get_assignments(
         group_ids_list = [g[0] for g in group_ids_query.all()]
         
         group_ids = group_ids_query.subquery()
-        
+
+        # Assignments the student has actually submitted to. Without this, a student
+        # who is moved out of the group where their (graded) homework lives loses all
+        # access to it — the list goes empty while the unseen-graded badge still counts
+        # those submissions. This mirrors assignment_visible_to_student(), which already
+        # whitelists submitted assignments in the post-query filter.
+        submitted_assignment_ids = db.query(AssignmentSubmission.assignment_id).filter(
+            AssignmentSubmission.user_id == current_user.id,
+            AssignmentSubmission.is_hidden == False,
+        ).subquery()
+
         query = query.filter(
-            (Assignment.lesson_id.in_(select(lesson_ids))) | (Assignment.group_id.in_(select(group_ids)))
+            (Assignment.lesson_id.in_(select(lesson_ids)))
+            | (Assignment.group_id.in_(select(group_ids)))
+            | (Assignment.id.in_(select(submitted_assignment_ids)))
         )
     elif current_user.role == "teacher":
         # Teachers see only assignments from their courses and groups
