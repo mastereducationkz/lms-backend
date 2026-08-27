@@ -110,6 +110,55 @@ def test_teacher_gets_weekly_lessons_with_activity_and_topic(db):
     assert lesson_entry["activity_score"] == 7.0
 
 
+def test_substitute_teacher_name_in_lesson_meta(db):
+    """A lesson whose Event.teacher_id differs from the group owner is flagged as
+    a substitution and carries the substitute's name in the column meta; a lesson
+    taught by the owner carries neither."""
+    owner = _make_teacher(db, "wl-sub-owner@test.local", "Owner Teacher")
+    substitute = _make_teacher(db, "wl-sub-cover@test.local", "Мухамедьярова Данира")
+
+    student = UserInDB(email="wl-sub-student@test.local", name="Sub Student",
+                       hashed_password="x", role="student", is_active=True)
+    db.add(student)
+    db.flush()
+
+    group = Group(name="Sub Group", program_type="general_english",
+                  is_special=False, is_active=True, teacher_id=owner.id)
+    db.add(group)
+    db.flush()
+    db.add(GroupStudent(group_id=group.id, student_id=student.id))
+
+    # Normal lesson taught by the owner.
+    e1 = Event(title="Lesson 1", event_type="class",
+               start_datetime=datetime(2026, 3, 2, 11, 0),
+               end_datetime=datetime(2026, 3, 2, 12, 0),
+               teacher_id=owner.id, created_by=owner.id,
+               is_active=True, is_recurring=False)
+    db.add(e1)
+    db.flush()
+    db.add(EventGroup(event_id=e1.id, group_id=group.id))
+
+    # Substituted lesson in the same week, taught by someone else.
+    e2 = Event(title="Lesson 2", event_type="class",
+               start_datetime=datetime(2026, 3, 4, 11, 0),
+               end_datetime=datetime(2026, 3, 4, 12, 0),
+               teacher_id=substitute.id, created_by=owner.id,
+               is_active=True, is_recurring=False)
+    db.add(e2)
+    db.flush()
+    db.add(EventGroup(event_id=e2.id, group_id=group.id))
+
+    result = asyncio.run(get_weekly_lessons_with_hw_status(
+        group.id, week_number=1, current_user=owner, db=db,
+    ))
+
+    by_title = {l["title"]: l for l in result["lessons"]}
+    assert by_title["Lesson 1"]["is_substitution"] is False
+    assert by_title["Lesson 1"]["substitute_teacher_name"] is None
+    assert by_title["Lesson 2"]["is_substitution"] is True
+    assert by_title["Lesson 2"]["substitute_teacher_name"] == "Мухамедьярова Данира"
+
+
 def test_foreign_teacher_gets_403(db):
     teacher = _make_teacher(db, "wl-owner@test.local", "WL Owner")
     teacher, group, student, event = _make_group_with_lesson(db, teacher)

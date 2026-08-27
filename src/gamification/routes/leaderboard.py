@@ -774,6 +774,27 @@ async def get_weekly_lessons_with_hw_status(
     for idx, e in enumerate(all_group_events):
         event_to_lesson_number[e.id] = idx + 1
     
+    # 4.6. Substitution: an event whose teacher differs from the group's regular
+    # teacher was covered by a substitute (on approval a concrete event is
+    # materialized with the substitute as teacher_id; the group keeps its owner).
+    # Resolve the substitutes' names in one query, keyed by teacher_id. We compare
+    # scalar teacher_ids directly rather than using Event.is_substitution, whose
+    # property walks event_groups[0].group and lazy-loads on recurring-expanded
+    # instances.
+    substitute_teacher_ids = {
+        getattr(event, "teacher_id", None)
+        for event in events
+        if group.teacher_id
+        and getattr(event, "teacher_id", None)
+        and getattr(event, "teacher_id", None) != group.teacher_id
+    }
+    substitute_name_by_id = {}
+    if substitute_teacher_ids:
+        for uid, uname in db.query(UserInDB.id, UserInDB.name).filter(
+            UserInDB.id.in_(substitute_teacher_ids)
+        ).all():
+            substitute_name_by_id[uid] = uname
+
     # 5. Build Lesson Columns metadata
     lessons_meta = []
     for idx, event in enumerate(events):
@@ -781,6 +802,10 @@ async def get_weekly_lessons_with_hw_status(
         lesson_num = event_to_lesson_number.get(event.id, idx + 1)
         hws = lesson_homework_map.get(lesson_num, [])
         hw_meta = [{"id": hw.id, "title": hw.title, "max_score": hw.max_score} for hw in hws]
+        event_teacher_id = getattr(event, "teacher_id", None)
+        is_substitution = bool(
+            group.teacher_id and event_teacher_id and event_teacher_id != group.teacher_id
+        )
         lessons_meta.append({
             "lesson_number": lesson_num,
             "event_id": event.id,
@@ -788,6 +813,8 @@ async def get_weekly_lessons_with_hw_status(
             "topic": getattr(event, "topic", None),
             # Stored naive-UTC; the "Z" tells browsers to convert to local tz
             "start_datetime": event.start_datetime.isoformat() + "Z",
+            "is_substitution": is_substitution,
+            "substitute_teacher_name": substitute_name_by_id.get(event_teacher_id) if is_substitution else None,
             "homeworks": hw_meta,
             # Legacy single-homework field for older cached clients
             "homework": hw_meta[0] if hw_meta else None
