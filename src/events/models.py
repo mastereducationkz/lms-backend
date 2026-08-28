@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint
+from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, func
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -27,8 +27,10 @@ class Event(Base):
     recurrence_end_date = Column(Date, nullable=True)
     max_participants = Column(Integer, nullable=True)
     teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    # server_default backstops direct (non-ORM) inserts — e.g. CRM writing this table
+    # directly — so timestamps are never left NULL and the calendar serializer can't 500.
+    created_at = Column(DateTime, server_default=func.now(), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, server_default=func.now(), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     creator = relationship("UserInDB", foreign_keys=[created_by])
     event_groups = relationship("EventGroup", back_populates="event", cascade="all, delete-orphan")
