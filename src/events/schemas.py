@@ -28,8 +28,10 @@ class EventSchema(BaseModel):
     courses: Optional[List[str]] = None
     group_ids: Optional[List[int]] = None
     course_ids: Optional[List[int]] = None
-    created_at: datetime
-    updated_at: datetime
+    # Tolerate NULL timestamps: events inserted directly by CRM historically
+    # lacked these, and a single bad row must never 500 the whole calendar month.
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     is_substitution: bool = False
 
     class Config:
