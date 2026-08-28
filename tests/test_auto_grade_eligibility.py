@@ -12,8 +12,13 @@ class _A:
 
 def test_completion_tasks_are_eligible():
     assert _is_auto_gradable_multitask(_A("multi_task", ["link_task", "course_unit"])) is True
-    assert _is_auto_gradable_multitask(_A("multi_task", ["text_task"])) is True
-    assert _is_auto_gradable_multitask(_A("multi_task", ["pdf_text_task", "link_task"])) is True
+
+
+def test_text_answer_tasks_need_review():
+    # c7545bf: a typed answer is a student artifact a teacher must read, so
+    # text_task / pdf_text_task block bulk full-marking just like audio and files.
+    assert _is_auto_gradable_multitask(_A("multi_task", ["text_task"])) is False
+    assert _is_auto_gradable_multitask(_A("multi_task", ["pdf_text_task", "link_task"])) is False
 
 
 def test_audio_or_file_task_blocks():

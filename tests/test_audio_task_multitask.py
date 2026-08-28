@@ -85,4 +85,6 @@ def test_audio_task_blocks_bulk_auto_grade():
 
 def test_siblings_without_audio_task_stay_auto_gradable():
     assert _is_auto_gradable_multitask(_A("multi_task", ["link_task", "course_unit"])) is True
-    assert _is_auto_gradable_multitask(_A("multi_task", ["text_task", "pdf_text_task"])) is True
+    # text_task/pdf_text_task moved to the needs-review set in c7545bf: a typed
+    # answer must be read by a human before it earns full marks.
+    assert _is_auto_gradable_multitask(_A("multi_task", ["text_task", "pdf_text_task"])) is False
