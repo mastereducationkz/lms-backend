@@ -1416,17 +1416,24 @@ async def get_all_students_analytics(
 
 @router.get("/groups")
 async def get_groups_analytics(
+    include_archived: bool = Query(False),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Получить аналитику по всем доступным группам"""
-    
+    """Получить аналитику по всем доступным группам.
+
+    include_archived=true также возвращает архивные (is_active=False) группы —
+    завершённые потоки не исчезают из аналитики, их скрывает только фильтр по
+    умолчанию."""
+
     # Проверка прав доступа
     if current_user.role not in ["teacher", "curator", "admin", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Базовый запрос групп
-    groups_query = db.query(Group).filter(Group.is_active == True)
+    groups_query = db.query(Group)
+    if not include_archived:
+        groups_query = groups_query.filter(Group.is_active == True)
     
     # Фильтрация по ролям
     if current_user.role == "teacher":
@@ -1538,6 +1545,7 @@ async def get_groups_analytics(
         groups_analytics.append({
             "group_id": group.id,
             "group_name": group.name,
+            "is_archived": not group.is_active,
             "description": group.description,
             "teacher_name": group.teacher.name if group.teacher else None,
             "curator_name": group.curator.name if group.curator else None,
@@ -1556,6 +1564,7 @@ async def get_groups_analytics(
 @router.get("/course/{course_id}/groups")
 async def get_course_groups_analytics(
     course_id: int,
+    include_archived: bool = Query(False),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
@@ -1574,10 +1583,13 @@ async def get_course_groups_analytics(
     base_query = db.query(Group).join(
         CourseGroupAccess, Group.id == CourseGroupAccess.group_id
     ).filter(
-        Group.is_active == True,
         CourseGroupAccess.course_id == course_id,
         CourseGroupAccess.is_active == True
     )
+    # Archived cohorts stay reachable: the active-only default declutters the
+    # list, include_archived=true brings finished groups back for analytics.
+    if not include_archived:
+        base_query = base_query.filter(Group.is_active == True)
     
     if current_user.role == "teacher":
         base_query = base_query.filter(Group.teacher_id == current_user.id)
@@ -1700,6 +1712,7 @@ async def get_course_groups_analytics(
             groups_analytics.append({
                 "group_id": group.id,
                 "group_name": group.name,
+                "is_archived": not group.is_active,
                 "description": group.description,
                 "teacher_name": group.teacher.name if group.teacher else None,
                 "curator_name": group.curator.name if group.curator else None,
@@ -1735,6 +1748,7 @@ async def get_course_groups_analytics(
         groups_analytics.append({
             "group_id": group.id,
             "group_name": group.name,
+            "is_archived": not group.is_active,
             "description": group.description,
             "teacher_name": group.teacher.name if group.teacher else None,
             "curator_name": group.curator.name if group.curator else None,
@@ -3403,6 +3417,7 @@ async def export_analytics_to_excel(
                     groups_data.append({
                         "group_id": group.id,
                         "group_name": group.name,
+                        "is_archived": not group.is_active,
                         "description": group.description,
                         "teacher_name": group.teacher.name if group.teacher else None,
                         "curator_name": group.curator.name if group.curator else None,

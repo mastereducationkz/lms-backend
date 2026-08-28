@@ -34,31 +34,45 @@ router = APIRouter()
 
 def _get_allowed_group_ids(current_user: UserInDB, db: Session) -> Optional[List[int]]:
     """Return group_ids the current user may see, or None meaning 'all'."""
-    if current_user.role in ("admin", "head_curator"):
+    # head_teacher sees every student, same as the student report access matrix.
+    if current_user.role in ("admin", "head_curator", "head_teacher"):
         return None  # unrestricted
     if current_user.role == "curator":
+        # Archived groups stay visible to their curator — a finished cohort's
+        # students and analytics must not vanish the day the group is archived.
         groups = db.query(Group.id).filter(
             Group.curator_id == current_user.id,
-            Group.is_active == True,
         ).all()
         return [g[0] for g in groups]
     return []
 
 
-def _build_student_query(db: Session, allowed_group_ids: Optional[List[int]], group_id: Optional[int], search: Optional[str]):
+def _build_student_query(db: Session, allowed_group_ids: Optional[List[int]], group_id: Optional[int],
+                         search: Optional[str], include_archived: bool = False):
     """Return a base query of (UserInDB, GroupStudent, Group) with access filters applied."""
     q = (
         db.query(UserInDB, GroupStudent, Group)
         .join(GroupStudent, GroupStudent.student_id == UserInDB.id)
         .join(Group, Group.id == GroupStudent.group_id)
-        .filter(UserInDB.role == "student", UserInDB.is_active == True, Group.is_active == True)
+        .filter(UserInDB.role == "student", UserInDB.is_active == True)
     )
+    # A search must find the student even if their group was archived; the
+    # active-only default exists to keep the browsing view uncluttered, not to
+    # hide people.
+    if not include_archived and not search:
+        q = q.filter(Group.is_active == True)
     if allowed_group_ids is not None:
         q = q.filter(GroupStudent.group_id.in_(allowed_group_ids))
     if group_id:
         q = q.filter(GroupStudent.group_id == group_id)
     if search:
-        q = q.filter(UserInDB.name.ilike(f"%{search}%"))
+        # Staff paste whatever identifier they have — a name, an email, a student id.
+        pattern = f"%{search.strip()}%"
+        q = q.filter(
+            (UserInDB.name.ilike(pattern))
+            | (UserInDB.email.ilike(pattern))
+            | (UserInDB.student_id.ilike(pattern))
+        )
     return q
 
 
@@ -70,13 +84,14 @@ def _build_student_query(db: Session, allowed_group_ids: Optional[List[int]], gr
 def list_students(
     group_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
+    include_archived: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
+    current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin", "head_teacher"])),
     db: Session = Depends(get_db),
 ):
     allowed_group_ids = _get_allowed_group_ids(current_user, db)
-    q = _build_student_query(db, allowed_group_ids, group_id, search)
+    q = _build_student_query(db, allowed_group_ids, group_id, search, include_archived)
 
     total = q.with_entities(func.count(UserInDB.id.distinct())).scalar()
     rows = q.distinct(UserInDB.id).order_by(UserInDB.id).offset(offset).limit(limit).all()
@@ -190,15 +205,18 @@ def list_students(
 
 @router.get("/groups", summary="List groups accessible to current user")
 def list_groups(
-    current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
+    include_archived: bool = Query(False),
+    current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin", "head_teacher"])),
     db: Session = Depends(get_db),
 ):
     allowed_group_ids = _get_allowed_group_ids(current_user, db)
-    q = db.query(Group).filter(Group.is_active == True)
+    q = db.query(Group)
+    if not include_archived:
+        q = q.filter(Group.is_active == True)
     if allowed_group_ids is not None:
         q = q.filter(Group.id.in_(allowed_group_ids))
     groups = q.order_by(Group.name).all()
-    return [{"id": g.id, "name": g.name} for g in groups]
+    return [{"id": g.id, "name": g.name, "is_archived": not g.is_active} for g in groups]
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +226,7 @@ def list_groups(
 @router.get("/{student_id}/profile", summary="Full profile for a student")
 def get_student_profile(
     student_id: int,
-    current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin"])),
+    current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin", "head_teacher"])),
     db: Session = Depends(get_db),
 ):
     student = db.query(UserInDB).filter(UserInDB.id == student_id, UserInDB.role == "student").first()
