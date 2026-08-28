@@ -27,6 +27,7 @@ def register_routes(app: FastAPI):
     from src.exams.routes import router as exams_router
     from src.trials.routes import trials_router
     from src.routes.support_api import router as support_api_router
+    from src.reports.routes import router as reports_router
 
     app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
     app.include_router(admin_router, prefix="/admin", tags=["Admin"])
@@ -66,3 +67,4 @@ def register_routes(app: FastAPI):
     app.include_router(exams_router, prefix="/exams", tags=["Exams"])
     app.include_router(trials_router, prefix="/trials", tags=["Trials"])
     app.include_router(support_api_router, prefix="/support-api", tags=["Support API"])
+    app.include_router(reports_router, prefix="/reports", tags=["Reports"])

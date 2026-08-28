@@ -88,3 +88,7 @@ yt-dlp>=2024.10.7
 # Deterministic parsing of College Board Bluebook practice score reports
 # (src/exams/bluebook_pdf.py). Text extraction only - no OCR, no AI.
 pypdf==6.15.0
+
+# PDF generation for the staff-facing student results report (src/reports/pdf.py).
+# Cyrillic glyphs come from fonts-dejavu-core installed in the Dockerfile.
+reportlab==4.2.5
