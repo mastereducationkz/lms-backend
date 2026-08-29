@@ -48,14 +48,19 @@ def _get_allowed_group_ids(current_user: UserInDB, db: Session) -> Optional[List
 
 
 def _build_student_query(db: Session, allowed_group_ids: Optional[List[int]], group_id: Optional[int],
-                         search: Optional[str], include_archived: bool = False):
+                         search: Optional[str], include_archived: bool = False,
+                         include_inactive: bool = False):
     """Return a base query of (UserInDB, GroupStudent, Group) with access filters applied."""
     q = (
         db.query(UserInDB, GroupStudent, Group)
         .join(GroupStudent, GroupStudent.student_id == UserInDB.id)
         .join(Group, Group.id == GroupStudent.group_id)
-        .filter(UserInDB.role == "student", UserInDB.is_active == True)
+        .filter(UserInDB.role == "student")
     )
+    # Deactivated students stay findable: search ignores the active-only default,
+    # the toggle brings them into browsing. Same principle as archived groups.
+    if not include_inactive and not search:
+        q = q.filter(UserInDB.is_active == True)
     # A search must find the student even if their group was archived; the
     # active-only default exists to keep the browsing view uncluttered, not to
     # hide people.
@@ -85,13 +90,14 @@ def list_students(
     group_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
     include_archived: bool = Query(False),
+    include_inactive: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     current_user: UserInDB = Depends(require_role(["curator", "head_curator", "admin", "head_teacher"])),
     db: Session = Depends(get_db),
 ):
     allowed_group_ids = _get_allowed_group_ids(current_user, db)
-    q = _build_student_query(db, allowed_group_ids, group_id, search, include_archived)
+    q = _build_student_query(db, allowed_group_ids, group_id, search, include_archived, include_inactive)
 
     total = q.with_entities(func.count(UserInDB.id.distinct())).scalar()
     rows = q.distinct(UserInDB.id).order_by(UserInDB.id).offset(offset).limit(limit).all()
@@ -183,6 +189,7 @@ def list_students(
             "id": user.id,
             "name": user.name,
             "email": user.email,
+            "is_inactive": not user.is_active,
             "avatar_url": user.avatar_url,
             "group_id": group.id,
             "group_name": group.name,

@@ -83,6 +83,22 @@ def test_default_view_hides_archived_but_search_finds_them(db, seeded):
     assert seeded["archived_student"].id in _ids(toggled)
 
 
+def test_search_finds_deactivated_students(db, seeded):
+    student = seeded["archived_student"]
+    student.is_active = False
+    db.flush()
+
+    # Hidden from default browsing even with archived groups shown...
+    browsing = _build_student_query(db, None, None, None, include_archived=True)
+    assert student.id not in _ids(browsing)
+    # ...but a search always finds them, and the explicit toggle shows them.
+    by_email = _build_student_query(db, None, None, "journal.archived@test")
+    assert student.id in _ids(by_email)
+    toggled = _build_student_query(db, None, None, None,
+                                   include_archived=True, include_inactive=True)
+    assert student.id in _ids(toggled)
+
+
 def test_curator_keeps_access_to_archived_groups(db, seeded):
     allowed = _get_allowed_group_ids(seeded["curator"], db)
     q = _build_student_query(db, allowed, None, None, include_archived=True)

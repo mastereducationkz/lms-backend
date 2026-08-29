@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, and_, or_
+from sqlalchemy import func, desc, and_, or_, case, true
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, date
 from io import BytesIO
@@ -169,12 +169,13 @@ def get_detailed_student_analytics(
 @cached(
     namespace="analytics:course-overview",
     ttl=90,
-    key_args=("course_id", "group_id", "page", "page_size", "sort", "dir", "search")
+    key_args=("course_id", "group_id", "page", "page_size", "sort", "dir", "search", "include_inactive")
 )
 async def get_course_analytics_overview(
     course_id: int,
     group_id: Optional[int] = None,
     search: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     sort: str = Query("progress", pattern="^(name|progress|activity)$"),
@@ -210,7 +211,7 @@ async def get_course_analytics_overview(
     ).filter(
         Module.course_id == course_id,
         UserInDB.role == "student",
-        UserInDB.is_active == True
+        (true() if include_inactive else (UserInDB.is_active == True))
     ).distinct()
     
     students_with_progress = students_query.all()
@@ -229,7 +230,7 @@ async def get_course_analytics_overview(
     enrolled_no_progress = db.query(UserInDB).filter(
         UserInDB.id.in_(enrolled_students_ids),
         UserInDB.role == "student",
-        UserInDB.is_active == True
+        (true() if include_inactive else (UserInDB.is_active == True))
     ).all()
 
     # also get students from GROUPS assigned to this course
@@ -246,7 +247,7 @@ async def get_course_analytics_overview(
     group_students_no_progress = db.query(UserInDB).filter(
         UserInDB.id.in_(group_students_ids),
         UserInDB.role == "student",
-        UserInDB.is_active == True
+        (true() if include_inactive else (UserInDB.is_active == True))
     ).all()
     
     # Combine all lists (students with progress + enrolled + group members)
@@ -308,17 +309,38 @@ async def get_course_analytics_overview(
     lesson_step_counts = {lesson_id: int(step_count) for lesson_id, step_count in lesson_step_rows}
     total_steps = sum(lesson_step_counts.values())
     
-    # Calculate engagement metrics
-    step_progress_records = db.query(StepProgress).filter(
-        StepProgress.course_id == course_id
-    ).all()
-    
-    total_time_spent = sum(sp.time_spent_minutes for sp in step_progress_records)
-    completed_steps = len([sp for sp in step_progress_records if sp.status == "completed"])
+    # Calculate engagement metrics.
+    # Aggregated in SQL: hydrating every StepProgress row of a large course
+    # (~700k ORM objects for the biggest one) took ~18s and was the page's
+    # timeout. Three grouped queries return the same numbers in milliseconds.
+    sp_stat_rows = db.query(
+        StepProgress.user_id,
+        func.count(case((StepProgress.status == "completed", 1))).label("done"),
+        func.coalesce(func.sum(StepProgress.time_spent_minutes), 0).label("time_min"),
+    ).filter(StepProgress.course_id == course_id).group_by(StepProgress.user_id).all()
+    sp_stats = {r.user_id: (int(r.done), int(r.time_min)) for r in sp_stat_rows}
+    total_time_spent = sum(t for _, t in sp_stats.values())
+    completed_steps = sum(c for c, _ in sp_stats.values())
 
-    step_progress_by_student = defaultdict(list)
-    for step_progress in step_progress_records:
-        step_progress_by_student[step_progress.user_id].append(step_progress)
+    # Latest visited step per student (Postgres DISTINCT ON).
+    latest_visited_rows = (
+        db.query(StepProgress.user_id, StepProgress.lesson_id, StepProgress.visited_at)
+        .filter(StepProgress.course_id == course_id, StepProgress.visited_at.isnot(None))
+        .distinct(StepProgress.user_id)
+        .order_by(StepProgress.user_id, StepProgress.visited_at.desc(), StepProgress.id.desc())
+        .all()
+    )
+    latest_visited_map = {r.user_id: (r.lesson_id, r.visited_at) for r in latest_visited_rows}
+
+    # Completed steps per (student, lesson) for the current-lesson progress column.
+    lesson_done_rows = (
+        db.query(StepProgress.user_id, StepProgress.lesson_id,
+                 func.count(StepProgress.id).label("done"))
+        .filter(StepProgress.course_id == course_id, StepProgress.status == "completed")
+        .group_by(StepProgress.user_id, StepProgress.lesson_id)
+        .all()
+    )
+    lesson_done_map = {(r.user_id, r.lesson_id): int(r.done) for r in lesson_done_rows}
     
     # Pre-fetch groups for students to avoid N+1
     student_ids = [s.id for s in enrolled_students]
@@ -337,11 +359,9 @@ async def get_course_analytics_overview(
                 student_groups_map[sid] = gname
 
     # Pre-fetch assignments
-    assignments = db.query(Assignment).join(Lesson).join(Module).filter(
+    total_assignments_count = db.query(func.count(Assignment.id)).join(Lesson).join(Module).filter(
         Module.course_id == course_id
-    ).all()
-    
-    total_assignments_count = len(assignments)
+    ).scalar() or 0
     logger.info(f"Course {course_id}: Found {total_assignments_count} assignments")
 
     # --- External SAT Data Fetching ---
@@ -524,17 +544,20 @@ async def get_course_analytics_overview(
         logger.warning("MASTEREDU_API_KEY is not configured. Skipping external SAT enrichment.")
     # Pre-fetch Quiz Attempts (Internal) as fallback (optional, or remove if strictly separated)
     # Keeping it compatible with previous logic but External overrides
-    quiz_attempts_query = db.query(QuizAttempt).filter(
-        QuizAttempt.course_id == course_id,
-        QuizAttempt.is_draft == False
-    ).all()
-    
-    # Map user_id -> list of attempts
-    student_quiz_attempts = {}
-    for attempt in quiz_attempts_query:
-        if attempt.user_id not in student_quiz_attempts:
-            student_quiz_attempts[attempt.user_id] = []
-        student_quiz_attempts[attempt.user_id].append(attempt)
+    # Only the LATEST attempt per student is ever displayed, so fetch exactly
+    # that (columns only — the answers blob made the previous full load huge).
+    _qa_done_at = func.coalesce(QuizAttempt.completed_at, QuizAttempt.created_at)
+    latest_quiz_rows = (
+        db.query(QuizAttempt.user_id, QuizAttempt.quiz_title, QuizAttempt.lesson_id,
+                 QuizAttempt.correct_answers, QuizAttempt.total_questions,
+                 QuizAttempt.score_percentage, QuizAttempt.completed_at,
+                 QuizAttempt.created_at)
+        .filter(QuizAttempt.course_id == course_id, QuizAttempt.is_draft == False)
+        .distinct(QuizAttempt.user_id)
+        .order_by(QuizAttempt.user_id, _qa_done_at.desc())
+        .all()
+    )
+    student_quiz_attempts = {r.user_id: [r] for r in latest_quiz_rows}
 
     # Student performance summary
     student_performance = []
@@ -556,7 +579,9 @@ async def get_course_analytics_overview(
             
     group_assignments_map = {} # group_id -> list of assignments
     if all_group_ids:
-        g_assignments = db.query(Assignment).filter(
+        g_assignments = db.query(
+            Assignment.id, Assignment.group_id, Assignment.title, Assignment.max_score
+        ).filter(
             Assignment.group_id.in_(list(all_group_ids)),
             Assignment.is_active == True
         ).all()
@@ -574,14 +599,18 @@ async def get_course_analytics_overview(
             for asm in assignments_list
         })
         if assignment_ids:
-            submissions = db.query(AssignmentSubmission).filter(
+            submissions = db.query(
+                AssignmentSubmission.user_id, AssignmentSubmission.assignment_id,
+                AssignmentSubmission.is_graded, AssignmentSubmission.score,
+                AssignmentSubmission.submitted_at
+            ).filter(
                 AssignmentSubmission.assignment_id.in_(assignment_ids),
                 AssignmentSubmission.user_id.in_(student_ids)
             ).all()
 
             for submission in submissions:
                 key = (submission.user_id, submission.assignment_id)
-                current_date = submission.submitted_at or submission.created_at
+                current_date = submission.submitted_at
                 existing_submission = latest_submission_map.get(key)
 
                 if not existing_submission:
@@ -593,42 +622,27 @@ async def get_course_analytics_overview(
                     latest_submission_map[key] = submission
 
     for student in enrolled_students:
-        student_steps = step_progress_by_student.get(student.id, [])
-        student_completed = len([sp for sp in student_steps if sp.status == "completed"])
-        student_time = sum(sp.time_spent_minutes for sp in student_steps)
-        
-        # Determine current lesson / last activity
+        student_completed, student_time = sp_stats.get(student.id, (0, 0))
+
+        # Current lesson / last activity from the latest visited step.
+        # (The old code also leaked `latest_step` across loop iterations,
+        # attributing a stale lesson to students with no activity.)
         last_activity = None
         current_lesson_title = "Not started"
-        
-        # Sort by last_accessed descending to find most detailed activity
-        if student_steps:
-             active_steps = [s for s in student_steps if s.visited_at]
-             if active_steps:
-                 latest_step = max(active_steps, key=lambda x: x.visited_at)
-                 last_activity = latest_step.visited_at
-                 
-                 # Resolve lesson title
-                 if latest_step.lesson_id in lesson_titles:
-                     current_lesson_title = lesson_titles[latest_step.lesson_id]
-        
-        # Calculate progress in current lesson
         current_lesson_progress = 0
-        if last_activity and latest_step:
-            c_lesson_id = latest_step.lesson_id
+        current_lesson_steps_completed = 0
+        current_lesson_steps_total = 0
+        lv = latest_visited_map.get(student.id)
+        if lv:
+            c_lesson_id, last_activity = lv
+            if c_lesson_id in lesson_titles:
+                current_lesson_title = lesson_titles[c_lesson_id]
             l_total_steps = lesson_step_counts.get(c_lesson_id, 0)
             if l_total_steps > 0:
-                l_completed = len([sp for sp in student_steps 
-                                 if sp.lesson_id == c_lesson_id and sp.status == "completed"])
+                l_completed = lesson_done_map.get((student.id, c_lesson_id), 0)
                 current_lesson_progress = (l_completed / l_total_steps) * 100
                 current_lesson_steps_completed = l_completed
                 current_lesson_steps_total = l_total_steps
-            else:
-                current_lesson_steps_completed = 0
-                current_lesson_steps_total = 0
-        else:
-            current_lesson_steps_completed = 0
-            current_lesson_steps_total = 0
         
         # Get assignment performance for THIS STUDENT
         # Use group-based assignments (teacher-assigned homework)
@@ -665,7 +679,7 @@ async def get_course_analytics_overview(
                 # Track last submission for "Last Test" column
                 # assuming submission.created_at is available or we use id if time missing, but created_at is better
                 # Check model: usually created_at or submitted_at
-                s_date = submission.submitted_at or submission.created_at
+                s_date = submission.submitted_at
                 if s_date:
                     if last_submission_date is None or s_date > last_submission_date:
                         last_submission_date = s_date
@@ -738,6 +752,7 @@ async def get_course_analytics_overview(
             "student_id": student.id,
             "student_name": student.name,
             "email": student.email,
+            "is_inactive": not student.is_active,
             "group_ids": current_s_group_ids,
             "group_name": student.group_name if hasattr(student, 'group_name') else student_groups_map.get(student.id, "No Group"),
             "completed_steps": student_completed,
