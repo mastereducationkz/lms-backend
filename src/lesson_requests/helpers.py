@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from src.schemas.models import (
@@ -33,6 +34,73 @@ _NOT_APPLIED_NOTE = (
     "Замена одобрена, но в расписании урок пока закреплён за другим педагогом. "
     "Администратор уведомлён."
 )
+
+def taught_marks_count(db: Session, event_id: Optional[int]) -> int:
+    """How many real attendance marks this lesson already carries.
+
+    Classified through :mod:`src.services.attendance_status`, which is the single source of
+    truth for what "marked" means and says in so many words not to re-inline its tuples. It
+    matters here beyond tidiness: the marked set includes legacy and imported spellings
+    (``missed``, ``presented``, ``1``/``0``) that a hand-written ``present/late/absent`` list
+    would miss, and a missed mark is a lesson this guard would wave through.
+    """
+    if not event_id:
+        return 0
+    from sqlalchemy import func
+
+    from src.schemas.models import Attendance
+    from src.services.attendance_status import marked_statuses_for_sql
+
+    return (
+        db.query(Attendance)
+        .filter(
+            Attendance.event_id == event_id,
+            func.lower(func.coalesce(Attendance.status, "")).in_(marked_statuses_for_sql()),
+        )
+        .count()
+    )
+
+
+def assert_reschedule_is_not_rewriting_history(
+    db: Session, event_id: Optional[int]
+) -> None:
+    """Refuse to move a lesson that has already been taught and marked.
+
+    A reschedule rewrites ``events.start_datetime`` in place, and attendance rows point at
+    the *event*, not at a date — which is deliberate, so that moving next Monday's lesson to
+    Friday keeps its history attached. Applied to a lesson that already happened, the same
+    mechanism carries a teacher's marks forward onto a date the class was never in the room.
+
+    Production did exactly this: two lessons of «June 9 SAT - Ayanat» taught and marked on 27
+    and 29 July were rescheduled on 22 August to 1 and 3 September, and twenty students'
+    marks moved with them. The cards then showed attendance filled in for lessons that had
+    not happened yet, which is unreadable as anything but a bug — and it was not a marking
+    bug at all. Five groups carried the same damage.
+
+    Past-but-unmarked lessons stay reschedulable on purpose: «мы не провели понедельник,
+    перенесём на пятницу» is a real and common request, and refusing it would break a
+    working flow to fix a different problem. The line is the mark, not the date.
+    """
+    marks = taught_marks_count(db, event_id)
+    if marks == 0:
+        return
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if event is None:
+        return
+    started = event.start_datetime
+    if started is not None and started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if started is None or started >= datetime.now(timezone.utc):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Урок от {_format_dt(event.start_datetime)} уже проведён: по нему выставлено "
+            f"отметок — {marks}. Перенос сдвинул бы эти отметки на новую дату, как будто "
+            "занятие прошло тогда. Если урок нужно провести ещё раз — добавьте новый урок; "
+            "если отметки поставлены по ошибке — сначала снимите их."
+        ),
+    )
 _NO_LESSON_NOTE = (
     "Заявка одобрена, но урок не найден в расписании. Обратитесь к администратору."
 )
@@ -271,6 +339,11 @@ def apply_reschedule(db: Session, lr: LessonRequest, resolver_id: int) -> None:
         event_id = EventService.materialize_lesson_schedule(db, lr.lesson_schedule_id, user_id=resolver_id)
         lr.event_id = event_id
         db.add(lr)
+
+    # Checked again here, not only when the request was filed: a request may sit pending for
+    # days, and the lesson it names can be taught and marked in the meantime. The approval is
+    # the moment the move actually happens, so it is the moment that has to be sure.
+    assert_reschedule_is_not_rewriting_history(db, event_id)
 
     if event_id and lr.new_datetime:
         event = db.query(Event).filter(Event.id == event_id).first()

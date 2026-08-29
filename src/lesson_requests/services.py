@@ -245,6 +245,15 @@ def create_lesson_request_record(
 
     # Past lessons are allowed: a student may reply late, so teachers can still
     # file reschedule/cancel/substitution requests against already-started lessons.
+    #
+    # With one exception, refused here so the teacher hears it while they still have the
+    # dialog open rather than after an approver has said yes: a *reschedule* of a lesson that
+    # has already been taught and marked would carry those marks to the new date. Imported
+    # locally because helpers imports this module.
+    if data.request_type == "reschedule" and data.event_id:
+        from src.lesson_requests.helpers import assert_reschedule_is_not_rewriting_history
+
+        assert_reschedule_is_not_rewriting_history(db, data.event_id)
 
     if not skip_limits:
         dup_query = db.query(LessonRequest).filter(
