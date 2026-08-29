@@ -26,8 +26,9 @@ from src.auth.user_schema import build_user_schema_response
 from src.auth.user_resolve import resolve_user_by_payload
 import logging
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -75,10 +76,12 @@ def login(user: UserLogin, response: Response, db: Session = Depends(get_db)):
             "user_id": db_user.id,
             "role": db_user.role
         })
-        refresh_token = create_refresh_token(data={"sub": db_user.email})
+        refresh_token = create_refresh_token(data={"sub": db_user.email, "jti": uuid.uuid4().hex})
         
-        # Store refresh token in database
+        # Open a per-device refresh chain. The legacy users.refresh_token column is
+        # still written so an emergency rollback to the previous release keeps working.
         db_user.refresh_token = refresh_token
+        _start_refresh_session(db, db_user, refresh_token)
         db.commit()
         
         # Determine if we're in production (HTTPS) or development (HTTP)
@@ -119,6 +122,40 @@ def login(user: UserLogin, response: Response, db: Session = Depends(get_db)):
         logger.error(f"Unexpected error in login: {str(e)}")
         raise HTTPException(status_code=500, detail="Login failed")
 
+
+# Rotation grace: a refresh using the chain's PREVIOUS token within this window is
+# treated as a raced duplicate (two tabs, a retry, a flaky network) and answered
+# with the chain's CURRENT token instead of a 401 that logs the device out.
+REFRESH_ROTATION_GRACE_SECONDS = 60
+REFRESH_SESSION_LIFETIME_DAYS = 30
+
+
+def _start_refresh_session(db, user, token: str) -> None:
+    """Open a new per-device refresh chain (called at login)."""
+    from src.auth.models import RefreshSession
+    now = datetime.utcnow()
+    db.add(RefreshSession(
+        user_id=user.id, token=token,
+        created_at=now, expires_at=now + timedelta(days=REFRESH_SESSION_LIFETIME_DAYS),
+    ))
+    # Opportunistic cleanup: this user's dead chains.
+    db.query(RefreshSession).filter(
+        RefreshSession.user_id == user.id,
+        (RefreshSession.expires_at < now) | (RefreshSession.revoked_at.isnot(None)),
+    ).delete(synchronize_session=False)
+
+
+def _revoke_refresh_sessions(db, user) -> None:
+    """Kill every refresh chain of a user (logout / password change)."""
+    from src.auth.models import RefreshSession
+    now = datetime.utcnow()
+    db.query(RefreshSession).filter(
+        RefreshSession.user_id == user.id,
+        RefreshSession.revoked_at.is_(None),
+    ).update({RefreshSession.revoked_at: now}, synchronize_session=False)
+    user.refresh_token = None
+
+
 @router.post("/refresh", response_model=Token)
 def refresh_token(request: RefreshTokenRequest, response: Response, db: Session = Depends(get_db)):
     """Refresh access token using refresh token"""
@@ -131,19 +168,54 @@ def refresh_token(request: RefreshTokenRequest, response: Response, db: Session 
         user_email = payload.get("sub")
         # Find user by email (case-insensitive)
         user = db.query(UserInDB).filter(func.lower(UserInDB.email) == user_email.lower()).first()
-
-        if not user or user.refresh_token != token or not user.is_active:
+        if not user or not user.is_active:
             raise HTTPException(status_code=401, detail="Invalid refresh token")
-        
-        # Generate new tokens
+
+        from src.auth.models import RefreshSession
+        now = datetime.utcnow()
+
+        session = db.query(RefreshSession).filter(
+            RefreshSession.token == token,
+            RefreshSession.user_id == user.id,
+        ).first()
+
         new_access_token = create_access_token(data={
-            "sub": user.email, 
+            "sub": user.email,
             "user_id": user.id,
             "role": user.role
         })
-        new_refresh_token = create_refresh_token(data={"sub": user.email})
-        
-        # Update user's refresh token
+
+        if session and session.revoked_at is None and session.expires_at > now:
+            # Normal path: rotate this chain in place.
+            new_refresh_token = create_refresh_token(data={"sub": user.email, "jti": uuid.uuid4().hex})
+            session.previous_token = token
+            session.token = new_refresh_token
+            session.rotated_at = now
+            session.expires_at = now + timedelta(days=REFRESH_SESSION_LIFETIME_DAYS)
+        else:
+            raced = db.query(RefreshSession).filter(
+                RefreshSession.previous_token == token,
+                RefreshSession.user_id == user.id,
+                RefreshSession.revoked_at.is_(None),
+            ).first()
+            if raced and raced.rotated_at and                     (now - raced.rotated_at).total_seconds() <= REFRESH_ROTATION_GRACE_SECONDS:
+                # A parallel refresh already rotated this chain moments ago (second
+                # tab, retried request). Hand back the chain's CURRENT token instead
+                # of logging the device out.
+                new_refresh_token = raced.token
+            elif user.refresh_token == token:
+                # Legacy token from before per-device sessions existed: migrate it
+                # into a chain of its own.
+                new_refresh_token = create_refresh_token(data={"sub": user.email, "jti": uuid.uuid4().hex})
+                db.add(RefreshSession(
+                    user_id=user.id, token=new_refresh_token, previous_token=token,
+                    rotated_at=now, created_at=now,
+                    expires_at=now + timedelta(days=REFRESH_SESSION_LIFETIME_DAYS),
+                ))
+            else:
+                raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        # Legacy column mirrors the latest rotation for rollback compatibility.
         user.refresh_token = new_refresh_token
         db.commit()
         
@@ -209,7 +281,7 @@ def logout(response: Response, token: str = Depends(oauth2_scheme), db: Session 
     user = resolve_user_by_payload(db, payload)
 
     if user:
-        user.refresh_token = None
+        _revoke_refresh_sessions(db, user)
         db.commit()
     
     # Clear cookies
@@ -327,7 +399,7 @@ def reset_password(
     if not user or not user.is_active or not password_stamp_matches(data.get("pv"), user.hashed_password):
         raise HTTPException(status_code=400, detail="Ссылка недействительна или уже использована")
     user.hashed_password = hash_password(payload.new_password)
-    user.refresh_token = None
+    _revoke_refresh_sessions(db, user)
     user.updated_at = datetime.utcnow()
     db.commit()
     background_tasks.add_task(send_password_changed_email, user.email, user.name or "", None, user.id)
@@ -354,7 +426,7 @@ def change_password(
     if _pw_err:
         raise HTTPException(status_code=400, detail=_pw_err)
     current_user.hashed_password = hash_password(payload.new_password)
-    current_user.refresh_token = None
+    _revoke_refresh_sessions(db, current_user)
     current_user.updated_at = datetime.utcnow()
     db.commit()
     background_tasks.add_task(

@@ -135,3 +135,29 @@ class UserPushToken(Base):
     __table_args__ = (
         UniqueConstraint("token", name="uq_user_push_tokens_token"),
     )
+
+
+class RefreshSession(Base):
+    """One refresh-token chain per device/browser session.
+
+    The old single ``users.refresh_token`` column meant ONE valid refresh token per
+    user TOTAL: every login or rotation on any device instantly killed every other
+    device's session — the "calendar is empty after refresh" reports were phones and
+    desktops logging each other out. Each row here is an independent chain; rotation
+    updates the row in place and keeps the previous token accepted for a short grace
+    window so parallel refreshes from the same device don't race each other out.
+    """
+    __tablename__ = "refresh_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String, nullable=False, unique=True, index=True)
+    # The token this chain rotated away from; accepted within the grace window so a
+    # raced caller still lands on the current chain instead of being logged out.
+    previous_token = Column(String, nullable=True, index=True)
+    rotated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+
+    user = relationship("UserInDB", foreign_keys=[user_id])
