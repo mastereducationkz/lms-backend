@@ -17,11 +17,20 @@ Status mapping (EventParticipant.registration_status → Attendance.status):
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from src.events.models import Attendance
+
+#: How far ahead a lesson may be and still be markable.
+#:
+#: Not zero. Event datetimes are stored naive while the school runs on Almaty time (UTC+5),
+#: so a strict comparison would refuse a teacher marking a class that has obviously already
+#: started for them. A day of slack absorbs every timezone question and still catches the
+#: failure this guards — lessons carrying marks weeks ahead of themselves.
+MARKABLE_GRACE_DAYS = 1
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +148,37 @@ class AttendanceService:
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def event_is_unmarkable_because_future(db: Session, event_id: int) -> Optional[str]:
+        """The lesson has not happened yet — reason string if so, ``None`` if it is markable.
+
+        You cannot take a register for a class that has not met. Production carried marks on
+        lessons dated weeks ahead, which read as a marking bug and was not one: the lessons
+        were taught in July and then *rescheduled* into September, carrying their attendance.
+        That hole is closed where it was opened (``lesson_requests``), and this is the second
+        lock — the state should not be reachable by writing, either.
+
+        The tolerance is deliberate and generous. Event datetimes are stored naive and the
+        school runs on Almaty time, so a strict ``start > utcnow`` would refuse a teacher
+        marking a lesson that has plainly started for them the moment any part of that
+        pipeline is off by hours. A whole day of slack cannot be hit by a timezone and cannot
+        hide the bug this exists to stop, which was measured in weeks.
+        """
+        from src.schemas.models import Event
+
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event is None or event.start_datetime is None:
+            return None
+        starts = event.start_datetime
+        if starts.tzinfo is not None:
+            starts = starts.astimezone(timezone.utc).replace(tzinfo=None)
+        if starts - datetime.utcnow() <= timedelta(days=MARKABLE_GRACE_DAYS):
+            return None
+        return (
+            f"Урок ещё не проведён — он назначен на "
+            f"{starts.strftime('%d.%m.%Y %H:%M')}. Отметить посещаемость можно после занятия."
+        )
 
     @staticmethod
     def upsert_for_event(

@@ -1608,6 +1608,13 @@ def update_event_attendance(
             detail="Посещаемость отмечает педагог, который проводит это занятие",
         )
 
+    # A register for a class that has not met yet is not a register. Checked here rather
+    # than inside the service so the caller gets one clear refusal instead of a partially
+    # written batch.
+    future_reason = AttendanceService.event_is_unmarkable_because_future(db, event_id)
+    if future_reason:
+        raise HTTPException(status_code=400, detail=future_reason)
+
     # 2. Bulk upsert via AttendanceService (single source of truth)
     updates = [
         {

@@ -1735,6 +1735,7 @@ def update_attendance_bulk(
     from src.services.event_service import EventService
 
     updated_count = 0
+    skipped_future: list[dict] = []
     cached_groups = {} # id -> group_obj
 
     for item in data.updates:
@@ -1756,11 +1757,26 @@ def update_attendance_bulk(
             if not real_event_id:
                 continue
             score = 1 if item.status in ("attended", "late") else 0
+            att_status = ep_status_to_attendance_status(item.status)
+            # Reported, never silently dropped: this loop already `continue`s past rows it
+            # cannot write, and a grid that says «сохранено» while quietly discarding half a
+            # column is how people stop trusting the screen. Cancelling stays allowed — you
+            # call a lesson off before it happens, not after.
+            if att_status != "cancelled":
+                future_reason = AttendanceService.event_is_unmarkable_because_future(
+                    db, real_event_id
+                )
+                if future_reason:
+                    skipped_future.append(
+                        {"event_id": real_event_id, "student_id": item.student_id,
+                         "reason": future_reason}
+                    )
+                    continue
             AttendanceService.upsert_for_event(
                 db=db,
                 event_id=real_event_id,
                 user_id=item.student_id,
-                status=ep_status_to_attendance_status(item.status),
+                status=att_status,
                 score=score,
                 activity_score=item.activity_score,
             )
@@ -1798,7 +1814,13 @@ def update_attendance_bulk(
             updated_count += 1
 
     db.commit()
-    return {"status": "success", "updated_count": updated_count}
+    return {
+        "status": "success",
+        "updated_count": updated_count,
+        # Empty on every ordinary save. Present so a caller can tell «сохранено» from
+        # «сохранено, кроме этих».
+        "skipped_future": skipped_future,
+    }
 
 
 class LessonTopicInputSchema(BaseModel):
@@ -1921,6 +1943,15 @@ def update_attendance(
         else:
             att_status = "present" if data.score > 0 else "absent"
             att_score = data.score
+        # A lesson that has not happened cannot have a register — see
+        # AttendanceService.event_is_unmarkable_because_future. Cancelling is exempt:
+        # calling off a future lesson is exactly what you do ahead of time.
+        if att_status != "cancelled":
+            future_reason = AttendanceService.event_is_unmarkable_because_future(
+                db, real_event_id
+            )
+            if future_reason:
+                raise HTTPException(status_code=400, detail=future_reason)
         AttendanceService.upsert_for_event(
             db=db,
             event_id=real_event_id,
