@@ -17,7 +17,7 @@ from src.config import get_db
 from src.routes.auth import get_current_user_dependency
 from src.schemas.models import UserInDB
 from src.utils.permissions import check_student_access
-from src.reports.services import build_student_report
+from src.reports.services import build_student_report, build_submission_detail
 from src.reports.external import fetch_weekly_tests
 from src.reports.pdf import render_student_report_pdf
 
@@ -72,3 +72,15 @@ async def student_report_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/students/{student_id}/submissions/{submission_id}")
+def student_submission_detail(
+    student_id: int,
+    submission_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """A homework submission's content, for the report page drill-down."""
+    _require_report_access(student_id, current_user, db)
+    return build_submission_detail(db, student_id, submission_id)

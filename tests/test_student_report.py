@@ -30,7 +30,7 @@ from src.gamification.models import DailyQuestionCompletion
 from src.progress.models import QuizAttempt
 from src.reports.pdf import render_student_report_pdf
 from src.reports.routes import _require_report_access
-from src.reports.services import build_student_report
+from src.reports.services import build_student_report, build_submission_detail
 
 
 @pytest.fixture
@@ -270,3 +270,41 @@ def test_group_program_bucketing(db, seeded):
     # "Report Test Group" matches no program; the IELTS group matches by name.
     assert [g.name for g in buckets["ielts"]] == ["IELTS August 2 2026 - Said"]
     assert buckets["nuet"] == []
+
+
+def test_submission_detail_pairs_tasks_with_answers(db, seeded):
+    import json
+    student = seeded["student"]
+    assignment = Assignment(
+        title="MT homework", description="", assignment_type="multi_task",
+        content=json.dumps({"tasks": [
+            {"id": "task_a", "task_type": "text_task", "title": "Essay", "points": 10,
+             "content": {"question": "Write about your day"}},
+            {"id": "task_b", "task_type": "course_unit", "title": "Unit", "points": 5, "content": {}},
+        ]}),
+        max_score=15, group_id=seeded["group"].id, is_active=True,
+        due_date=datetime(2026, 8, 20, 10, 0),
+    )
+    db.add(assignment)
+    db.flush()
+    submission = AssignmentSubmission(
+        assignment_id=assignment.id, user_id=student.id, max_score=15,
+        answers=json.dumps({"task_a": {"text_response": "My day was fine", "completed": True},
+                            "task_b": {"completed": True}}),
+        submitted_at=datetime(2026, 8, 19, 12, 0), is_graded=True, score=14,
+        feedback="Good work",
+    )
+    db.add(submission)
+    db.flush()
+
+    detail = build_submission_detail(db, student.id, submission.id)
+    assert detail["assignment"]["title"] == "MT homework"
+    assert [t["id"] for t in detail["assignment"]["tasks"]] == ["task_a", "task_b"]
+    assert detail["assignment"]["tasks"][0]["question"] == "Write about your day"
+    assert detail["submission"]["answers"]["task_a"]["text_response"] == "My day was fine"
+    assert detail["submission"]["feedback"] == "Good work"
+
+    # Another student's submission id must 404, not leak.
+    with pytest.raises(HTTPException) as exc:
+        build_submission_detail(db, seeded["other_student"].id, submission.id)
+    assert exc.value.status_code == 404

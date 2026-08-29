@@ -346,3 +346,81 @@ def build_student_report(db: Session, student_id: int) -> Dict[str, Any]:
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def build_submission_detail(db: Session, student_id: int, submission_id: int) -> Dict[str, Any]:
+    """One homework submission with its content, for the staff report drill-down.
+
+    Answers live as free-form JSON (`{task_<id>: {...}}` for multi-task, `{text: ...}`
+    for simple submissions). The assignment's task list is returned alongside so the
+    UI can pair every answer with the task's title and question.
+    """
+    import json
+
+    submission = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.id == submission_id,
+        AssignmentSubmission.user_id == student_id,
+    ).first()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    assignment = db.query(Assignment).filter(
+        Assignment.id == submission.assignment_id
+    ).first()
+
+    def _parse(raw):
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return {"text": raw}
+        return value if isinstance(value, (dict, list)) else {"text": str(value)}
+
+    answers = _parse(submission.answers)
+    # Some historical rows nest task answers under "tasks".
+    if isinstance(answers, dict) and isinstance(answers.get("tasks"), dict):
+        answers = {**answers["tasks"], **{k: v for k, v in answers.items() if k != "tasks"}}
+
+    tasks = []
+    content = _parse(assignment.content) if assignment else None
+    if isinstance(content, dict):
+        for task in content.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            task_content = task.get("content") if isinstance(task.get("content"), dict) else {}
+            question = next(
+                (task_content[key] for key in ("question", "text", "description", "prompt", "instructions")
+                 if isinstance(task_content.get(key), str) and task_content[key].strip()),
+                None,
+            )
+            tasks.append({
+                "id": task.get("id"),
+                "title": task.get("title"),
+                "task_type": task.get("task_type"),
+                "question": question,
+                "points": task.get("points"),
+            })
+
+    return {
+        "assignment": {
+            "id": assignment.id if assignment else submission.assignment_id,
+            "title": assignment.title if assignment else None,
+            "assignment_type": getattr(assignment, "assignment_type", None),
+            "max_score": getattr(assignment, "max_score", None),
+            "tasks": tasks,
+        },
+        "submission": {
+            "id": submission.id,
+            "score": submission.score,
+            "max_score": submission.max_score,
+            "is_graded": bool(submission.is_graded),
+            "is_late": bool(submission.is_late),
+            "feedback": submission.feedback,
+            "file_url": submission.file_url,
+            "file_name": submission.submitted_file_name,
+            "submitted_at": _iso(submission.submitted_at),
+            "graded_at": _iso(submission.graded_at),
+            "answers": answers,
+        },
+    }
