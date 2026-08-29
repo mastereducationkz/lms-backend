@@ -240,14 +240,15 @@ def get_student_profile(
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    # Access check: curator can only see their own students
-    if current_user.role == "curator":
-        curator_group_ids = [
-            g[0] for g in db.query(Group.id).filter(Group.curator_id == current_user.id, Group.is_active == True).all()
-        ]
+    # Access check: same rule as the list endpoint (_get_allowed_group_ids), so a
+    # student reachable from the journal is always openable. In particular a
+    # curator keeps access to students of their ARCHIVED groups — the old inline
+    # check filtered is_active and 403'd exactly the students the list now shows.
+    allowed_group_ids = _get_allowed_group_ids(current_user, db)
+    if allowed_group_ids is not None:
         in_group = db.query(GroupStudent).filter(
             GroupStudent.student_id == student_id,
-            GroupStudent.group_id.in_(curator_group_ids),
+            GroupStudent.group_id.in_(allowed_group_ids or [0]),
         ).first()
         if not in_group:
             raise HTTPException(status_code=403, detail="Access denied")

@@ -103,3 +103,26 @@ def test_curator_keeps_access_to_archived_groups(db, seeded):
     allowed = _get_allowed_group_ids(seeded["curator"], db)
     q = _build_student_query(db, allowed, None, None, include_archived=True)
     assert seeded["archived_student"].id in _ids(q)
+
+
+def test_curator_opens_profile_of_archived_group_student(db, seeded):
+    """The list shows archived-group students; the profile must open them too."""
+    from src.curator.routes.student_journal import get_student_profile
+
+    profile = get_student_profile(
+        seeded["archived_student"].id, current_user=seeded["curator"], db=db,
+    )
+    assert profile["student"]["id"] == seeded["archived_student"].id
+
+
+def test_foreign_curator_still_denied_profile(db, seeded):
+    from fastapi import HTTPException
+    from src.curator.routes.student_journal import get_student_profile
+
+    other = UserInDB(email="journal.other.curator@test.local", name="Other C",
+                     hashed_password="x", role="curator", is_active=True)
+    db.add(other)
+    db.flush()
+    with pytest.raises(HTTPException) as exc:
+        get_student_profile(seeded["archived_student"].id, current_user=other, db=db)
+    assert exc.value.status_code == 403
