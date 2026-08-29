@@ -9,7 +9,9 @@ Access matrix (a deliberate product decision, narrower than check_student_access
 Regular teachers are intentionally excluded — the report bundles cross-course data
 (attendance, activity, other courses' results) beyond a single teacher's scope.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -57,13 +59,24 @@ async def student_report(
 @router.get("/students/{student_id}/pdf")
 async def student_report_pdf(
     student_id: int,
+    sections: Optional[str] = Query(None, description="Comma-separated section keys; omit for all"),
+    include_feedback: bool = Query(True),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
-    """The same report rendered as a downloadable PDF."""
+    """The same report rendered as a downloadable PDF.
+
+    The export dialog in the UI passes ``sections`` (subset of
+    ``src.reports.pdf.SECTION_KEYS``) and ``include_feedback`` so staff choose
+    exactly what goes into the document.
+    """
     _require_report_access(student_id, current_user, db)
+    chosen = None
+    if sections:
+        chosen = {part.strip() for part in sections.split(",") if part.strip()}
     report = await _full_report(db, student_id)
-    buffer = render_student_report_pdf(report)
+    buffer = render_student_report_pdf(report, sections=chosen,
+                                       include_feedback=include_feedback)
     # ASCII-only filename: student names are Cyrillic and Content-Disposition
     # header values must stay latin-1 safe.
     filename = f"student_{student_id}_report.pdf"

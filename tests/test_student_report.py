@@ -256,6 +256,13 @@ def test_pdf_renders(db, seeded):
     assert data.startswith(b"%PDF")
     assert len(data) > 1000
 
+    # The export dialog can narrow the document to chosen sections; a
+    # homework-only render must be a valid, smaller PDF.
+    slim = render_student_report_pdf(report, sections={"homework"},
+                                     include_feedback=False).getvalue()
+    assert slim.startswith(b"%PDF")
+    assert len(slim) < len(data)
+
 
 def test_group_program_bucketing(db, seeded):
     from src.reports.external import _group_programs
