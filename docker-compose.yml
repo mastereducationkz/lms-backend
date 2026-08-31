@@ -2,6 +2,9 @@ services:
   postgres:
     image: postgres:15
     container_name: lms-postgres
+    # A disconnected/cancelled request must not retain a transaction forever. Without this
+    # guard, enough abandoned API requests can consume every Postgres connection.
+    command: ["postgres", "-c", "idle_in_transaction_session_timeout=60000"]
     environment:
       POSTGRES_DB: lms_db
       POSTGRES_USER: myuser
@@ -31,10 +34,17 @@ services:
       DB_NAME: lms_db
       POOL_MODE: transaction
       MAX_CLIENT_CONN: "1000"
-      DEFAULT_POOL_SIZE: "80"
+      # Postgres allows 100 total connections. Keep a firm 65-connection ceiling here so
+      # direct CRM/admin clients, maintenance, and Postgres's reserved slots retain headroom.
+      DEFAULT_POOL_SIZE: "60"
       MIN_POOL_SIZE: "10"
-      RESERVE_POOL_SIZE: "15"
+      RESERVE_POOL_SIZE: "5"
       RESERVE_POOL_TIMEOUT: "3"
+      MAX_DB_CONNECTIONS: "65"
+      # Fail fast instead of keeping HTTP requests and file descriptors open for two minutes.
+      QUERY_WAIT_TIMEOUT: "15"
+      SERVER_IDLE_TIMEOUT: "60"
+      IDLE_TRANSACTION_TIMEOUT: "60"
       AUTH_TYPE: scram-sha-256
       ADMIN_USERS: myuser
       STATS_USERS: myuser
@@ -63,6 +73,10 @@ services:
     build: .
     image: lms-backend:latest
     container_name: lms-backend
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     env_file:
       - .env
     environment:

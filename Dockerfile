@@ -64,7 +64,7 @@ echo "🔄 Running Alembic migrations..."\n\
 alembic upgrade head\n\
 echo "✅ Migrations completed"\n\
 echo "🚀 Starting FastAPI application with 4 workers..."\n\
-uvicorn src.app:socket_app --host 0.0.0.0 --port 8000 --workers 4\n\
+uvicorn src.app:socket_app --host 0.0.0.0 --port 8000 --workers 4 --limit-concurrency 200 --backlog 512\n\
 ' > /app/start.sh && chmod +x /app/start.sh
 
 # Открытие порта
