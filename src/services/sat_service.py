@@ -46,25 +46,64 @@ class SATService:
         response = await SATService._post("/students/latest-test-details", payload, timeout=15.0)
         return response if response else {"results": []}
 
+    # Cache the upstream SAT results so the leaderboard grid does not block on a
+    # remote HTTP round-trip to api.mastereducation.kz on every render. Keyed per
+    # email so the cache is reused across groups/weeks (mock scores change rarely).
+    _SAT_RESULTS_TTL = int(os.getenv("SAT_RESULTS_CACHE_TTL", "600"))  # 10 min
+    _SAT_RESULTS_MISS_TTL = int(os.getenv("SAT_RESULTS_MISS_CACHE_TTL", "300"))  # 5 min
+    _SAT_CACHE_NS = "sat:test-results"
+
     @staticmethod
     async def fetch_batch_test_results(emails: List[str]) -> Dict[str, Any]:
-        """Fetch all test results for a batch of student emails with chunking (max 50)"""
+        """Fetch all test results for a batch of student emails with chunking (max 50).
+
+        Results are cached per-email in Redis (graceful no-op if unavailable) so the
+        leaderboard does not make a blocking upstream call on every request. Emails the
+        upstream has no data for are cached as a short-lived negative sentinel to avoid
+        re-hammering the API for students who have never taken a test.
+        """
         if not emails:
             return {"results": []}
-            
-        all_results = []
-        # Chunk emails into 50 (based on documentation limit)
-        for i in range(0, len(emails), 50):
-            chunk = emails[i:i + 50]
-            payload = {
-                "emails": chunk,
-                "limit": 50
-            }
-            
-            data = await SATService._post("/students/test-results", payload, timeout=20.0)
-            all_results.extend(data.get("results", []))
-        
-        return {"results": all_results}
+
+        from src.services import cache_service
+
+        norm = [e.lower() for e in emails if e]
+        cached_results: List[Dict[str, Any]] = []
+        misses: List[str] = []
+        for email in norm:
+            hit = cache_service.get_json(f"{SATService._SAT_CACHE_NS}:{email}")
+            if hit is None:
+                misses.append(email)
+            elif hit:  # non-empty dict => a real cached result; {} is the negative sentinel
+                cached_results.append(hit)
+
+        if misses:
+            # Chunk misses into 50 (based on documentation limit)
+            for i in range(0, len(misses), 50):
+                chunk = misses[i:i + 50]
+                payload = {"emails": chunk, "limit": 50}
+                data = await SATService._post("/students/test-results", payload, timeout=20.0)
+                results = data.get("results", [])
+
+                seen = set()
+                for res in results:
+                    email = (res.get("email") or "").lower()
+                    if email:
+                        seen.add(email)
+                        cache_service.set_json(
+                            f"{SATService._SAT_CACHE_NS}:{email}", res,
+                            ttl_seconds=SATService._SAT_RESULTS_TTL,
+                        )
+                    cached_results.append(res)
+                # Cache negatives for emails the upstream returned nothing for.
+                for email in chunk:
+                    if email not in seen:
+                        cache_service.set_json(
+                            f"{SATService._SAT_CACHE_NS}:{email}", {},
+                            ttl_seconds=SATService._SAT_RESULTS_MISS_TTL,
+                        )
+
+        return {"results": cached_results}
 
     @staticmethod
     async def fetch_batch_scores_by_date(emails: List[str], date_str: str,

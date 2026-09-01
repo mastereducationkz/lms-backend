@@ -1055,7 +1055,6 @@ def get_all_groups(
     current_user: UserInDB = Depends(require_teacher_or_admin_for_groups())
 ):
     """Get all groups (teachers, head curators and admins)"""
-    sync_groups_over_status(db)
     query = db.query(Group)
     
     # Teachers: own groups. Head teachers: groups linked to courses they manage.
@@ -1078,53 +1077,94 @@ def get_all_groups(
         query = query.filter(Group.program_type == program_type)
 
     groups = query.offset(skip).limit(limit).all()
+    group_ids = [g.id for g in groups]
+
+    # Keep is_over fresh for the returned page ONLY — a bounded write instead of the
+    # previous all-groups scan+commit on every list request. Same session ⇒ the
+    # identity map updates these same Group instances in place.
+    if group_ids:
+        sync_groups_over_status(db, group_ids=group_ids)
+
+    # --- Batch-load everything the response needs (was a nested N+1 per group) ---
+    # Teachers + curators in a single query.
+    staff_ids = {g.teacher_id for g in groups if g.teacher_id} | {
+        g.curator_id for g in groups if g.curator_id
+    }
+    staff_map = {}
+    if staff_ids:
+        staff_map = {
+            u.id: u for u in db.query(UserInDB).filter(UserInDB.id.in_(staff_ids)).all()
+        }
+
+    # Active course-group links for every group in a single query.
+    cga_by_group: dict[int, list] = {}
+    if group_ids:
+        for cga in (
+            db.query(CourseGroupAccess)
+            .filter(
+                CourseGroupAccess.group_id.in_(group_ids),
+                CourseGroupAccess.is_active == True,
+            )
+            .order_by(CourseGroupAccess.id)
+            .all()
+        ):
+            cga_by_group.setdefault(cga.group_id, []).append(cga)
+
+    # Students (or just counts) for every group in a single pass.
+    students_by_group: dict[int, list] = {}
+    count_by_group: dict[int, int] = {}
+    if group_ids:
+        if include_students:
+            gs_rows = (
+                db.query(GroupStudent)
+                .filter(GroupStudent.group_id.in_(group_ids))
+                .all()
+            )
+            student_ids = {gs.student_id for gs in gs_rows}
+            student_map = {}
+            if student_ids:
+                student_map = {
+                    s.id: s
+                    for s in db.query(UserInDB)
+                    .filter(
+                        UserInDB.id.in_(student_ids),
+                        UserInDB.role == "student",
+                        UserInDB.is_active == True,
+                    )
+                    .all()
+                }
+            for gs in gs_rows:
+                # student_count counts every membership row (matches prior len());
+                # the students list only includes rows that resolve to an active user.
+                count_by_group[gs.group_id] = count_by_group.get(gs.group_id, 0) + 1
+                student = student_map.get(gs.student_id)
+                if student:
+                    students_by_group.setdefault(gs.group_id, []).append(student)
+        else:
+            for gid, cnt in (
+                db.query(GroupStudent.group_id, func.count(GroupStudent.id))
+                .filter(GroupStudent.group_id.in_(group_ids))
+                .group_by(GroupStudent.group_id)
+                .all()
+            ):
+                count_by_group[gid] = cnt or 0
+
     # Enrich with teacher names, curator names and student counts
     result = []
     for group in groups:
-        teacher = db.query(UserInDB).filter(UserInDB.id == group.teacher_id).first() if group.teacher_id else None
-        curator = db.query(UserInDB).filter(UserInDB.id == group.curator_id).first() if group.curator_id else None
-        cga = (
-            db.query(CourseGroupAccess)
-            .filter(
-                CourseGroupAccess.group_id == group.id,
-                CourseGroupAccess.is_active == True,
-            )
-            .first()
-        )
-        linked_course_ids = [
-            row[0]
-            for row in db.query(CourseGroupAccess.course_id).filter(
-                CourseGroupAccess.group_id == group.id,
-                CourseGroupAccess.is_active == True,
-            ).all()
-        ]
-        max_open_lessons = cga.max_open_lessons if cga else None
+        teacher = staff_map.get(group.teacher_id) if group.teacher_id else None
+        curator = staff_map.get(group.curator_id) if group.curator_id else None
+        cga_list = cga_by_group.get(group.id, [])
+        linked_course_ids = [c.course_id for c in cga_list]
+        max_open_lessons = cga_list[0].max_open_lessons if cga_list else None
         linked_course_id = linked_course_ids[0] if linked_course_ids else None
-        # Get students for this group. In lightweight mode, only the count is
-        # computed (avoids an N+1 per-student query when the caller needs metadata only).
-        if not include_students:
-            student_count = (
-                db.query(func.count(GroupStudent.id))
-                .filter(GroupStudent.group_id == group.id)
-                .scalar()
-                or 0
-            )
-            group_students = []
-        else:
-            group_students = db.query(GroupStudent).filter(GroupStudent.group_id == group.id).all()
-            student_count = len(group_students)
+        student_count = count_by_group.get(group.id, 0)
 
         # Get student details
         students = []
-        for group_student in group_students:
-            student = db.query(UserInDB).filter(
-                UserInDB.id == group_student.student_id,
-                UserInDB.role == "student",
-                UserInDB.is_active == True
-            ).first()
-            if student:
-                # Create UserSchema with group information
-                student_data = UserSchema(
+        for student in students_by_group.get(group.id, []):
+            students.append(
+                UserSchema(
                     id=student.id,
                     email=student.email,
                     name=student.name,
@@ -1135,10 +1175,10 @@ def get_all_groups(
                     teacher_name=teacher.name if teacher else None,
                     curator_name=curator.name if curator else None,
                     total_study_time_minutes=student.total_study_time_minutes,
-                    created_at=student.created_at
+                    created_at=student.created_at,
                 )
-                students.append(student_data)
-        
+            )
+
         group_data = GroupSchema(
             id=group.id,
             name=group.name,

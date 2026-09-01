@@ -34,6 +34,10 @@ from src.services.cache_service import cached
 from src.utils.duration_calculator import update_course_duration
 from src.trials.services import trial_lesson_access, get_active_trial as get_active_trial_grant
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -1238,7 +1242,7 @@ def check_lesson_access(
         ).first()
 
         if is_assigned:
-            print(f"DEBUG: Lesson {lesson_id} reached via active assignment")
+            logger.debug(f"DEBUG: Lesson {lesson_id} reached via active assignment")
             return {"accessible": True}
     
     # Check if manually unlocked by teacher/admin
@@ -1249,7 +1253,7 @@ def check_lesson_access(
     ).first()
 
     if is_manually_unlocked:
-        print(f"DEBUG: Lesson {lesson_id} reached via manual unlock")
+        logger.debug(f"DEBUG: Lesson {lesson_id} reached via manual unlock")
         return {"accessible": True}
 
     # Weekly release: if course uses weekly schedule and module is locked, deny access
@@ -1298,7 +1302,7 @@ def check_lesson_access(
             ).first()
             
             if sp:
-                print(f"DEBUG: Lesson {lesson_id} unlocked by redirect from completed lesson {source.id} ({source.title}) via StudentProgress")
+                logger.debug(f"DEBUG: Lesson {lesson_id} unlocked by redirect from completed lesson {source.id} ({source.title}) via StudentProgress")
                 return {"accessible": True}
                 
             # Check steps completion (optional steps excluded, matching the modules list)
@@ -1313,10 +1317,10 @@ def check_lesson_access(
             ).count()
 
             if required_source_steps and completed_steps_count == len(required_source_steps):
-                print(f"DEBUG: Lesson {lesson_id} unlocked by redirect from lesson {source.id} ({source.title}) - all steps completed")
+                logger.debug(f"DEBUG: Lesson {lesson_id} unlocked by redirect from lesson {source.id} ({source.title}) - all steps completed")
                 return {"accessible": True}
     else:
-        print(f"DEBUG: No lesson explicitly redirects to {lesson_id}")
+        logger.debug(f"DEBUG: No lesson explicitly redirects to {lesson_id}")
     
     # Get all completed steps for this student in this course
     completed_steps = db.query(StepProgress.step_id).filter(
@@ -1343,8 +1347,8 @@ def check_lesson_access(
     if required_target_steps and all(s.id in completed_step_ids for s in required_target_steps):
          return {"accessible": True}
 
-    print(f"DEBUG: Checking access for lesson {lesson_id} ({lesson.title})")
-    print(f"DEBUG: Module {module.id} ({module.title})")
+    logger.debug(f"DEBUG: Checking access for lesson {lesson_id} ({lesson.title})")
+    logger.debug(f"DEBUG: Module {module.id} ({module.title})")
     
     # Get all modules in this course
     all_modules = db.query(Module).filter(
@@ -1361,7 +1365,7 @@ def check_lesson_access(
             if les.id == lesson_id:
                 current_module_idx = mod_idx
                 current_lesson_idx = les_idx
-                print(f"DEBUG: Found target lesson at module idx {mod_idx}, lesson idx {les_idx}")
+                logger.debug(f"DEBUG: Found target lesson at module idx {mod_idx}, lesson idx {les_idx}")
                 break
         if current_module_idx is not None:
             break
@@ -1381,7 +1385,7 @@ def check_lesson_access(
             required_prev_steps = [s for s in prev_lesson_steps if not s.is_optional] or prev_lesson_steps
             all_prev_steps_completed = all(s.id in completed_step_ids for s in required_prev_steps)
             if not all_prev_steps_completed:
-                print(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} ({prev_lesson.title}) not completed")
+                logger.debug(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} ({prev_lesson.title}) not completed")
                 return {
                     "accessible": False,
                     "reason": f"Please complete the previous lesson: {prev_lesson.title} (Module {module.id}, Index {current_lesson_idx})"
@@ -1390,7 +1394,7 @@ def check_lesson_access(
         # CRITICAL FIX: If previous lesson has a next_lesson_id that points elsewhere,
         # DO NOT unlock this lesson linearly.
         if prev_lesson.next_lesson_id and prev_lesson.next_lesson_id != lesson_id:
-            print(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} redirects to {prev_lesson.next_lesson_id}, not {lesson_id}")
+            logger.debug(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} redirects to {prev_lesson.next_lesson_id}, not {lesson_id}")
             return {
                 "accessible": False,
                 "reason": "This lesson is not in the sequential path."
@@ -2531,7 +2535,7 @@ async def analyze_sat_image(
         return result
         
     except Exception as e:
-        print(f"Error analyzing file: {e}")
+        logger.error(f"Error analyzing file: {e}")
         raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
 
 @router.post("/analyze-nuet-image")
@@ -2597,7 +2601,7 @@ async def analyze_nuet_image(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error analyzing NUET file: {e}")
+        logger.error(f"Error analyzing NUET file: {e}")
         raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
 
 @router.post("/{course_id}/add-summary-steps")

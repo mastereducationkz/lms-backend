@@ -21,6 +21,10 @@ from src.services.attendance_service import (
 )
 from src.services.cache_service import cached
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 @router.get("/my", response_model=List[EventSchema])
@@ -66,7 +70,7 @@ def get_my_events(
             user_course_ids = list(set(user_course_ids))
         
     elif current_user.role in ["teacher", "curator"]:
-        print(f"DEBUG_EVENTS: Teacher/Curator view. user_id={current_user.id}")
+        logger.debug(f"DEBUG_EVENTS: Teacher/Curator view. user_id={current_user.id}")
         # Get groups where user is teacher or curator
         teacher_groups = db.query(Group).filter(Group.teacher_id == current_user.id).all()
         curator_groups = db.query(Group).filter(Group.curator_id == current_user.id).all()
@@ -80,12 +84,13 @@ def get_my_events(
         
     elif current_user.role == "admin":
         # Admins see all events
-        user_group_ids = [g.id for g in db.query(Group).all()]
-        user_course_ids = [c.id for c in db.query(Course).all()]
+        # id-only projection — avoids hydrating every Group/Course row into memory.
+        user_group_ids = [row[0] for row in db.query(Group.id).all()]
+        user_course_ids = [row[0] for row in db.query(Course.id).all()]
     
     if not user_group_ids and not user_course_ids:
         return []
-    print(f"DEBUG: user_group_ids={user_group_ids} user_course_ids={user_course_ids}")
+    logger.debug(f"DEBUG: user_group_ids={user_group_ids} user_course_ids={user_course_ids}")
     
     # Build query
     # Events that are in user's groups OR in user's courses
@@ -147,7 +152,7 @@ def get_my_events(
     )
     
     events = query.order_by(Event.start_datetime).offset(skip).limit(limit).all()
-    print(f"DEBUG_EVENTS: Found {len(events)} events for user={current_user.id}")
+    logger.debug(f"DEBUG_EVENTS: Found {len(events)} events for user={current_user.id}")
     
     # 2. Expand Recurring Events if needed
     # If specific date range or upcoming_only, we must expand
@@ -410,13 +415,18 @@ def get_calendar_events(
             user_course_ids = list(set(user_course_ids))
         
     elif current_user.role in ["teacher", "curator"]:
-        teacher_groups = db.query(Group).filter(Group.teacher_id == current_user.id).all()
-        curator_groups = db.query(Group).filter(Group.curator_id == current_user.id).all()
-        user_group_ids = list(set([g.id for g in teacher_groups + curator_groups]))
+        # Fetch only the id column — full Group objects were never used here.
+        user_group_ids = [
+            row[0]
+            for row in db.query(Group.id)
+            .filter(or_(Group.teacher_id == current_user.id, Group.curator_id == current_user.id))
+            .distinct()
+            .all()
+        ]
 
     elif current_user.role == "head_curator":
-        user_group_ids = [g.id for g in db.query(Group).filter(Group.is_active == True).all()]
-        user_course_ids = [c.id for c in db.query(Course).filter(Course.is_active == True).all()]
+        user_group_ids = [row[0] for row in db.query(Group.id).filter(Group.is_active == True).all()]
+        user_course_ids = [row[0] for row in db.query(Course.id).filter(Course.is_active == True).all()]
 
     elif current_user.role == "head_teacher":
         managed_rows = db.query(CourseHeadTeacher.course_id).filter(
@@ -434,20 +444,19 @@ def get_calendar_events(
             user_group_ids = []
         
     elif current_user.role == "admin":
-        user_group_ids = [g.id for g in db.query(Group).all()]
-        user_course_ids = [c.id for c in db.query(Course).all()]
+        # id-only projection — avoids hydrating every Group/Course row into memory.
+        user_group_ids = [row[0] for row in db.query(Group.id).all()]
+        user_course_ids = [row[0] for row in db.query(Course.id).all()]
     
     if not user_group_ids and not user_course_ids:
-        print(f"DEBUG: No groups or courses for user {current_user.id}")
+        logger.debug(f"DEBUG: No groups or courses for user {current_user.id}")
         return []
     
-    import sys
     
-    print(f"DEBUG: Calendar request - User: {current_user.id}, Role: {current_user.role}")
-    print(f"DEBUG: Groups: {user_group_ids}")
-    print(f"DEBUG: Courses: {user_course_ids}")
-    print(f"DEBUG: Date Range: {start_date} to {end_date}")
-    sys.stdout.flush()
+    logger.debug(f"DEBUG: Calendar request - User: {current_user.id}, Role: {current_user.role}")
+    logger.debug(f"DEBUG: Groups: {user_group_ids}")
+    logger.debug(f"DEBUG: Courses: {user_course_ids}")
+    logger.debug(f"DEBUG: Date Range: {start_date} to {end_date}")
 
     # Get events for the month with eager loading
     # 1. Get standard events in range
@@ -460,7 +469,7 @@ def get_calendar_events(
     
     final_filter = base_access
     if current_user.role in ["teacher", "curator", "head_teacher"]:
-        print(f"DEBUG: Including events where teacher_id={current_user.id}")
+        logger.debug(f"DEBUG: Including events where teacher_id={current_user.id}")
         final_filter = or_(base_access, Event.teacher_id == current_user.id)
 
     standard_events = db.query(Event).outerjoin(EventGroup).outerjoin(EventCourse).filter(
@@ -700,7 +709,6 @@ def get_calendar_events(
         # Extra debug: check raw count of assignments for this group globally
         raw_count = db.query(Assignment).filter(Assignment.group_id.in_(user_group_ids)).count()
         
-    sys.stdout.flush()
     
     # Convert assignments to Event schema
     for assignment in assignments:
@@ -787,8 +795,9 @@ def get_upcoming_events(
         user_group_ids = list(set([g.id for g in teacher_groups + curator_groups]))
         
     elif current_user.role == "admin":
-        user_group_ids = [g.id for g in db.query(Group).all()]
-        user_course_ids = [c.id for c in db.query(Course).all()]
+        # id-only projection — avoids hydrating every Group/Course row into memory.
+        user_group_ids = [row[0] for row in db.query(Group.id).all()]
+        user_course_ids = [row[0] for row in db.query(Course.id).all()]
     
     if not user_group_ids and not user_course_ids:
         return []
@@ -1353,8 +1362,8 @@ def register_for_event(
         curator_groups = db.query(Group).filter(Group.curator_id == current_user.id).all()
         user_group_ids = [g.id for g in teacher_groups + curator_groups]
     elif current_user.role == "admin":
-        user_group_ids = [g.id for g in db.query(Group).all()]
-    
+        user_group_ids = [row[0] for row in db.query(Group.id).all()]
+
     event_groups = db.query(EventGroup).filter(EventGroup.event_id == event_id).all()
     event_group_ids = [eg.group_id for eg in event_groups]
     

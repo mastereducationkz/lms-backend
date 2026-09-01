@@ -1486,6 +1486,73 @@ def update_leaderboard_entry(
     return entry
 
 
+class BulkLeaderboardEntryInputSchema(BaseModel):
+    entries: List[LeaderboardEntryCreateSchema]
+
+
+@router.post("/curator/leaderboard/bulk")
+def update_leaderboard_entries_bulk(
+    data: BulkLeaderboardEntryInputSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """
+    Upsert many manual leaderboard entries in a single transaction.
+
+    Replaces the per-student round-trip the leaderboard grid used to make on save
+    (one request per changed row). Group access is authorized once per group_id and
+    existing rows are batch-loaded, so a full week's save is 1 query burst + 1 commit.
+    """
+    if current_user.role not in ["curator", "admin", "head_curator", "head_teacher"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    updated_count = 0
+    group_ok: dict = {}  # group_id -> bool (access decision, cached)
+
+    # Batch-load existing entries for all (group, week, user) tuples touched.
+    touched = {(e.group_id, e.week_number) for e in data.entries}
+    existing: dict = {}
+    for gid, wk in touched:
+        user_ids = [e.user_id for e in data.entries if e.group_id == gid and e.week_number == wk]
+        if not user_ids:
+            continue
+        for row in db.query(LeaderboardEntry).filter(
+            LeaderboardEntry.group_id == gid,
+            LeaderboardEntry.week_number == wk,
+            LeaderboardEntry.user_id.in_(user_ids),
+        ).all():
+            existing[(row.group_id, row.week_number, row.user_id)] = row
+
+    for item in data.entries:
+        # Authorize the group once, then reuse the decision.
+        if item.group_id not in group_ok:
+            if current_user.role == "curator":
+                grp = db.query(Group).filter(
+                    Group.id == item.group_id, Group.curator_id == current_user.id
+                ).first()
+                group_ok[item.group_id] = grp is not None
+            elif current_user.role == "head_teacher":
+                group_ok[item.group_id] = head_teacher_can_access_group(db, current_user.id, item.group_id)
+            else:  # admin / head_curator
+                group_ok[item.group_id] = True
+        if not group_ok[item.group_id]:
+            continue
+
+        entry = existing.get((item.group_id, item.week_number, item.user_id))
+        if entry:
+            for field, value in item.dict(exclude_unset=True).items():
+                if field not in ("user_id", "group_id", "week_number"):
+                    setattr(entry, field, value)
+        else:
+            entry = LeaderboardEntry(**item.dict(exclude_unset=True))
+            db.add(entry)
+            existing[(item.group_id, item.week_number, item.user_id)] = entry
+        updated_count += 1
+
+    db.commit()
+    return {"status": "success", "updated_count": updated_count}
+
+
 @router.get("/curator/leaderboard-full/{group_id}")
 async def get_leaderboard_full(
     group_id: int,
@@ -1642,34 +1709,39 @@ async def get_leaderboard_full(
             "extra_points": row["extra_points"]
         })
 
-    # 4. Get/Create Config
+    # 4. Get Config (READ-ONLY — never create/commit on a GET request).
+    # A missing config falls back to the model's column defaults (all *_enabled=True);
+    # it is persisted lazily by the config POST endpoint, not this read path.
     config = db.query(LeaderboardConfig).filter(
         LeaderboardConfig.group_id == group_id,
         LeaderboardConfig.week_number == week_number
     ).first()
-    
-    if not config:
-        config = LeaderboardConfig(
-            group_id=group_id,
-            week_number=week_number
-        )
-        db.add(config)
-        db.commit()
-        db.refresh(config)
+
+    if config:
+        config_payload = {
+            "curator_hour_enabled": config.curator_hour_enabled,
+            "study_buddy_enabled": config.study_buddy_enabled,
+            "self_reflection_journal_enabled": config.self_reflection_journal_enabled,
+            "weekly_evaluation_enabled": config.weekly_evaluation_enabled,
+            "extra_points_enabled": config.extra_points_enabled,
+            "curator_hour_date": config.curator_hour_date,
+        }
+    else:
+        config_payload = {
+            "curator_hour_enabled": True,
+            "study_buddy_enabled": True,
+            "self_reflection_journal_enabled": True,
+            "weekly_evaluation_enabled": True,
+            "extra_points_enabled": True,
+            "curator_hour_date": None,
+        }
 
     return {
         "week_number": week_number,
         "week_start": week_start.isoformat(),
         "lessons": lessons_meta,
         "students": formatted_students,
-        "config": {
-            "curator_hour_enabled": config.curator_hour_enabled,
-            "study_buddy_enabled": config.study_buddy_enabled,
-            "self_reflection_journal_enabled": config.self_reflection_journal_enabled,
-            "weekly_evaluation_enabled": config.weekly_evaluation_enabled,
-            "extra_points_enabled": config.extra_points_enabled,
-            "curator_hour_date": config.curator_hour_date
-        }
+        "config": config_payload
     }
 
 

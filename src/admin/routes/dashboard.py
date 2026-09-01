@@ -320,44 +320,80 @@ def get_student_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
     # Calculate total study time (convert minutes to hours)
     total_study_time_hours = (user.total_study_time_minutes or 0) // 60
     
-    # Calculate average progress across all courses using StepProgress
+    # Calculate average progress across all courses using StepProgress.
+    # Everything below is batch-loaded across all courses in a handful of grouped
+    # queries instead of the previous 5-queries-per-course N+1 loop.
+    course_ids = [c.id for c in all_courses]
+
+    total_steps_by_course: dict = {}
+    completed_by_course: dict = {}
+    modules_by_course: dict = {}
+    last_accessed_by_course: dict = {}
+    teacher_map: dict = {}
+
+    if course_ids:
+        total_steps_by_course = {
+            cid: cnt
+            for cid, cnt in db.query(Module.course_id, func.count(Step.id))
+            .select_from(Step)
+            .join(Lesson, Step.lesson_id == Lesson.id)
+            .join(Module, Lesson.module_id == Module.id)
+            .filter(Module.course_id.in_(course_ids))
+            .group_by(Module.course_id)
+            .all()
+        }
+        completed_by_course = {
+            cid: cnt
+            for cid, cnt in db.query(StepProgress.course_id, func.count(StepProgress.id))
+            .filter(
+                StepProgress.user_id == user.id,
+                StepProgress.course_id.in_(course_ids),
+                StepProgress.status == "completed",
+            )
+            .group_by(StepProgress.course_id)
+            .all()
+        }
+        modules_by_course = {
+            cid: cnt
+            for cid, cnt in db.query(Module.course_id, func.count(Module.id))
+            .filter(Module.course_id.in_(course_ids))
+            .group_by(Module.course_id)
+            .all()
+        }
+        # Latest activity per course (MAX ignores NULL visited_at, which is the
+        # intended "last accessed" — cleaner than order-by-desc, which put NULLs
+        # first under Postgres and could mask a real timestamp).
+        last_accessed_by_course = {
+            cid: ts
+            for cid, ts in db.query(StepProgress.course_id, func.max(StepProgress.visited_at))
+            .filter(
+                StepProgress.user_id == user.id,
+                StepProgress.course_id.in_(course_ids),
+            )
+            .group_by(StepProgress.course_id)
+            .all()
+        }
+        teacher_ids = {c.teacher_id for c in all_courses if c.teacher_id}
+        if teacher_ids:
+            teacher_map = {
+                u.id: u.name
+                for u in db.query(UserInDB).filter(UserInDB.id.in_(teacher_ids)).all()
+            }
+
     total_progress = 0
     course_progresses = []
-    
+
     for course in all_courses:
-        # Get all steps in this course
-        total_steps = db.query(Step).join(Lesson).join(Module).filter(
-            Module.course_id == course.id
-        ).count()
-        
-        # Get completed steps for this user in this course
-        completed_steps = db.query(StepProgress).filter(
-            StepProgress.user_id == user.id,
-            StepProgress.course_id == course.id,
-            StepProgress.status == "completed"
-        ).count()
-        
-        # Calculate progress percentage
-        if total_steps > 0:
-            course_avg_progress = (completed_steps / total_steps) * 100
-        else:
-            course_avg_progress = 0
-        
+        total_steps = total_steps_by_course.get(course.id, 0)
+        completed_steps = completed_by_course.get(course.id, 0)
+
+        course_avg_progress = (completed_steps / total_steps) * 100 if total_steps > 0 else 0
         total_progress += course_avg_progress
-        
-        # Get teacher info
-        teacher = db.query(UserInDB).filter(UserInDB.id == course.teacher_id).first()
-        teacher_name = teacher.name if teacher else "Unknown Teacher"
-        
-        # Count total modules in course
-        total_modules = db.query(Module).filter(Module.course_id == course.id).count()
-        
-        # Get last accessed time from StepProgress
-        last_step_progress = db.query(StepProgress).filter(
-            StepProgress.user_id == user.id,
-            StepProgress.course_id == course.id
-        ).order_by(desc(StepProgress.visited_at)).first()
-        
+
+        teacher_name = teacher_map.get(course.teacher_id, "Unknown Teacher")
+        total_modules = modules_by_course.get(course.id, 0)
+        last_accessed = last_accessed_by_course.get(course.id)
+
         course_progresses.append({
             "id": course.id,
             "title": course.title,
@@ -366,7 +402,7 @@ def get_student_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
             "total_modules": total_modules,
             "progress": round(course_avg_progress),
             "status": "completed" if course_avg_progress >= 100 else "in_progress" if course_avg_progress > 0 else "not_started",
-            "last_accessed": last_step_progress.visited_at if (last_step_progress and last_step_progress.visited_at) else None
+            "last_accessed": last_accessed
         })
     
     # Calculate overall average progress
