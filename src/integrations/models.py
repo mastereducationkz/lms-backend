@@ -103,6 +103,29 @@ class PlatformWeeklySet(Base):
     )
 
 
+class StudentTarget(Base):
+    """A student's structured target for one exam track (Platform Integration Pack §6.4, E5):
+    ielts → bands in 0.5 steps (overall + optional modules), sat → {total, math, verbal},
+    nuet → {total}. ``note`` keeps legacy free text that did not parse; ``source``/``set_by``
+    make a staff override visible."""
+
+    __tablename__ = "student_targets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    track = Column(String(16), nullable=False)  # sat | ielts | nuet
+    targets = Column(_JSONB, nullable=False, default=dict)
+    note = Column(Text, nullable=True)
+    source = Column(String(16), nullable=False, default="student")  # assignment_zero | student | staff
+    set_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utcnow)
+    updated_at = Column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "track", name="uq_student_targets_user_track"),
+    )
+
+
 class PlatformTestAssignment(Base):
     """Links one auto-created ``platform_test`` Assignment to its weekly set and group
     (Platform Integration Pack §6.3, E1). The assignment itself is a normal ``assignments`` row."""
