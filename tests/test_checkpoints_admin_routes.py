@@ -64,6 +64,18 @@ def test_definitions_list_and_update(db):
     assert e.value.status_code == 400
 
 
+def test_update_required_units_partial_overlap(db):
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, _, _, _ = _world(db)          # d1 requires v[0], v[1], m[0]
+    upd = r.update_definition(d1.id, DefinitionUpdate(required_units=[
+        RequiredUnitInput(lesson_id=v[0].id, kind="verbal"),
+        RequiredUnitInput(lesson_id=v[2].id, kind="verbal"),
+        RequiredUnitInput(lesson_id=m[0].id, kind="math")]), current_user=admin, db=db)
+    assert [u["lesson_id"] for u in upd["required_units"]] == [v[0].id, v[2].id, m[0].id]
+    from src.checkpoints.models import CheckpointRequiredUnit
+    assert db.query(CheckpointRequiredUnit).filter_by(checkpoint_id=d1.id).count() == 3
+
+
 def test_quiz_check_reports_composition(db):
     from src.checkpoints.routes import checkpoints as r
     admin, _, _, _, _, d1, _, _, _ = _world(db)
@@ -108,6 +120,35 @@ def test_matrix_open_reopen_deadline_results(db):
 
     res = r.checkpoint_results(group.id, d1.id, current_user=admin, db=db)
     assert {x["name"] for x in res} == {"Alice", "Bob"}
+
+
+def test_matrix_two_students_two_definitions_batched(db):
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, group, s1, s2 = _world(db)          # d1 requires v[0], v[1], m[0]
+    d2 = make_definition(db, course, 2, v[2:4], m[1])                # d2 requires v[2], v[3], m[1]
+
+    complete_lesson_explicit(db, s1, course, v[0])
+    complete_lesson_explicit(db, s1, course, v[1])
+    complete_lesson_explicit(db, s1, course, m[0])
+    complete_lesson_explicit(db, s2, course, v[2])
+
+    mat = r.group_matrix(group.id, current_user=admin, db=db)
+    assert [d["number"] for d in mat["definitions"]] == [1, 2]
+
+    alice = next(s for s in mat["students"] if s["name"] == "Alice")
+    bob = next(s for s in mat["students"] if s["name"] == "Bob")
+
+    a_cell1, a_cell2 = alice["cells"]
+    assert [u["completed"] for u in a_cell1["units"]] == [True, True, True]
+    assert a_cell1["locked_reason"] is None
+    assert [u["completed"] for u in a_cell2["units"]] == [False, False, False]
+    assert a_cell2["locked_reason"].startswith("Locked — waiting for")
+
+    b_cell1, b_cell2 = bob["cells"]
+    assert [u["completed"] for u in b_cell1["units"]] == [False, False, False]
+    assert b_cell1["locked_reason"].startswith("Locked — waiting for")
+    assert [u["completed"] for u in b_cell2["units"]] == [True, False, False]
+    assert b_cell2["locked_reason"].startswith("Locked — waiting for")
 
 
 def test_non_admin_cannot_write_but_group_teacher_can_read(db):

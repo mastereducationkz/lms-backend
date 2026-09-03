@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from src.checkpoints import service
+from src.checkpoints.completion import completed_lesson_ids
 from src.checkpoints.models import CheckpointDefinition, CheckpointRequiredUnit, StudentCheckpoint
 from src.checkpoints.schemas import DeadlineUpdate, DefinitionUpdate, GroupSettingsUpdate, OpenRequest
 from src.config import get_db
@@ -87,7 +88,7 @@ def _quiz_questions(db: Session, definition: CheckpointDefinition) -> List[Dict[
     if step is None or not step.content_text:
         return []
     try:
-        return list(json.loads(step.content_text).get("questions") or [])
+        return [q for q in (json.loads(step.content_text).get("questions") or []) if isinstance(q, dict)]
     except (ValueError, AttributeError):
         return []
 
@@ -143,6 +144,9 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
         found = {r[0] for r in db.query(Lesson.id).filter(Lesson.id.in_(ids)).all()}
         if found != set(ids):
             raise HTTPException(status_code=404, detail=f"Unknown lesson ids: {sorted(set(ids) - found)}")
+        db.query(CheckpointRequiredUnit).filter(CheckpointRequiredUnit.checkpoint_id == d.id).delete(synchronize_session=False)
+        db.flush()
+        db.expire(d, ["required_units"])
         d.required_units = [CheckpointRequiredUnit(lesson_id=u.lesson_id, kind=u.kind, position=i)
                             for i, u in enumerate(body.required_units)]
     db.commit()
@@ -222,14 +226,25 @@ def group_matrix(group_id: int, current_user: UserInDB = Depends(get_current_use
                 .filter(GroupStudent.group_id == group.id).order_by(UserInDB.name).all())
     now = service.utcnow()
     dirty = False
+
+    rows_by_key = {}
+    if students and definitions:
+        rows = db.query(StudentCheckpoint).filter(StudentCheckpoint.group_id == group.id).all()
+        rows_by_key = {(r.student_id, r.checkpoint_id): r for r in rows}
+
+    all_required = list(dict.fromkeys(u.lesson_id for d in definitions for u in d.required_units))
+    titles = dict(db.query(Lesson.id, Lesson.title).filter(Lesson.id.in_(all_required or [0])).all())
+
     out_students = []
     for s in students:
+        done = completed_lesson_ids(db, s.id, all_required)
         cells = []
         for d in definitions:
-            row = service.get_row(db, s.id, group.id, d.id)
+            row = rows_by_key.get((s.id, d.id))
             if row is not None and service.refresh_overdue([row], now):
                 dirty = True
-            units = service.unit_progress(db, s.id, d)
+            units = [{"lesson_id": u.lesson_id, "title": titles.get(u.lesson_id, ""), "kind": u.kind,
+                     "completed": u.lesson_id in done} for u in d.required_units]
             cell = service.serialize_row(row)
             cell.update({"checkpoint_id": d.id, "number": d.number, "units": units,
                          "locked_reason": service.locked_reason(units) if cell["status"] == "locked" else None})
