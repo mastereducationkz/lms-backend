@@ -525,7 +525,12 @@ def mark_lesson_complete(
 
     # SAT Checkpoints: a completed unit may be the last required one of a block.
     from src.checkpoints import service as checkpoint_service
-    newly_opened = checkpoint_service.sync_student_checkpoints(db, current_user.id, commit=True)
+    try:
+        newly_opened = checkpoint_service.sync_student_checkpoints(db, current_user.id, commit=True)
+    except Exception:  # never fail an already-committed lesson completion because of checkpoint bookkeeping
+        _progress_log.exception("checkpoint sync failed for user %s after lesson %s", current_user.id, lesson_id)
+        db.rollback()
+        newly_opened = []
 
     return {
         "detail": "Lesson marked as complete",
@@ -1332,7 +1337,11 @@ def mark_step_visited(
 
     # SAT Checkpoints: lessons are normally finished step-by-step (no explicit lesson-complete call).
     from src.checkpoints import service as checkpoint_service
-    checkpoint_service.sync_student_checkpoints(db, current_user.id, commit=True)
+    try:
+        checkpoint_service.sync_student_checkpoints(db, current_user.id, commit=True)
+    except Exception:  # never fail an already-committed step visit because of checkpoint bookkeeping
+        _progress_log.exception("checkpoint sync failed for user %s after step %s", current_user.id, step_id)
+        db.rollback()
 
     return StepProgressSchema.from_orm(step_progress)
 
@@ -1803,7 +1812,8 @@ def create_quiz_attempt(
     if checkpoint_definition is not None:
         if current_user.role != "student":
             raise HTTPException(status_code=403, detail="Only students take checkpoints")
-        checkpoint_service.assert_can_submit(db, current_user.id, checkpoint_definition)
+        if not attempt_data.is_draft:
+            checkpoint_service.assert_can_submit(db, current_user.id, checkpoint_definition)
 
     try:
         _forbid_special_group_manual_quiz(attempt_data.step_id, attempt_data.answers, current_user, db)
@@ -1855,7 +1865,11 @@ def create_quiz_attempt(
             db.refresh(existing_draft)
             if not attempt_data.is_draft:
                 if checkpoint_definition is not None:
-                    checkpoint_service.record_submission(db, current_user.id, existing_draft)
+                    try:
+                        checkpoint_service.record_submission(db, current_user.id, existing_draft)
+                    except Exception:
+                        _progress_log.exception("checkpoint record_submission failed for attempt %s", existing_draft.id)
+                        db.rollback()
                 _maybe_award_course_quiz_points(
                     db,
                     user_id=existing_draft.user_id,
@@ -1893,7 +1907,11 @@ def create_quiz_attempt(
 
         if not attempt_data.is_draft:
             if checkpoint_definition is not None:
-                checkpoint_service.record_submission(db, current_user.id, quiz_attempt)
+                try:
+                    checkpoint_service.record_submission(db, current_user.id, quiz_attempt)
+                except Exception:
+                    _progress_log.exception("checkpoint record_submission failed for attempt %s", quiz_attempt.id)
+                    db.rollback()
             _maybe_award_course_quiz_points(
                 db,
                 user_id=quiz_attempt.user_id,

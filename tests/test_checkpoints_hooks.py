@@ -95,3 +95,37 @@ def test_check_course_access_via_checkpoint(db):
     assert check_course_access(quiz_course.id, s, db) is False
     service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id)
     assert check_course_access(quiz_course.id, s, db) is True
+
+
+def test_non_student_cannot_submit_checkpoint(db):
+    from src.progress.routes.progress import create_quiz_attempt
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    with pytest.raises(HTTPException) as e:
+        create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step), current_user=admin, db=db)
+    assert e.value.status_code == 403
+
+
+def test_draft_autosave_not_blocked_by_deadline(db):
+    from datetime import timedelta
+    from src.progress.routes.progress import create_quiz_attempt
+    from src.checkpoints import service
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    row = service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
+                                    now=service.utcnow() - timedelta(days=2))[0]   # deadline already passed
+    draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True), current_user=s, db=db)
+    assert draft.is_draft is True
+    with pytest.raises(HTTPException) as e:   # final submit is still gated
+        create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step), current_user=s, db=db)
+    assert e.value.status_code == 409
+
+
+def test_sync_failure_does_not_break_lesson_complete(db, monkeypatch):
+    from src.progress.routes import progress as progress_routes
+    from src.checkpoints import service
+    _, course, v, m, _, _, _, d1, group, s = _world(db)
+    complete_lesson_explicit(db, s, course, v[0]); complete_lesson_explicit(db, s, course, v[1])
+    def boom(*a, **k):
+        raise RuntimeError("simulated checkpoint failure")
+    monkeypatch.setattr(service, "sync_student_checkpoints", boom)
+    out = progress_routes.mark_lesson_complete(m[0].id, time_spent=0, current_user=s, db=db)
+    assert out["detail"] == "Lesson marked as complete" and out["newly_opened_checkpoints"] == []
