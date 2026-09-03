@@ -1,5 +1,7 @@
 """Factories shared by the checkpoint test files (house style: each test file keeps its own `db` fixture)."""
+import itertools
 import json
+import uuid
 from datetime import datetime, timezone
 
 from src.schemas.models import (
@@ -9,8 +11,11 @@ from src.schemas.models import (
 from src.utils.auth_utils import hash_password
 
 
+_seq = itertools.count(1)
+
+
 def make_user(db, role="student", email=None, name=None):
-    email = email or f"{role}-{id(object())}@cp.test"
+    email = email or f"{role}-{next(_seq)}-{uuid.uuid4().hex[:8]}@cp.test"
     u = UserInDB(email=email, name=name or email.split("@")[0], role=role,
                  hashed_password=hash_password("x"))
     db.add(u); db.flush()
