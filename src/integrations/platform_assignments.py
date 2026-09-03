@@ -144,6 +144,13 @@ def is_past(ws: PlatformWeeklySet, now: Optional[datetime] = None) -> bool:
     return ws.date_to is not None and ws.date_to < now
 
 
+def has_window(ws: PlatformWeeklySet) -> bool:
+    """A set with no closing time can never be "this week's" set: NUET sets are curriculum weeks
+    that the platform opens per group, so the LMS cannot tell which one is current — such sets
+    never carry an assignment (existing ones are deactivated, never deleted)."""
+    return ws.date_to is not None
+
+
 def sync_weekly_set(db: Session, ws: PlatformWeeklySet, *, now: Optional[datetime] = None,
                     include_past: bool = False) -> dict:
     """Create/update the assignment of every target group; deactivate the rest. Idempotent."""
@@ -153,8 +160,9 @@ def sync_weekly_set(db: Session, ws: PlatformWeeklySet, *, now: Optional[datetim
     if not enabled():
         return out
     now = now or _utcnow()
-    targets = {g.id: g for g in target_groups(db, track_of(ws))} if ws.is_active else {}
-    may_create = bool(ws.is_active) and (include_past or not is_past(ws, now))
+    assignable = bool(ws.is_active) and has_window(ws)
+    targets = {g.id: g for g in target_groups(db, track_of(ws))} if assignable else {}
+    may_create = assignable and (include_past or not is_past(ws, now))
     links = _links_for_set(db, ws)
 
     for group_id, link in links.items():
@@ -165,7 +173,7 @@ def sync_weekly_set(db: Session, ws: PlatformWeeklySet, *, now: Optional[datetim
             _apply(assignment, ws)
             out["updated"] += 1
         elif assignment.is_active:
-            assignment.is_active = False  # unpublished / group left the target set; nothing deleted
+            assignment.is_active = False  # unpublished / no window / group left the target set; nothing deleted
             out["deactivated"] += 1
 
     if may_create:
