@@ -280,7 +280,7 @@ def test_sat_result_without_attempt_ref_is_keyed_by_test(db):
     out = ingest_batch(db, "sat", [ready])
     assert out["accepted"] == [ready["event_id"]]
     r = db.query(PlatformResult).one()
-    assert (r.platform, r.module, r.attempt_ref, r.status) == ("sat", "math", "test:501", "scored")
+    assert (r.platform, r.module, r.status) == ("sat", "math", "scored") and r.attempt_ref.startswith("test:501:")
     assert r.band == 520 and r.raw_score == 12 and r.total == 22 and r.track == "sat"
 
 
@@ -301,3 +301,31 @@ def test_weekly_set_event_keeps_platform_paths_and_set_path(db):
     ws = db.query(PlatformWeeklySet).one()
     assert ws.set_path == "/weekly-sets/59" and ws.modules[0]["path"] == "/module/math/1?testId=501" and ws.track == "sat"
     assert ws.date_from == datetime(2026, 8, 28, 19, 0) and ws.date_to == datetime(2026, 8, 30, 18, 59, 59)
+
+
+def test_sat_results_without_attempt_ref_are_keyed_per_student(db):
+    """Two students, same test, no attempt: one row each — never one row overwritten twice."""
+    a = _user(db, email="a@x.io", subject="111")
+    b = _user(db, email="b@x.io", subject="222")
+    common = {"module": "math", "test_id": 501, "attempt_ref": None, "weekly_set_id": 59, "total": 22}
+    out = ingest_batch(db, "sat", [
+        _env("result.ready", platform="sat", email="a@x.io", subject="111", data={**common, "band": 520, "raw_score": 12}),
+        _env("result.ready", platform="sat", email="b@x.io", subject="222", data={**common, "band": 600, "raw_score": 17}),
+    ])
+    assert out["rejected"] == []
+    rows = {r.user_id: r for r in db.query(PlatformResult).all()}
+    assert set(rows) == {a.id, b.id}
+    assert rows[a.id].raw_score == 12 and rows[b.id].raw_score == 17
+    assert rows[a.id].attempt_ref != rows[b.id].attempt_ref
+    assert all(len(r.attempt_ref) <= 64 for r in rows.values())
+
+
+def test_sat_result_without_attempt_ref_resent_updates_the_same_row(db):
+    a = _user(db, email="a@x.io")  # no subject: keyed by email
+    data = {"module": "math", "test_id": 501, "attempt_ref": None, "weekly_set_id": 59,
+            "band": 520, "raw_score": 12, "total": 22}
+    ingest_batch(db, "sat", [_env("result.ready", platform="sat", email="a@x.io", data=data)])
+    ingest_batch(db, "sat", [_env("result.ready", platform="sat", email="a@x.io",
+                                  data={**data, "band": 540, "raw_score": 13})])
+    r = db.query(PlatformResult).one()
+    assert r.user_id == a.id and r.raw_score == 13 and r.band == 540
