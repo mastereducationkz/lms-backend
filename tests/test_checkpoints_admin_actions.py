@@ -11,7 +11,14 @@ from tests.checkpoint_fixtures import (
 
 @pytest.fixture
 def db():
-    from sqlalchemy import event
+    # join_transaction_mode="create_savepoint" (SQLAlchemy 2.0) instead of the older
+    # begin_nested()+after_transaction_end-listener recipe: that recipe rebuilds its
+    # savepoint by reacting to the transaction the app's own db.commit() just tore down,
+    # and a db.rollback() straight after a commit (record_submission failure isolation,
+    # see test_checkpoints_hooks.py::test_record_submission_failure_does_not_500_the_attempt)
+    # can unwind past it and silently drop the already-committed row. create_savepoint keeps
+    # every app-level commit/rollback nested one level down, on a connection-level transaction
+    # this fixture always rolls back, so tests still leave no trace. See tests/onboarding_fixtures.py.
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
     from src.config import engine
@@ -20,17 +27,10 @@ def db():
     except OperationalError:
         pytest.skip("No database available")
     trans = connection.begin()
-    session = SASession(bind=connection)
-    session.begin_nested()
-
-    @event.listens_for(session, "after_transaction_end")
-    def _restart(sess, transaction):
-        if transaction.nested and not transaction._parent.nested:
-            sess.begin_nested()
+    session = SASession(bind=connection, join_transaction_mode="create_savepoint")
     try:
         yield session
     finally:
-        event.remove(session, "after_transaction_end", _restart)
         session.close(); trans.rollback(); connection.close()
 
 
@@ -92,6 +92,8 @@ def test_submit_gate_and_recording(db):
     assert e.value.status_code == 403
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id, now=now)[0]
     assert service.assert_can_submit(db, s1.id, d1, now=now) == [row]
+    assert service.assert_can_submit(db, s1.id, d1, now=now + timedelta(hours=25), allow_past_deadline=True) == [row]
+    assert row.status == "available"
     with pytest.raises(HTTPException) as e:          # deadline passed
         service.assert_can_submit(db, s1.id, d1, now=now + timedelta(hours=25))
     assert e.value.status_code == 409

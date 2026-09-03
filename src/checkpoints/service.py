@@ -245,8 +245,13 @@ def _rows_for_student_definition(db: Session, student_id: int, definition: Check
 
 
 def assert_can_submit(db: Session, student_id: int, definition: CheckpointDefinition,
-                      now: Optional[datetime] = None) -> List[StudentCheckpoint]:
-    """Server-side gate for POST /progress/quiz-attempt on a checkpoint quiz step."""
+                      now: Optional[datetime] = None, *,
+                      allow_past_deadline: bool = False) -> List[StudentCheckpoint]:
+    """Server-side gate for POST /progress/quiz-attempt on a checkpoint quiz step.
+
+    `allow_past_deadline` relaxes only the deadline check (used for draft autosaves) —
+    a locked or completed checkpoint still rejects the submission.
+    """
     now = now or utcnow()
     rows = _rows_for_student_definition(db, student_id, definition)
     if not rows or all(r.status == STATUS_LOCKED for r in rows):
@@ -256,6 +261,8 @@ def assert_can_submit(db: Session, student_id: int, definition: CheckpointDefini
         if any(r.status == STATUS_COMPLETED for r in rows):
             raise HTTPException(status_code=409, detail="Checkpoint already completed")
         raise HTTPException(status_code=409, detail="Checkpoint deadline has passed; ask your admin to reopen it")
+    if allow_past_deadline:
+        return open_rows
     live = [r for r in open_rows if r.deadline is None or naive(r.deadline) >= now]
     if not live:
         refresh_overdue(open_rows, now)

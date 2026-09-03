@@ -11,7 +11,14 @@ from tests.checkpoint_fixtures import (
 
 @pytest.fixture
 def db():
-    from sqlalchemy import event
+    # join_transaction_mode="create_savepoint" (SQLAlchemy 2.0) instead of the older
+    # begin_nested()+after_transaction_end-listener recipe: that recipe rebuilds its
+    # savepoint by reacting to the transaction the app's own db.commit() just tore down,
+    # and a db.rollback() straight after a commit (record_submission failure isolation,
+    # see test_record_submission_failure_does_not_500_the_attempt) can unwind past it and
+    # silently drop the already-committed row. create_savepoint keeps every app-level
+    # commit/rollback nested one level down, on a connection-level transaction this
+    # fixture always rolls back, so tests still leave no trace. See tests/onboarding_fixtures.py.
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
     from src.config import engine
@@ -20,17 +27,10 @@ def db():
     except OperationalError:
         pytest.skip("No database available")
     trans = connection.begin()
-    session = SASession(bind=connection)
-    session.begin_nested()
-
-    @event.listens_for(session, "after_transaction_end")
-    def _restart(sess, transaction):
-        if transaction.nested and not transaction._parent.nested:
-            sess.begin_nested()
+    session = SASession(bind=connection, join_transaction_mode="create_savepoint")
     try:
         yield session
     finally:
-        event.remove(session, "after_transaction_end", _restart)
         session.close(); trans.rollback(); connection.close()
 
 
@@ -117,6 +117,29 @@ def test_draft_autosave_not_blocked_by_deadline(db):
     with pytest.raises(HTTPException) as e:   # final submit is still gated
         create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step), current_user=s, db=db)
     assert e.value.status_code == 409
+
+
+def test_record_submission_failure_does_not_500_the_attempt(db, monkeypatch):
+    from src.progress.routes.progress import create_quiz_attempt
+    from src.checkpoints import service
+    from src.schemas.models import QuizAttempt
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id)
+    def boom(*a, **k):
+        raise RuntimeError("simulated checkpoint failure")
+    monkeypatch.setattr(service, "record_submission", boom)
+    attempt = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step), current_user=s, db=db)
+    assert attempt.id is not None and attempt.is_draft is False
+    assert db.query(QuizAttempt).filter_by(user_id=s.id, step_id=quiz_step.id).count() == 1
+    assert service.get_row(db, s.id, group.id, d1.id).status == "available"   # bookkeeping failed, row untouched
+
+
+def test_draft_into_locked_checkpoint_still_403(db):
+    from src.progress.routes.progress import create_quiz_attempt
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    with pytest.raises(HTTPException) as e:
+        create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True), current_user=s, db=db)
+    assert e.value.status_code == 403
 
 
 def test_sync_failure_does_not_break_lesson_complete(db, monkeypatch):

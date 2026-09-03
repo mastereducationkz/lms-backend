@@ -1812,8 +1812,8 @@ def create_quiz_attempt(
     if checkpoint_definition is not None:
         if current_user.role != "student":
             raise HTTPException(status_code=403, detail="Only students take checkpoints")
-        if not attempt_data.is_draft:
-            checkpoint_service.assert_can_submit(db, current_user.id, checkpoint_definition)
+        checkpoint_service.assert_can_submit(db, current_user.id, checkpoint_definition,
+                                             allow_past_deadline=bool(attempt_data.is_draft))
 
     try:
         _forbid_special_group_manual_quiz(attempt_data.step_id, attempt_data.answers, current_user, db)
