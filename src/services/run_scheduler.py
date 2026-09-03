@@ -80,6 +80,15 @@ def main():
     except Exception as e:
         logger.error(f"Failed to start trial status scheduler: {e}", exc_info=True)
 
+    # Platform Integration Pack nightly job (03:30 Asia/Almaty): re-resolve unresolved platform
+    # events, reconcile the last 7 days from IELTS, prune events older than 400 days. No-op
+    # unless PLATFORM_EVENTS_INGEST_ENABLED; scheduler-container only.
+    try:
+        from src.integrations.reconcile import PlatformNightlyScheduler
+        PlatformNightlyScheduler().start()
+    except Exception as e:
+        logger.error(f"Failed to start platform nightly scheduler: {e}", exc_info=True)
+
     # Check configuration
     resend_api_key = os.getenv('RESEND_API_KEY')
     postgres_url = os.getenv('POSTGRES_URL')

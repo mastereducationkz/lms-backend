@@ -2,6 +2,7 @@ from src.models.base import Base
 
 # Registered here so `Base.metadata.create_all` and Alembic autogenerate both see it.
 from src.crm_audit.models import CrmAuditOutbox
+from src.integrations.models import PlatformEvent, PlatformResult, PlatformWeeklySet  # noqa: F401
 
 # Imported as a module rather than by name. Unlike the domain models below, this one also
 # carries the journal's helper functions, so `from src.services.email_log import ...` is a
