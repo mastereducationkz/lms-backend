@@ -138,10 +138,24 @@ def _default_sat_fetch(email: str, date_str: str) -> Optional[dict]:
     return asyncio.run(SATService.fetch_batch_scores_by_date([email], date_str))
 
 
+def sat_date_candidates(now: datetime, weeks: int = SAT_LOOKBACK_WEEKS) -> list[str]:
+    """The SAT endpoint matches ``date`` ("DD.MM") against the weekly test names, which carry the
+    set's window ("Weekly Test [Math] (22.08-23.08)"). Sets sit on weekends, so for each of the last
+    ``weeks`` weeks we try the Saturday first and the Friday second, newest first."""
+    today = now.date()
+    saturday = today - timedelta(days=(today.weekday() - 5) % 7)
+    out = []
+    for weeks_back in range(weeks):
+        day = saturday - timedelta(weeks=weeks_back)
+        out.append(day.strftime("%d.%m"))
+        out.append((day - timedelta(days=1)).strftime("%d.%m"))
+    return out
+
+
 def sat_current(email: str, *, now: Optional[datetime] = None,
                 fetch: Optional[Callable[[str, str], Optional[dict]]] = None) -> Optional[dict]:
-    """Walk back week by week (up to SAT_LOOKBACK_WEEKS) until a completed weekly set appears.
-    Cached for 10 minutes per student so the tile never hammers the SAT platform."""
+    """Walk back over the recent weekend set days (up to SAT_LOOKBACK_WEEKS) until a completed
+    weekly set appears. Cached for 10 minutes per student so the tile never hammers SAT."""
     from src.services import cache_service
 
     key = f"targets:sat-current:{(email or '').strip().lower()}"
@@ -150,8 +164,7 @@ def sat_current(email: str, *, now: Optional[datetime] = None,
         return cached or None
     fetch = fetch or _default_sat_fetch
     now = now or _utcnow()
-    for weeks_back in range(SAT_LOOKBACK_WEEKS):
-        date_str = (now - timedelta(weeks=weeks_back)).date().isoformat()
+    for date_str in sat_date_candidates(now):
         try:
             payload = fetch(email, date_str) or {}
         except Exception as exc:  # noqa: BLE001 - the tile degrades to "—"

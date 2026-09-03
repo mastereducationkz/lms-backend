@@ -251,3 +251,31 @@ def test_sat_current_missing_or_incomplete_returns_none():
 def test_gap_and_status_lines():
     assert tp.gap(7.5, 6.5) == 1.0 and tp.gap(1400, 1450) == -50 and tp.gap(7.0, None) is None
     assert tp.reached(7.0, 7.0) is True and tp.reached(7.0, 6.5) is False and tp.reached(None, 7.0) is False
+
+
+# --- SAT date walk-back (batch-scores-by-date matches "DD.MM" against the weekly test names) ----
+
+def test_sat_date_candidates_are_recent_weekend_days_newest_first():
+    # 2026-09-03 is a Thursday: the newest window is 29.08-30.08 (Saturday), then 22.08-23.08, ...
+    assert tp.sat_date_candidates(datetime(2026, 9, 3, 10, 0), weeks=3) == [
+        "29.08", "28.08", "22.08", "21.08", "15.08", "14.08",
+    ]
+
+
+def test_sat_current_walks_back_until_a_completed_set(monkeypatch):
+    from src.services import cache_service
+    monkeypatch.setattr(cache_service, "get_json", lambda key: None)
+    monkeypatch.setattr(cache_service, "set_json", lambda *a, **k: True)
+    calls = []
+
+    def fetch(email, date_str):
+        calls.append(date_str)
+        if date_str == "22.08":
+            return {"results": [{"email": email, "weeklySet": {"id": 58, "name": "22.08-23.08", "weekNumber": 58,
+                                                             "verbalScaled": 390, "mathScaled": 450, "total": 840,
+                                                             "completed": True, "completedAt": "2026-08-23T09:00:00Z"}}]}
+        return {"results": []}
+
+    cur = tp.sat_current("stu@x.io", now=datetime(2026, 9, 3, 10, 0), fetch=fetch)
+    assert calls == ["29.08", "28.08", "22.08"]
+    assert cur["total"] == 840 and cur["week"] == 58 and cur["set_name"] == "22.08-23.08"
