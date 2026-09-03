@@ -132,6 +132,8 @@ services:
       - ./scripts:/app/scripts:ro
       - ./backups:/app/backups
       - ./logs:/app/logs
+      # Handoff signing key (Platform Integration Pack §3); read via HANDOFF_PRIVATE_KEY_PATH.
+      - ./secrets/handoff_private.pem:/run/secrets/handoff_private.pem:ro
     expose:
       - "8000"
 
