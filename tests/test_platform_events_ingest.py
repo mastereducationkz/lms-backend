@@ -235,7 +235,7 @@ def test_weekly_set_published_then_updated_then_unpublished(db):
     ingest_batch(db, "ielts", [_env("weekly_set.published", student=False, data=_set_data())])
     ws = db.query(PlatformWeeklySet).one()
     assert (ws.platform, ws.weekly_set_id, ws.title, ws.is_active, ws.track) == ("ielts", 7, "Week 36", True, "ielts")
-    assert str(ws.date_from) == "2026-09-01" and str(ws.date_to) == "2026-09-07"
+    assert ws.date_from == datetime(2026, 9, 1) and ws.date_to == datetime(2026, 9, 7)
     assert ws.modules[0]["test_id"] == 12
 
     ingest_batch(db, "ielts", [_env("weekly_set.updated", student=False, data=_set_data(title="Week 36 (rev)"))])

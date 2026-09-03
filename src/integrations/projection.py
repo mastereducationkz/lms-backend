@@ -42,9 +42,9 @@ def apply_event(db: Session, event: PlatformEvent) -> None:
     data = (event.payload or {}).get("data") or {}
     event_type = event.event_type
     if event_type in ("weekly_set.published", "weekly_set.updated"):
-        _upsert_weekly_set(db, event.platform, data)
+        _sync_assignments(db, _upsert_weekly_set(db, event.platform, data))
     elif event_type == "weekly_set.unpublished":
-        _upsert_weekly_set(db, event.platform, {**data, "is_active": False}, create=False)
+        _sync_assignments(db, _upsert_weekly_set(db, event.platform, {**data, "is_active": False}, create=False))
     elif event_type in _ATTEMPT_STATUS:
         ref_key = "session_id" if event_type == "writing.completed" else "attempt_id"
         _upsert_result(
@@ -58,7 +58,17 @@ def apply_event(db: Session, event: PlatformEvent) -> None:
 
 # --- weekly sets ---------------------------------------------------------------------
 
-def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool = True) -> None:
+def _sync_assignments(db: Session, ws) -> None:
+    """E1: keep the per-group platform_test assignments in step with the set (flag-gated)."""
+    if ws is None:
+        return
+    from src.integrations import platform_assignments
+
+    if platform_assignments.enabled():
+        platform_assignments.sync_weekly_set(db, ws)
+
+
+def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool = True):
     set_id = _int(_required(data, "weekly_set_id"), "weekly_set_id")
     row = (
         db.query(PlatformWeeklySet)
@@ -67,15 +77,16 @@ def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool =
     )
     if row is None:
         if not create:
-            return  # unpublishing a set we never saw: nothing to deactivate
+            return None  # unpublishing a set we never saw: nothing to deactivate
         row = PlatformWeeklySet(platform=platform, weekly_set_id=set_id)
         db.add(row)
     if "title" in data:
         row.title = data.get("title")
+    # Full timestamps (a date-only value means midnight UTC); Speaking closes at date_to's minute.
     if "date_from" in data:
-        row.date_from = _parse_date(data.get("date_from"), "date_from")
+        row.date_from = _parse_dt(data["date_from"], "date_from") if data.get("date_from") else None
     if "date_to" in data:
-        row.date_to = _parse_date(data.get("date_to"), "date_to")
+        row.date_to = _parse_dt(data["date_to"], "date_to") if data.get("date_to") else None
     if "is_active" in data:
         row.is_active = bool(data.get("is_active"))
     if "track" in data:
@@ -86,6 +97,7 @@ def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool =
             raise ProjectionDataError("modules must be a list")
         row.modules = modules
     db.flush()
+    return row
 
 
 # --- results -------------------------------------------------------------------------
@@ -141,6 +153,11 @@ def _upsert_result(db: Session, event: PlatformEvent, data: dict, *, status: str
         elif row.scored_at is None:
             row.scored_at = event.occurred_at
     db.flush()
+
+    # E1: a module just changed state — write the auto submission if the set is now complete.
+    from src.integrations import platform_progress
+
+    platform_progress.on_result_change(db, event.platform, row.weekly_set_id, row.user_id)
 
 
 # --- field helpers -------------------------------------------------------------------

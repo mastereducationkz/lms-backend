@@ -127,7 +127,7 @@ def test_reconciled_rows_carry_real_refs_status_and_band(db):
     assert (rows["reading"].attempt_ref, rows["reading"].status, rows["reading"].band) == ("91", "started", None)
     assert (rows["writing"].attempt_ref, rows["writing"].status, rows["writing"].band) == ("555", "scored", 6.5)
     ws = db.query(PlatformWeeklySet).one()
-    assert (ws.weekly_set_id, ws.title, str(ws.date_from), str(ws.date_to)) == (7, "Week 36", "2026-09-01", "2026-09-07")
+    assert (ws.weekly_set_id, ws.title, ws.date_from, ws.date_to) == (7, "Week 36", datetime(2026, 9, 1), datetime(2026, 9, 7))
 
 
 def test_reconcile_never_downgrades_an_event_sourced_row(db):

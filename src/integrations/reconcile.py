@@ -133,13 +133,16 @@ def _upsert_weekly_set_from_payload(db: Session, payload: dict) -> None:
     if row is None:
         row = PlatformWeeklySet(platform="ielts", weekly_set_id=set_id, track="ielts", is_active=True)
         db.add(row)
-    if payload.get("weeklySetTitle"):
+    if payload.get("weeklySetTitle") and not row.title:
         row.title = str(payload["weeklySetTitle"])
+    # batch-scores carries date-only windows; never overwrite the exact timestamps an event stored.
     for key, attr in (("weeklySetDateFrom", "date_from"), ("weeklySetDateTo", "date_to")):
         value = payload.get(key)
-        if value:
+        if value and getattr(row, attr) is None:
             try:
-                setattr(row, attr, date.fromisoformat(str(value)[:10]))
+                setattr(row, attr, datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                        .astimezone(timezone.utc).replace(tzinfo=None)
+                        if "T" in str(value) else datetime.combine(date.fromisoformat(str(value)[:10]), datetime.min.time()))
             except ValueError:
                 logger.warning("platform reconcile: bad %s=%r for set %s", key, value, set_id)
     db.flush()
@@ -224,10 +227,21 @@ def prune_events(db: Session, *, days: int = RETENTION_DAYS, now: Optional[datet
     return int(deleted or 0)
 
 
+def sync_platform_assignments(db: Session) -> dict:
+    """E1: (re)create platform_test assignments for current sets — catches groups created after
+    the publish event. No-op unless PLATFORM_ASSIGNMENTS_ENABLED."""
+    from src.integrations import platform_assignments
+
+    if not platform_assignments.enabled():
+        return {"sets": 0, "created": 0, "updated": 0, "deactivated": 0}
+    return platform_assignments.sync_all_active(db)
+
+
 def run_nightly(db: Session) -> dict:
     return {
         "re_resolved": re_resolve_unresolved(db),
         "reconcile": reconcile_ielts(db),
+        "assignments": sync_platform_assignments(db),
         "pruned": prune_events(db),
     }
 

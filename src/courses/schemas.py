@@ -26,6 +26,8 @@ class GroupSchema(BaseModel):
     group_type: GroupTypeLiteral = "group"
     program_type: ProgramTypeLiteral = "general_english"
     weekly_set_week_offset: int = 0
+    # Platform Integration Pack §6.3: no auto-created platform-test assignments when true.
+    platform_tests_opt_out: bool = False
     schedule_config: Optional[dict] = None
     current_week: Optional[int] = None
     max_week: Optional[int] = None
