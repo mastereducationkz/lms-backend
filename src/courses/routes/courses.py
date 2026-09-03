@@ -1166,6 +1166,8 @@ def get_lesson(
     # Check course access
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
+    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     # Efficiently count steps without loading them
@@ -1210,6 +1212,13 @@ def check_lesson_access(
     # Teachers and admins can access any lesson
     if current_user.role != "student":
         return {"accessible": True}
+
+    # A checkpoint quiz lesson is reachable only while that checkpoint is open for this student.
+    from src.checkpoints.service import (
+        student_may_view_checkpoint_lesson, CHECKPOINT_LESSON_DENIED,
+    )
+    if not student_may_view_checkpoint_lesson(db, current_user, lesson_id):
+        return {"accessible": False, "reason": CHECKPOINT_LESSON_DENIED}
 
     if getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
@@ -1565,6 +1574,8 @@ def get_lesson_steps(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
+    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     if include_content:
@@ -1691,6 +1702,8 @@ def get_step(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this step")
+    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    assert_student_may_view_checkpoint_lesson(db, current_user, step.lesson_id)
     _trial_hard_gate(db, current_user, step.lesson_id)
 
     return StepSchema.from_orm(step)

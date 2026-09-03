@@ -299,6 +299,48 @@ def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
     return done
 
 
+def checkpoint_quiz_lesson_ids(db: Session) -> set:
+    """Every lesson that carries a checkpoint quiz (all definitions, active or not)."""
+    return {r[0] for r in db.query(CheckpointDefinition.quiz_lesson_id).filter(
+        CheckpointDefinition.quiz_lesson_id.isnot(None)).all()}
+
+
+def open_checkpoint_lesson_ids_for_student(db: Session, student_id: int) -> set:
+    """Quiz lessons this student may actually open: a non-locked row, in a group that still has
+    checkpoints enabled, on a definition that is still active."""
+    return {r[0] for r in db.query(CheckpointDefinition.quiz_lesson_id).join(
+        StudentCheckpoint, StudentCheckpoint.checkpoint_id == CheckpointDefinition.id
+    ).join(Group, Group.id == StudentCheckpoint.group_id).filter(
+        StudentCheckpoint.student_id == student_id,
+        StudentCheckpoint.status != STATUS_LOCKED,
+        CheckpointDefinition.quiz_lesson_id.isnot(None),
+        CheckpointDefinition.is_active == True,  # noqa: E712
+        Group.checkpoints_enabled == True,  # noqa: E712
+    ).all()}
+
+
+def student_may_view_checkpoint_lesson(db: Session, user, lesson_id: int) -> bool:
+    """False only for a student looking at a checkpoint quiz lesson that is not open for them.
+
+    Needed because `check_course_access` grants the hidden quiz course as a whole and every
+    checkpoint lesson is `is_initially_unlocked=True` — without this, one open checkpoint would
+    expose the questions (and `correct_answer`) of all the others.
+    """
+    if getattr(user, "role", None) != "student":
+        return True
+    if lesson_id not in checkpoint_quiz_lesson_ids(db):
+        return True
+    return lesson_id in open_checkpoint_lesson_ids_for_student(db, user.id)
+
+
+CHECKPOINT_LESSON_DENIED = "This checkpoint is not open for you"
+
+
+def assert_student_may_view_checkpoint_lesson(db: Session, user, lesson_id: int) -> None:
+    if not student_may_view_checkpoint_lesson(db, user, lesson_id):
+        raise HTTPException(status_code=403, detail=CHECKPOINT_LESSON_DENIED)
+
+
 def student_has_checkpoint_access_to_course(db: Session, student_id: int, course_id: int) -> bool:
     """Hook for check_course_access: a student may enter the hidden quiz course only through a
     non-locked checkpoint row whose quiz lesson lives in that course."""

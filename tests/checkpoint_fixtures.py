@@ -58,6 +58,38 @@ def make_sat_course(db, n_verbal=4, n_math=2):
     return c, v_lessons, m_lessons
 
 
+def _quiz_json(title, n_questions):
+    questions = [{
+        "id": f"q{i}", "assignment_id": "", "question_text": f"Q{i}", "question_type": "single_choice",
+        "options": [{"id": f"q{i}a", "text": "A", "is_correct": True, "letter": "A"},
+                    {"id": f"q{i}b", "text": "B", "is_correct": False, "letter": "B"}],
+        "correct_answer": 0, "points": 1, "order_index": i, "difficulty": "easy",
+    } for i in range(n_questions)]
+    return json.dumps({"title": title, "questions": questions})
+
+
+def make_quiz_lessons(db, n=2, n_questions=2):
+    """Hidden 'SAT Checkpoints' course with `n` quiz lessons. Returns (course, [lessons], [steps]).
+
+    Every lesson is `is_initially_unlocked=True`, like the real seed — which is exactly why the
+    per-lesson checkpoint guard is needed on top of the course-level access hook.
+    """
+    c = Course(title="SAT Checkpoints (test)", course_type="sat", is_active=True)
+    db.add(c); db.flush()
+    m = Module(title="Checkpoints", course_id=c.id, order_index=0)
+    db.add(m); db.flush()
+    lessons, steps = [], []
+    for i in range(n):
+        title = f"Checkpoint {i + 1}"
+        l = Lesson(title=title, module_id=m.id, order_index=i, is_initially_unlocked=True)
+        db.add(l); db.flush()
+        s = Step(lesson_id=l.id, title="Quiz", content_type="quiz", order_index=0,
+                 content_text=_quiz_json(title, n_questions))
+        db.add(s); db.flush()
+        lessons.append(l); steps.append(s)
+    return c, lessons, steps
+
+
 def make_quiz_lesson(db, title="Checkpoint 1", n_questions=2):
     """Hidden 'SAT Checkpoints' course with one lesson + one quiz step. Returns (course, lesson, step)."""
     c = Course(title="SAT Checkpoints (test)", course_type="sat", is_active=True)
@@ -66,14 +98,8 @@ def make_quiz_lesson(db, title="Checkpoint 1", n_questions=2):
     db.add(m); db.flush()
     l = Lesson(title=title, module_id=m.id, order_index=0, is_initially_unlocked=True)
     db.add(l); db.flush()
-    questions = [{
-        "id": f"q{i}", "assignment_id": "", "question_text": f"Q{i}", "question_type": "single_choice",
-        "options": [{"id": f"q{i}a", "text": "A", "is_correct": True, "letter": "A"},
-                    {"id": f"q{i}b", "text": "B", "is_correct": False, "letter": "B"}],
-        "correct_answer": 0, "points": 1, "order_index": i, "difficulty": "easy",
-    } for i in range(n_questions)]
     s = Step(lesson_id=l.id, title="Quiz", content_type="quiz", order_index=0,
-             content_text=json.dumps({"title": title, "questions": questions}))
+             content_text=_quiz_json(title, n_questions))
     db.add(s); db.flush()
     return c, l, s
 
