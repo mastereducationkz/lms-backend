@@ -8,7 +8,12 @@ from tests.checkpoint_fixtures import make_sat_course
 
 @pytest.fixture
 def db():
-    from sqlalchemy import event
+    # join_transaction_mode="create_savepoint" (SQLAlchemy 2.0) instead of the older
+    # begin_nested()+after_transaction_end-listener recipe: that recipe rebuilds its savepoint by
+    # reacting to the transaction the app's own db.commit() just tore down, so an app-level
+    # db.rollback() straight after a commit unwinds past it and takes committed rows with it.
+    # create_savepoint keeps every app-level commit/rollback nested one level down, inside a
+    # connection-level transaction this fixture always rolls back. See tests/onboarding_fixtures.py.
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
     from src.config import engine
@@ -17,17 +22,10 @@ def db():
     except OperationalError:
         pytest.skip("No database available")
     trans = connection.begin()
-    session = SASession(bind=connection)
-    session.begin_nested()
-
-    @event.listens_for(session, "after_transaction_end")
-    def _restart(sess, transaction):
-        if transaction.nested and not transaction._parent.nested:
-            sess.begin_nested()
+    session = SASession(bind=connection, join_transaction_mode="create_savepoint")
     try:
         yield session
     finally:
-        event.remove(session, "after_transaction_end", _restart)
         session.close(); trans.rollback(); connection.close()
 
 

@@ -10,7 +10,12 @@ from tests.checkpoint_fixtures import (
 
 @pytest.fixture
 def db():
-    from sqlalchemy import event
+    # join_transaction_mode="create_savepoint" (SQLAlchemy 2.0) instead of the older
+    # begin_nested()+after_transaction_end-listener recipe: that recipe rebuilds its savepoint by
+    # reacting to the transaction the app's own db.commit() just tore down, so an app-level
+    # db.rollback() straight after a commit unwinds past it and takes committed rows with it.
+    # create_savepoint keeps every app-level commit/rollback nested one level down, inside a
+    # connection-level transaction this fixture always rolls back. See tests/onboarding_fixtures.py.
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
     from src.config import engine
@@ -19,17 +24,10 @@ def db():
     except OperationalError:
         pytest.skip("No database available")
     trans = connection.begin()
-    session = SASession(bind=connection)
-    session.begin_nested()
-
-    @event.listens_for(session, "after_transaction_end")
-    def _restart(sess, transaction):
-        if transaction.nested and not transaction._parent.nested:
-            sess.begin_nested()
+    session = SASession(bind=connection, join_transaction_mode="create_savepoint")
     try:
         yield session
     finally:
-        event.remove(session, "after_transaction_end", _restart)
         session.close(); trans.rollback(); connection.close()
 
 
@@ -70,3 +68,34 @@ def test_staff_forbidden(db):
     with pytest.raises(HTTPException) as e:
         get_my_checkpoints(current_user=t, db=db)
     assert e.value.status_code == 403
+
+
+def test_concurrent_open_race_does_not_500(db, monkeypatch):
+    """Two uvicorn workers can auto-open the same checkpoint at once; uq_student_checkpoint then
+    fires on the loser's INSERT. That must not surface as a 500 on GET /checkpoints/me."""
+    from sqlalchemy.exc import IntegrityError
+    from src.checkpoints.models import StudentCheckpoint
+    from src.checkpoints.routes.checkpoints import get_my_checkpoints
+    _, course, v, m, d1, d2, group, s = _world(db)
+    for l in (v[0], v[1], m[0]):
+        complete_lesson_explicit(db, s, course, l)
+    db.commit()
+
+    real_flush = db.flush
+    state = {"raised": False}
+
+    def flaky_flush(*a, **kw):
+        # Only trip on the INSERT that opens a checkpoint, not on incidental autoflushes.
+        if not state["raised"] and any(isinstance(o, StudentCheckpoint) for o in db.new):
+            state["raised"] = True
+            raise IntegrityError("INSERT INTO student_checkpoints", {},
+                                 Exception('duplicate key value violates unique constraint '
+                                           '"uq_student_checkpoint"'))
+        return real_flush(*a, **kw)
+
+    monkeypatch.setattr(db, "flush", flaky_flush)
+    out = get_my_checkpoints(current_user=s, db=db)
+    assert state["raised"] is True
+    assert out["enabled"] is True
+    assert [i["number"] for i in out["items"]] == [1, 2]
+    assert all("status" in i and "covers" in i for i in out["items"])

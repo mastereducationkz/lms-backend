@@ -4,10 +4,13 @@ Trigger rule (ТЗ §4-§6, §10): a checkpoint opens for a student when ALL req
 block are completed by that student — nothing else (no calendar week, no lesson counts, no
 attendance). Deadline = opened_at + 24h (§8). Rows are per (student, group, checkpoint).
 """
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException
+from sqlalchemy import tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.checkpoints.completion import completed_lesson_ids
@@ -18,6 +21,8 @@ from src.checkpoints.models import (
 from src.courses.models import Group, GroupStudent, Lesson, Module, Step
 from src.progress.models import QuizAttempt
 from src.utils.permissions import get_group_course_ids
+
+_log = logging.getLogger(__name__)
 
 DEADLINE_HOURS = 24
 
@@ -103,11 +108,8 @@ def _open_row(row: Optional[StudentCheckpoint], *, student_id: int, group_id: in
     return row
 
 
-def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[datetime] = None,
-                             commit: bool = True) -> List[StudentCheckpoint]:
-    """Open every checkpoint whose required units the student has completed, in every enabled
-    group. Idempotent: rows that are already open/completed/overdue/reopened are left alone."""
-    now = now or utcnow()
+def _open_eligible_checkpoints(db: Session, student_id: int, now: datetime,
+                               keys: List[tuple]) -> List[StudentCheckpoint]:
     opened: List[StudentCheckpoint] = []
     for group in enabled_groups_for_student(db, student_id):
         for definition in definitions_for_group(db, group):
@@ -124,11 +126,44 @@ def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[date
                                 now=now, opened_by="auto", deadline=None, actor_id=None)
                 db.add(row)
                 opened.append(row)
-    if opened:
-        db.flush()
-        if commit:
-            db.commit()
+                keys.append((group.id, definition.id))
     return opened
+
+
+def _rows_for_keys(db: Session, student_id: int, keys: List[tuple]) -> List[StudentCheckpoint]:
+    if not keys:
+        return []
+    return db.query(StudentCheckpoint).filter(
+        StudentCheckpoint.student_id == student_id,
+        tuple_(StudentCheckpoint.group_id, StudentCheckpoint.checkpoint_id).in_(keys),
+        StudentCheckpoint.status != STATUS_LOCKED,
+    ).order_by(StudentCheckpoint.id).all()
+
+
+def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[datetime] = None,
+                             commit: bool = True) -> List[StudentCheckpoint]:
+    """Open every checkpoint whose required units the student has completed, in every enabled
+    group. Idempotent: rows that are already open/completed/overdue/reopened are left alone.
+
+    This is read-then-insert, so two workers (4 uvicorn processes in prod) can both decide to open
+    the same (student, group, checkpoint) and the loser's INSERT trips uq_student_checkpoint. That
+    is a benign race — the row exists either way — so we swallow the IntegrityError and report the
+    rows that are now actually there instead of 500-ing the request that triggered the sync.
+    """
+    now = now or utcnow()
+    keys: List[tuple] = []
+    try:
+        opened = _open_eligible_checkpoints(db, student_id, now, keys)
+        if opened:
+            db.flush()
+            if commit:
+                db.commit()
+        return opened
+    except IntegrityError:
+        _log.info("checkpoint open raced for student %s (keys=%s); reusing the existing rows",
+                  student_id, keys)
+        db.rollback()
+        return _rows_for_keys(db, student_id, keys)
 
 
 def sync_group(db: Session, group: Group, *, now: Optional[datetime] = None, commit: bool = True) -> int:
