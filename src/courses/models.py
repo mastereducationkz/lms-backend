@@ -66,6 +66,12 @@ class Group(Base):
     # platform-test assignments (opt-out is per group; weekly sets are global on IELTS).
     platform_tests_opt_out = Column(Boolean, nullable=False, default=False, server_default="false")
 
+    # SAT Checkpoints (docs/superpowers/plans/2026-09-03-sat-checkpoints.md): hidden unless enabled.
+    # Checkpoints numbered below `checkpoints_start_number` never auto-open (admin may still open them),
+    # which lets a group start mid-course without a pile-up of instantly-due checkpoints.
+    checkpoints_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    checkpoints_start_number = Column(Integer, nullable=False, default=1, server_default="1")
+
     teacher = relationship("UserInDB", foreign_keys=[teacher_id], post_update=True)
     curator = relationship("UserInDB", foreign_keys=[curator_id], post_update=True)
     students = relationship("GroupStudent", back_populates="group", cascade="all, delete-orphan")

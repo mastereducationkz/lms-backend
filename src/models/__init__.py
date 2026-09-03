@@ -29,6 +29,9 @@ from src.progress.models import (
     StudentProgress, StepProgress, ProgressSnapshot,
     StudentCourseSummary, CourseAnalyticsCache, QuizAttempt,
 )
+from src.checkpoints.models import (  # noqa: F401
+    CheckpointDefinition, CheckpointRequiredUnit, StudentCheckpoint,
+)
 from src.events.models import (
     Event, EventGroup, EventCourse, EventParticipant,
     MissedAttendanceLog, LessonSchedule, Attendance,
@@ -74,4 +77,5 @@ __all__ = [
     "ExamResult", "BluebookResult", "StudentTestimonial",
     "TrialAccess",
     "CrmAuditOutbox",
+    "CheckpointDefinition", "CheckpointRequiredUnit", "StudentCheckpoint",
 ]
