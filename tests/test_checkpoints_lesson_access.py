@@ -97,3 +97,42 @@ def test_non_checkpoint_lessons_are_untouched(db):
     sat_lesson_id = d2.required_units[0].lesson_id
     assert sat_lesson_id not in service.checkpoint_quiz_lesson_ids(db)
     assert get_lesson_steps(sat_lesson_id, include_content=True, current_user=s, db=db) is not None
+
+
+def test_course_lesson_listing_hides_the_other_checkpoints(db):
+    """`GET /courses/{id}/lessons` serializes every step's `content_text`, so listing the hidden
+    quiz course must drop the checkpoints this student has not had opened."""
+    from src.courses.routes.courses import get_course_lessons
+    admin, group, s, d1, d2, quiz_course, lessons, steps = _world(db)
+    _open_cp1(db, admin, group, d1)
+    out = get_course_lessons(quiz_course.id, lightweight=False, current_user=s, db=db)
+    assert [l.id for l in out] == [lessons[0].id]
+    assert [st.id for st in out[0].steps] == [steps[0].id]
+
+
+def test_module_lesson_listing_hides_the_other_checkpoints(db):
+    from src.courses.routes.courses import get_module_lessons
+    admin, group, s, d1, d2, quiz_course, lessons, steps = _world(db)
+    _open_cp1(db, admin, group, d1)
+    out = get_module_lessons(quiz_course.id, lessons[0].module_id, current_user=s, db=db)
+    assert [l.id for l in out] == [lessons[0].id]
+
+
+def test_staff_see_every_checkpoint_lesson_in_listings(db):
+    from src.courses.routes.courses import get_course_lessons, get_module_lessons
+    admin, group, s, d1, d2, quiz_course, lessons, steps = _world(db)
+    _open_cp1(db, admin, group, d1)
+    assert [l.id for l in get_course_lessons(quiz_course.id, lightweight=False,
+                                             current_user=admin, db=db)] == [l.id for l in lessons]
+    assert [l.id for l in get_module_lessons(quiz_course.id, lessons[0].module_id,
+                                             current_user=admin, db=db)] == [l.id for l in lessons]
+
+
+def test_ordinary_course_listing_is_untouched_by_the_checkpoint_filter(db):
+    """A course with no checkpoint quiz lessons must keep every lesson (and pay one cheap query)."""
+    from src.courses.routes.courses import get_course_lessons
+    admin, group, s, d1, d2, quiz_course, lessons, steps = _world(db)
+    _open_cp1(db, admin, group, d1)
+    sat_course_id = db.get(type(lessons[0]), d1.required_units[0].lesson_id).module.course_id
+    out = get_course_lessons(sat_course_id, lightweight=False, current_user=s, db=db)
+    assert len(out) == 6

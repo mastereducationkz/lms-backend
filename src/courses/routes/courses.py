@@ -68,6 +68,30 @@ def _trial_filter_lesson_payload(lessons, allowed_ids):
                 lesson.total_steps = 0
     return lessons
 
+
+def _checkpoint_filter_lesson_payload(db, current_user, lessons):
+    """Drop checkpoint quiz lessons that are not open for this student.
+
+    The hidden checkpoint course is granted as a whole once ONE checkpoint is open, and these
+    listings serialize every step (``content_text`` and all), so without this a student holding
+    Checkpoint 1 could read the questions of Checkpoints 2-9 straight off the listing endpoints.
+    Dropping rather than blanking: a checkpoint that is not open should not exist for the student.
+
+    Cheap for ordinary courses: one small query over the definition table, and the per-student
+    query only runs when this payload actually contains a checkpoint quiz lesson.
+    """
+    if getattr(current_user, "role", None) != "student":
+        return lessons
+    from src.checkpoints import service as checkpoint_service
+    payload_ids = {int(l.id) for l in lessons}
+    quiz_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db) & payload_ids
+    if not quiz_ids:
+        return lessons
+    hidden = quiz_ids - checkpoint_service.open_checkpoint_lesson_ids_for_student(db, current_user.id)
+    if hidden:
+        lessons[:] = [l for l in lessons if int(l.id) not in hidden]
+    return lessons
+
 # =============================================================================
 # COURSE MANAGEMENT
 # =============================================================================
@@ -1032,6 +1056,8 @@ def get_module_lessons(
         allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
         _trial_filter_lesson_payload(lessons_data, allowed_ids)
 
+    _checkpoint_filter_lesson_payload(db, current_user, lessons_data)
+
     return lessons_data
 
 @router.get("/{course_id}/lessons", response_model=List[LessonSchema])
@@ -1083,6 +1109,8 @@ def get_course_lessons(
         grant = get_active_trial_grant(db, current_user.id, course_id)
         allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
         _trial_filter_lesson_payload(lessons_data, allowed_ids)
+
+    _checkpoint_filter_lesson_payload(db, current_user, lessons_data)
 
     return lessons_data
 
