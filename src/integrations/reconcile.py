@@ -27,6 +27,7 @@ from src.integrations.projection import (
     STATUS_RANK, ProjectionDataError, UnhandledEventType, apply_event,
 )
 from src.integrations.resolver import resolve_user_id
+from src.services import cache_service
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,9 @@ NIGHTLY_AT = (3, 30)  # local Asia/Almaty
 RECONCILE_DAYS = 7
 RERESOLVE_DAYS = 30
 RETENTION_DAYS = 400
+# Last-run date survives container restarts (Redis); memory is the fallback when Redis is off.
+LAST_RUN_KEY = "platform:nightly:last_run_date"
+_LAST_RUN_TTL_SECONDS = 3 * 86400
 
 # batch-scores-by-date item fields per module (camelCase, additive on the IELTS side).
 _MODULE_FIELDS = {
@@ -238,6 +242,22 @@ def nightly_due(now_utc: datetime, last_run_date: Optional[date]) -> bool:
     return last_run_date != local.date()
 
 
+def load_last_run_date() -> Optional[date]:
+    try:
+        value = cache_service.get_json(LAST_RUN_KEY)
+        return date.fromisoformat(str(value)) if value else None
+    except Exception as exc:  # noqa: BLE001 - a cache hiccup must not stop the job
+        logger.warning("platform nightly: could not read last-run date (%s)", exc)
+        return None
+
+
+def save_last_run_date(value: date) -> None:
+    try:
+        cache_service.set_json(LAST_RUN_KEY, value.isoformat(), ttl_seconds=_LAST_RUN_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("platform nightly: could not persist last-run date (%s)", exc)
+
+
 class PlatformNightlyScheduler:
     """Daemon thread: checks every minute, runs the nightly job once per day when enabled."""
 
@@ -269,8 +289,12 @@ class PlatformNightlyScheduler:
             time.sleep(self.check_interval)
 
     def tick(self) -> None:
+        if not enabled():
+            return
         now = _utcnow()
-        if not enabled() or not nightly_due(now, self.last_run_date):
+        last_run = self.last_run_date or load_last_run_date()
+        if not nightly_due(now, last_run):
+            self.last_run_date = last_run
             return
         from src.config import SessionLocal
 
@@ -281,3 +305,4 @@ class PlatformNightlyScheduler:
         finally:
             db.close()
         self.last_run_date = now.replace(tzinfo=timezone.utc).astimezone(ALMATY).date()
+        save_last_run_date(self.last_run_date)
