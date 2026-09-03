@@ -146,8 +146,8 @@ def assignment_ready_for_student(user_id: int, assignment: Assignment, db: Sessi
     """Unit-based readiness: ready when ALL linked lessons are completed by the student.
     Assignments with no linked lessons are always ready."""
     from src.assignments.models import AssignmentLinkedLesson
-    from src.courses.models import Lesson, Step
-    from src.progress.models import StudentProgress, StepProgress
+    from src.courses.models import Lesson
+    from src.checkpoints.completion import completed_lesson_ids
 
     links = db.query(AssignmentLinkedLesson).filter(
         AssignmentLinkedLesson.assignment_id == assignment.id
@@ -156,45 +156,11 @@ def assignment_ready_for_student(user_id: int, assignment: Assignment, db: Sessi
     if not lesson_ids:
         return {"ready": True, "total": 0, "completed": 0, "missing": []}
 
-    # A lesson counts as completed the SAME way the course view derives `is_completed`
-    # (see courses.py): either an explicit lesson-level StudentProgress row marked
-    # "completed", OR all of its non-optional steps are completed. Many students finish
-    # a lesson step-by-step without the lesson-level row ever being written, so checking
-    # only StudentProgress wrongly blocks them from submitting.
-    completed_ids = {
-        row[0] for row in db.query(StudentProgress.lesson_id).filter(
-            StudentProgress.user_id == user_id,
-            StudentProgress.lesson_id.in_(lesson_ids),
-            StudentProgress.status == "completed",
-        ).all()
-    }
-
-    remaining_ids = [lid for lid in lesson_ids if lid not in completed_ids]
-    if remaining_ids:
-        completed_step_ids = {
-            row[0] for row in db.query(StepProgress.step_id).filter(
-                StepProgress.user_id == user_id,
-                StepProgress.lesson_id.in_(remaining_ids),
-                StepProgress.status == "completed",
-            ).all()
-        }
-        steps_by_lesson: Dict[int, list] = {}
-        for sid, lid, is_optional in db.query(Step.id, Step.lesson_id, Step.is_optional).filter(
-            Step.lesson_id.in_(remaining_ids)
-        ).all():
-            steps_by_lesson.setdefault(lid, []).append((sid, bool(is_optional)))
-        for lid in remaining_ids:
-            lesson_steps = steps_by_lesson.get(lid, [])
-            required = [s for s in lesson_steps if not s[1]] or lesson_steps
-            if required and all(sid in completed_step_ids for sid, _ in required):
-                completed_ids.add(lid)
-
+    completed_ids = completed_lesson_ids(db, user_id, lesson_ids)
     missing_ids = [lid for lid in lesson_ids if lid not in completed_ids]
     titles = {}
     if missing_ids:
-        for lid, title in db.query(Lesson.id, Lesson.title).filter(
-            Lesson.id.in_(missing_ids)
-        ).all():
+        for lid, title in db.query(Lesson.id, Lesson.title).filter(Lesson.id.in_(missing_ids)).all():
             titles[lid] = title
     missing = [{"lesson_id": lid, "title": titles.get(lid, "")} for lid in missing_ids]
     return {
