@@ -28,6 +28,8 @@ class QuizQuestion(BaseModel):
     expected_length: Optional[int] = None
     keywords: Optional[List[str]] = None
     matching_pairs: Optional[List[MatchingPair]] = None
+    # SAT Checkpoints: easy | medium | hard (5/5/5 per unit, ТЗ §7). Optional everywhere else.
+    difficulty: Optional[str] = None
 
 
 class QuizData(BaseModel):
