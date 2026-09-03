@@ -112,6 +112,11 @@ def _base(assignment, content: dict, now: datetime) -> dict:
     }
 
 
+def assignment_summary(assignment, now: Optional[datetime] = None) -> dict:
+    """The set-level facts of a platform-test assignment (no student in scope)."""
+    return _base(assignment, json.loads(assignment.content or "{}"), now or _utcnow())
+
+
 def student_progress(db: Session, assignment, user_id: int, now: Optional[datetime] = None) -> dict:
     now = now or _utcnow()
     content = json.loads(assignment.content or "{}")

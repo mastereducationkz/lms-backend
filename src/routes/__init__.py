@@ -30,6 +30,7 @@ def register_routes(app: FastAPI):
     from src.reports.routes import router as reports_router
     from src.integrations.routes import router as integrations_router
     from src.integrations.handoff_routes import handoff_router, wellknown_router
+    from src.integrations.assignment_routes import platform_assignments_router
 
     app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
     app.include_router(admin_router, prefix="/admin", tags=["Admin"])
@@ -71,5 +72,6 @@ def register_routes(app: FastAPI):
     app.include_router(support_api_router, prefix="/support-api", tags=["Support API"])
     app.include_router(reports_router, prefix="/reports", tags=["Reports"])
     app.include_router(integrations_router, prefix="/integrations", tags=["Platform Integrations"])
+    app.include_router(platform_assignments_router, prefix="/integrations", tags=["Platform Integrations"])
     app.include_router(handoff_router, prefix="/handoff", tags=["Platform Handoff"])
     app.include_router(wellknown_router, tags=["Platform Handoff"])
