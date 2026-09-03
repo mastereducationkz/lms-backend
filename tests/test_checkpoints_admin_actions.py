@@ -129,3 +129,33 @@ def test_serialize_for_student_locked_and_open(db):
     item = service.serialize_for_student(db, s1.id, group, d1, row)
     assert item["status"] == "available" and item["quiz"] == {"course_id": quiz_course.id, "lesson_id": quiz_lesson.id}
     assert item["deadline"] is not None and item["locked_reason"] is None
+
+
+def test_disabling_the_group_revokes_an_open_checkpoint(db):
+    """Turning checkpoints off for a group must actually take the checkpoint away, not just hide it."""
+    from src.checkpoints import service
+    admin, course, quiz_course, quiz_lesson, quiz_step, d1, group, s1, _ = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id)
+    assert service.assert_can_submit(db, s1.id, d1)          # sanity: open
+    assert service.student_has_checkpoint_access_to_course(db, s1.id, quiz_course.id) is True
+
+    group.checkpoints_enabled = False
+    db.flush()
+    with pytest.raises(HTTPException) as e:
+        service.assert_can_submit(db, s1.id, d1)
+    assert e.value.status_code == 403
+    assert service.student_has_checkpoint_access_to_course(db, s1.id, quiz_course.id) is False
+    assert service.open_checkpoint_lesson_ids_for_student(db, s1.id) == set()
+
+
+def test_deactivating_the_definition_revokes_an_open_checkpoint(db):
+    from src.checkpoints import service
+    admin, course, quiz_course, quiz_lesson, quiz_step, d1, group, s1, _ = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id)
+    d1.is_active = False
+    db.flush()
+    with pytest.raises(HTTPException) as e:
+        service.assert_can_submit(db, s1.id, d1)
+    assert e.value.status_code == 403
+    assert service.student_has_checkpoint_access_to_course(db, s1.id, quiz_course.id) is False
+    assert service.open_checkpoint_lesson_ids_for_student(db, s1.id) == set()
