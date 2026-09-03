@@ -3,7 +3,7 @@ from src.models.base import Base
 # Registered here so `Base.metadata.create_all` and Alembic autogenerate both see it.
 from src.crm_audit.models import CrmAuditOutbox
 from src.integrations.models import (  # noqa: F401
-    PlatformEvent, PlatformResult, PlatformTestAssignment, PlatformWeeklySet,
+    PlatformEvent, PlatformResult, PlatformTestAssignment, PlatformWeeklySet, StudentTarget,
 )
 
 # Imported as a module rather than by name. Unlike the domain models below, this one also
