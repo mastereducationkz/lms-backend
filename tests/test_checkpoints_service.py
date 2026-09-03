@@ -109,3 +109,25 @@ def test_refresh_overdue_flips_only_open_rows_past_deadline(db):
     db.add_all([a, b]); db.flush()
     flipped = service.refresh_overdue([a, b], now)
     assert flipped == [a] and a.status == "overdue" and b.status == "completed"
+
+
+def test_archived_group_revokes_checkpoint_access(db):
+    """`enabled_groups_for_student` already skips archived groups, but the three access helpers
+    only looked at `checkpoints_enabled` — so a row in a group that had been archived still let
+    the student open the hidden quiz course and submit."""
+    from fastapi import HTTPException
+    from src.checkpoints import service
+    admin, course, v, m, d1, d2, group, s = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id)
+    quiz_course_id = service.quiz_ref(db, d1)["course_id"]
+    assert service.assert_can_submit(db, s.id, d1)
+    assert service.student_has_checkpoint_access_to_course(db, s.id, quiz_course_id) is True
+    assert d1.quiz_lesson_id in service.open_checkpoint_lesson_ids_for_student(db, s.id)
+
+    group.is_active = False
+    db.flush()
+    with pytest.raises(HTTPException) as e:
+        service.assert_can_submit(db, s.id, d1)
+    assert e.value.status_code == 403
+    assert service.student_has_checkpoint_access_to_course(db, s.id, quiz_course_id) is False
+    assert d1.quiz_lesson_id not in service.open_checkpoint_lesson_ids_for_student(db, s.id)

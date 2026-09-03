@@ -391,7 +391,8 @@ def _rows_for_student_definition(db: Session, student_id: int, definition: Check
 def _live_rows_for_student_definition(db: Session, student_id: int,
                                       definition: CheckpointDefinition) -> List[StudentCheckpoint]:
     """Rows that still confer anything: the definition must still be active AND the row's group
-    must still have checkpoints enabled. Disabling either revokes access, it does not merely hide."""
+    must still be live with checkpoints enabled. Disabling any of the three revokes access, it
+    does not merely hide."""
     if not definition.is_active:
         return []
     return db.query(StudentCheckpoint).join(
@@ -400,6 +401,7 @@ def _live_rows_for_student_definition(db: Session, student_id: int,
         StudentCheckpoint.student_id == student_id,
         StudentCheckpoint.checkpoint_id == definition.id,
         Group.checkpoints_enabled == True,  # noqa: E712
+        Group.is_active == True,  # noqa: E712
     ).order_by(StudentCheckpoint.id).all()
 
 
@@ -466,8 +468,8 @@ def checkpoint_quiz_lesson_ids(db: Session) -> set:
 
 
 def open_checkpoint_lesson_ids_for_student(db: Session, student_id: int) -> set:
-    """Quiz lessons this student may actually open: a non-locked row, in a group that still has
-    checkpoints enabled, on a definition that is still active."""
+    """Quiz lessons this student may actually open: a non-locked row, in a live group that still
+    has checkpoints enabled, on a definition that is still active."""
     return {r[0] for r in db.query(CheckpointDefinition.quiz_lesson_id).join(
         StudentCheckpoint, StudentCheckpoint.checkpoint_id == CheckpointDefinition.id
     ).join(Group, Group.id == StudentCheckpoint.group_id).filter(
@@ -476,6 +478,7 @@ def open_checkpoint_lesson_ids_for_student(db: Session, student_id: int) -> set:
         CheckpointDefinition.quiz_lesson_id.isnot(None),
         CheckpointDefinition.is_active == True,  # noqa: E712
         Group.checkpoints_enabled == True,  # noqa: E712
+        Group.is_active == True,  # noqa: E712
     ).all()}
 
 
@@ -514,6 +517,7 @@ def student_has_checkpoint_access_to_course(db: Session, student_id: int, course
         StudentCheckpoint.status != STATUS_LOCKED,
         CheckpointDefinition.is_active == True,  # noqa: E712
         Group.checkpoints_enabled == True,  # noqa: E712
+        Group.is_active == True,  # noqa: E712
         Module.course_id == course_id,
     ).first() is not None
 
