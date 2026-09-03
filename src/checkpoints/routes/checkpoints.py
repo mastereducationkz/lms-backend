@@ -34,18 +34,13 @@ def get_my_checkpoints(
     if not groups:
         return {"enabled": False, "items": []}
 
-    service.sync_student_checkpoints(db, current_user.id, commit=True)
-    now = service.utcnow()
-    items = []
-    dirty = False
-    for group in groups:
-        for definition in service.definitions_for_group(db, group):
-            row = service.get_row(db, current_user.id, group.id, definition.id)
-            if row is not None and service.refresh_overdue([row], now):
-                dirty = True
-            items.append(service.serialize_for_student(db, current_user.id, group, definition, row))
-    if dirty:
-        db.commit()
+    # One batch of reads for the whole response: auto-open, overdue refresh and serialization all
+    # read from the same prefetched context instead of querying once per checkpoint.
+    ctx = service.student_checkpoint_context(db, current_user.id, groups)
+    service.sync_student_checkpoints(db, current_user.id, groups=groups, ctx=ctx, commit=False)
+    service.refresh_overdue(ctx.rows.values(), service.utcnow())
+    items = service.serialize_items_for_student(db, current_user.id, groups, ctx=ctx)
+    db.commit()
     return {"enabled": True, "items": items}
 
 

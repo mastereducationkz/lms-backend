@@ -18,7 +18,7 @@ from src.checkpoints.models import (
     OPEN_STATUSES, STATUS_AVAILABLE, STATUS_COMPLETED, STATUS_LOCKED, STATUS_OVERDUE,
     STATUS_REOPENED, CheckpointDefinition, StudentCheckpoint,
 )
-from src.courses.models import Group, GroupStudent, Lesson, Module, Step
+from src.courses.models import CourseGroupAccess, Group, GroupStudent, Lesson, Module, Step
 from src.progress.models import QuizAttempt
 from src.utils.permissions import get_group_course_ids
 
@@ -90,6 +90,74 @@ def locked_reason(units: List[Dict[str, Any]]) -> Optional[str]:
     return "Locked — waiting for " + ", ".join(missing)
 
 
+# ---------------------------------------------------------------- batched context
+
+class StudentCheckpointContext:
+    """Every read GET /checkpoints/me needs, done once instead of once per checkpoint.
+
+    Serving 9 checkpoints used to cost ~55 statements (per-item unit progress, lesson titles and
+    quiz-course lookups); with this the whole route is a fixed handful regardless of how many
+    checkpoints or groups the student has.
+    """
+
+    __slots__ = ("definitions_by_group", "rows", "completed", "titles", "quiz_course_by_lesson")
+
+    def __init__(self, definitions_by_group, rows, completed, titles, quiz_course_by_lesson):
+        self.definitions_by_group = definitions_by_group
+        self.rows = rows
+        self.completed = completed
+        self.titles = titles
+        self.quiz_course_by_lesson = quiz_course_by_lesson
+
+
+def student_checkpoint_context(db: Session, student_id: int,
+                               groups: List[Group]) -> StudentCheckpointContext:
+    group_ids = [g.id for g in groups]
+    course_ids_by_group: Dict[int, List[int]] = {gid: [] for gid in group_ids}
+    if group_ids:
+        for gid, cid in db.query(CourseGroupAccess.group_id, CourseGroupAccess.course_id).filter(
+            CourseGroupAccess.group_id.in_(group_ids),
+            CourseGroupAccess.is_active == True,  # noqa: E712
+        ).all():
+            course_ids_by_group[gid].append(cid)
+
+    course_ids = sorted({cid for cids in course_ids_by_group.values() for cid in cids})
+    definitions = db.query(CheckpointDefinition).filter(
+        CheckpointDefinition.course_id.in_(course_ids),
+        CheckpointDefinition.is_active == True,  # noqa: E712
+    ).order_by(CheckpointDefinition.number).all() if course_ids else []
+    by_course: Dict[int, List[CheckpointDefinition]] = {}
+    for d in definitions:
+        by_course.setdefault(d.course_id, []).append(d)
+    definitions_by_group: Dict[int, List[CheckpointDefinition]] = {}
+    for gid in group_ids:
+        seen = {d.id: d for cid in course_ids_by_group[gid] for d in by_course.get(cid, [])}
+        definitions_by_group[gid] = sorted(seen.values(), key=lambda d: d.number)
+
+    rows: Dict[tuple, StudentCheckpoint] = {}
+    if group_ids:
+        for r in db.query(StudentCheckpoint).filter(
+            StudentCheckpoint.student_id == student_id,
+            StudentCheckpoint.group_id.in_(group_ids),
+        ).all():
+            rows[(r.group_id, r.checkpoint_id)] = r
+
+    required_ids = list(dict.fromkeys(
+        u.lesson_id for ds in definitions_by_group.values() for d in ds for u in d.required_units))
+    completed = completed_lesson_ids(db, student_id, required_ids)
+    titles = dict(db.query(Lesson.id, Lesson.title).filter(
+        Lesson.id.in_(required_ids)).all()) if required_ids else {}
+
+    quiz_lesson_ids = list(dict.fromkeys(
+        d.quiz_lesson_id for ds in definitions_by_group.values() for d in ds
+        if d.quiz_lesson_id is not None))
+    quiz_course_by_lesson = dict(db.query(Lesson.id, Module.course_id).join(
+        Module, Module.id == Lesson.module_id).filter(
+        Lesson.id.in_(quiz_lesson_ids)).all()) if quiz_lesson_ids else {}
+
+    return StudentCheckpointContext(definitions_by_group, rows, completed, titles, quiz_course_by_lesson)
+
+
 # ---------------------------------------------------------------- auto-open
 
 def _open_row(row: Optional[StudentCheckpoint], *, student_id: int, group_id: int,
@@ -108,25 +176,34 @@ def _open_row(row: Optional[StudentCheckpoint], *, student_id: int, group_id: in
     return row
 
 
-def _open_eligible_checkpoints(db: Session, student_id: int, now: datetime,
-                               keys: List[tuple]) -> List[StudentCheckpoint]:
+def _open_eligible_checkpoints(db: Session, student_id: int, now: datetime, keys: List[tuple], *,
+                               groups: Optional[List[Group]] = None,
+                               ctx: Optional[StudentCheckpointContext] = None) -> List[StudentCheckpoint]:
+    if groups is None:
+        groups = enabled_groups_for_student(db, student_id)
     opened: List[StudentCheckpoint] = []
-    for group in enabled_groups_for_student(db, student_id):
-        for definition in definitions_for_group(db, group):
+    for group in groups:
+        definitions = (ctx.definitions_by_group.get(group.id, []) if ctx is not None
+                       else definitions_for_group(db, group))
+        for definition in definitions:
             if definition.number < (group.checkpoints_start_number or 1):
                 continue
             required = [u.lesson_id for u in definition.required_units]
             if not required:
                 continue
-            row = get_row(db, student_id, group.id, definition.id)
+            row = (ctx.rows.get((group.id, definition.id)) if ctx is not None
+                   else get_row(db, student_id, group.id, definition.id))
             if row is not None and row.status != STATUS_LOCKED:
                 continue
-            if set(required) <= completed_lesson_ids(db, student_id, required):
+            done = ctx.completed if ctx is not None else completed_lesson_ids(db, student_id, required)
+            if set(required) <= done:
                 row = _open_row(row, student_id=student_id, group_id=group.id, definition=definition,
                                 now=now, opened_by="auto", deadline=None, actor_id=None)
                 db.add(row)
                 opened.append(row)
                 keys.append((group.id, definition.id))
+                if ctx is not None:
+                    ctx.rows[(group.id, definition.id)] = row
     return opened
 
 
@@ -141,7 +218,8 @@ def _rows_for_keys(db: Session, student_id: int, keys: List[tuple]) -> List[Stud
 
 
 def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[datetime] = None,
-                             commit: bool = True) -> List[StudentCheckpoint]:
+                             commit: bool = True, groups: Optional[List[Group]] = None,
+                             ctx: Optional[StudentCheckpointContext] = None) -> List[StudentCheckpoint]:
     """Open every checkpoint whose required units the student has completed, in every enabled
     group. Idempotent: rows that are already open/completed/overdue/reopened are left alone.
 
@@ -153,7 +231,7 @@ def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[date
     now = now or utcnow()
     keys: List[tuple] = []
     try:
-        opened = _open_eligible_checkpoints(db, student_id, now, keys)
+        opened = _open_eligible_checkpoints(db, student_id, now, keys, groups=groups, ctx=ctx)
         if opened:
             db.flush()
             if commit:
@@ -163,7 +241,13 @@ def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[date
         _log.info("checkpoint open raced for student %s (keys=%s); reusing the existing rows",
                   student_id, keys)
         db.rollback()
-        return _rows_for_keys(db, student_id, keys)
+        existing = _rows_for_keys(db, student_id, keys)
+        if ctx is not None:
+            for key in keys:
+                ctx.rows.pop(key, None)
+            for r in existing:
+                ctx.rows[(r.group_id, r.checkpoint_id)] = r
+        return existing
 
 
 def sync_group(db: Session, group: Group, *, now: Optional[datetime] = None, commit: bool = True) -> int:
@@ -435,6 +519,42 @@ def serialize_row(row: Optional[StudentCheckpoint]) -> Dict[str, Any]:
         "total_questions": row.total_questions, "percentage": row.percentage,
         "opened_by": row.opened_by, "reopen_count": row.reopen_count or 0, "quiz_attempt_id": row.quiz_attempt_id,
     }
+
+
+def _serialize_item(group: Group, definition: CheckpointDefinition,
+                    row: Optional[StudentCheckpoint], ctx: StudentCheckpointContext) -> Dict[str, Any]:
+    """Same payload as serialize_for_student, but every lookup comes from the prefetched context."""
+    units = [{"lesson_id": u.lesson_id, "title": ctx.titles.get(u.lesson_id, ""), "kind": u.kind,
+              "completed": u.lesson_id in ctx.completed} for u in definition.required_units]
+    base = serialize_row(row)
+    status = base["status"]
+    quiz = None
+    if status != STATUS_LOCKED and definition.quiz_lesson_id is not None:
+        course_id = ctx.quiz_course_by_lesson.get(definition.quiz_lesson_id)
+        if course_id is not None:
+            quiz = {"course_id": int(course_id), "lesson_id": int(definition.quiz_lesson_id)}
+    base.update({
+        "checkpoint_id": definition.id,
+        "number": definition.number,
+        "title": definition.title,
+        "group_id": group.id,
+        "group_name": group.name,
+        "covers": units,
+        "total_questions": base["total_questions"] or definition.total_questions,
+        "locked_reason": locked_reason(units) if status == STATUS_LOCKED else None,
+        "quiz": quiz,
+    })
+    return base
+
+
+def serialize_items_for_student(db: Session, student_id: int, groups: List[Group], *,
+                                ctx: Optional[StudentCheckpointContext] = None) -> List[Dict[str, Any]]:
+    """Every checkpoint item for a student, in one batch of queries."""
+    if ctx is None:
+        ctx = student_checkpoint_context(db, student_id, groups)
+    return [_serialize_item(group, definition, ctx.rows.get((group.id, definition.id)), ctx)
+            for group in groups
+            for definition in ctx.definitions_by_group.get(group.id, [])]
 
 
 def serialize_for_student(db: Session, student_id: int, group: Group, definition: CheckpointDefinition,

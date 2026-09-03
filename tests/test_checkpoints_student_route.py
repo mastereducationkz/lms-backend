@@ -99,3 +99,30 @@ def test_concurrent_open_race_does_not_500(db, monkeypatch):
     assert out["enabled"] is True
     assert [i["number"] for i in out["items"]] == [1, 2]
     assert all("status" in i and "covers" in i for i in out["items"])
+
+
+def test_get_my_checkpoints_is_batched(db):
+    """GET /checkpoints/me used to fan out ~55 statements (per-item unit progress, titles and
+    quiz lookups). Everything is batched now — keep it that way."""
+    from sqlalchemy import event
+    from src.config import engine
+    from src.checkpoints.routes.checkpoints import get_my_checkpoints
+    _, course, v, m, d1, d2, group, s = _world(db)
+    for l in (v[0], v[1], m[0]):
+        complete_lesson_explicit(db, s, course, l)
+    db.commit()
+
+    seen = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE")):
+            seen.append(statement.split("\n")[0])
+
+    try:
+        out = get_my_checkpoints(current_user=s, db=db)
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+
+    assert [(i["number"], i["status"]) for i in out["items"]] == [(1, "available"), (2, "locked")]
+    assert len(seen) <= 12, f"{len(seen)} statements:\n" + "\n".join(seen)
