@@ -523,10 +523,20 @@ def mark_lesson_complete(
         if assignment_ready_for_student(current_user.id, assignment, db)["ready"]:
             newly_ready.append({"id": assignment.id, "title": assignment.title})
 
+    # SAT Checkpoints: a completed unit may be the last required one of a block.
+    from src.checkpoints import service as checkpoint_service
+    newly_opened = checkpoint_service.sync_student_checkpoints(db, current_user.id, commit=True)
+
     return {
         "detail": "Lesson marked as complete",
         "time_spent": time_spent,
         "newly_ready_assignments": newly_ready,
+        "newly_opened_checkpoints": [
+            {"checkpoint_id": r.checkpoint_id, "number": r.checkpoint_number,
+             "title": r.definition.title if r.definition else f"Checkpoint {r.checkpoint_number}",
+             "deadline": checkpoint_service.naive(r.deadline).isoformat() + "Z" if r.deadline else None}
+            for r in newly_opened
+        ],
     }
 
 @router.post("/lesson/{lesson_id}/start")
@@ -1316,10 +1326,14 @@ def mark_step_visited(
     
     # Создаем снимок прогресса (если еще нет на сегодня)
     create_progress_snapshot(current_user.id, module.course_id, db)
-    
+
     db.commit()
     db.refresh(step_progress)
-    
+
+    # SAT Checkpoints: lessons are normally finished step-by-step (no explicit lesson-complete call).
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_service.sync_student_checkpoints(db, current_user.id, commit=True)
+
     return StepProgressSchema.from_orm(step_progress)
 
 @router.get("/step/{step_id}", response_model=StepProgressSchema)
@@ -1784,6 +1798,13 @@ def create_quiz_attempt(
     db: Session = Depends(get_db)
 ):
     """Сохранить попытку прохождения квиза или обновить черновик"""
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_definition = checkpoint_service.checkpoint_definition_for_step(db, attempt_data.step_id)
+    if checkpoint_definition is not None:
+        if current_user.role != "student":
+            raise HTTPException(status_code=403, detail="Only students take checkpoints")
+        checkpoint_service.assert_can_submit(db, current_user.id, checkpoint_definition)
+
     try:
         _forbid_special_group_manual_quiz(attempt_data.step_id, attempt_data.answers, current_user, db)
 
@@ -1833,6 +1854,8 @@ def create_quiz_attempt(
             db.commit()
             db.refresh(existing_draft)
             if not attempt_data.is_draft:
+                if checkpoint_definition is not None:
+                    checkpoint_service.record_submission(db, current_user.id, existing_draft)
                 _maybe_award_course_quiz_points(
                     db,
                     user_id=existing_draft.user_id,
@@ -1869,6 +1892,8 @@ def create_quiz_attempt(
         db.refresh(quiz_attempt)
 
         if not attempt_data.is_draft:
+            if checkpoint_definition is not None:
+                checkpoint_service.record_submission(db, current_user.id, quiz_attempt)
             _maybe_award_course_quiz_points(
                 db,
                 user_id=quiz_attempt.user_id,
