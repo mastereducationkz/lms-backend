@@ -18,7 +18,7 @@ from src.auth.models import UserInDB
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
 from src.integrations import targets_progress as tp
-from src.integrations.models import PlatformResult, PlatformWeeklySet, StudentTarget
+from src.integrations.models import PlatformDiagnostic, PlatformResult, PlatformWeeklySet, StudentTarget
 from src.integrations.targets_routes import targets_router
 from src.parents.models import ParentStudent
 from src.routes.auth import get_current_user_dependency
@@ -41,7 +41,7 @@ NOW = datetime(2026, 9, 3, 10, 0)
 def db():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     for model in (UserInDB, Group, GroupStudent, AssignmentZeroSubmission, ParentStudent,
-                  PlatformResult, PlatformWeeklySet, StudentTarget):
+                  PlatformResult, PlatformWeeklySet, StudentTarget, PlatformDiagnostic):
         model.__table__.create(bind=engine)
     session = sessionmaker(bind=engine)()
     try:

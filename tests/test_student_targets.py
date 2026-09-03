@@ -19,7 +19,7 @@ from src.assignments.models import AssignmentZeroSubmission
 from src.auth.models import UserInDB
 from src.integrations import targets as tg
 from src.integrations import targets_progress as tp
-from src.integrations.models import PlatformResult, PlatformWeeklySet, StudentTarget
+from src.integrations.models import PlatformDiagnostic, PlatformResult, PlatformWeeklySet, StudentTarget
 
 
 @compiles(JSONB, "sqlite")
@@ -35,7 +35,8 @@ def _array_as_json(type_, compiler, **kw):
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite:///:memory:")
-    for model in (UserInDB, AssignmentZeroSubmission, PlatformResult, PlatformWeeklySet, StudentTarget):
+    for model in (UserInDB, AssignmentZeroSubmission, PlatformResult, PlatformWeeklySet, StudentTarget,
+                  PlatformDiagnostic):
         model.__table__.create(bind=engine)
     session = sessionmaker(bind=engine)()
     try:

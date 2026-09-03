@@ -78,3 +78,14 @@ class IELTSService:
         if not had_error:
             cache_service.set_json(cache_key, merged, ttl_seconds=_CACHE_TTL_SECONDS)
         return merged
+
+    @staticmethod
+    async def fetch_batch_diagnostic(students: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Diagnostic entry bands for up to 500 students (Platform Integration Pack §2.6).
+          POST /api/lms/students/batch-diagnostic  {"students": [{"email", "central_auth_user_id"?}]}
+        Returns {"results": [{"email", "found", "diagnostic": null | {...}}]} in input order; {} / None on
+        the platform's 404 / error like the other calls. Never call this from a student request."""
+        if not students:
+            return {"results": []}
+        data = await IELTSService._post("/students/batch-diagnostic", {"students": students}, timeout=30.0)
+        return data if data else {"results": []}

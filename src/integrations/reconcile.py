@@ -242,8 +242,16 @@ def run_nightly(db: Session) -> dict:
         "re_resolved": re_resolve_unresolved(db),
         "reconcile": reconcile_ielts(db),
         "assignments": sync_platform_assignments(db),
+        "diagnostics": refresh_platform_diagnostics(db),
         "pruned": prune_events(db),
     }
+
+
+def refresh_platform_diagnostics(db: Session) -> dict:
+    """E5: refresh the stored IELTS diagnostic entry bands (no-op unless PLATFORM_TARGETS_ENABLED)."""
+    from src.integrations import diagnostics
+
+    return diagnostics.refresh_diagnostics(db)
 
 
 # --- scheduling ------------------------------------------------------------------------
