@@ -215,3 +215,34 @@ def test_list_groups_counts_students_in_one_query(db):
     counts = {g["id"]: g["student_count"] for g in out}
     assert counts[group.id] == 2 and counts[other.id] == 1 and counts[empty.id] == 0
     assert len(seen) <= 4, f"{len(seen)} statements:\n" + "\n".join(seen)
+
+
+def test_active_definition_cannot_be_edited_into_a_question_mismatch(db):
+    """The guard used to read `body.is_active`, so it never fired on a definition that was
+    ALREADY active — an admin could retune total_questions (or repoint the quiz) on a live
+    checkpoint and publish a mismatch to every enabled group."""
+    from src.checkpoints.routes import checkpoints as r
+    from tests.checkpoint_fixtures import make_quiz_lesson
+    admin, course, v, m, _, d1, _, _, _ = _world(db)           # active, linked quiz has 2 questions
+    assert r.update_definition(d1.id, DefinitionUpdate(total_questions=2),
+                               current_user=admin, db=db)["total_questions"] == 2
+    with pytest.raises(HTTPException) as e:
+        r.update_definition(d1.id, DefinitionUpdate(total_questions=45), current_user=admin, db=db)
+    assert e.value.status_code == 400 and "45" in e.value.detail
+    # repointing a live checkpoint at a quiz of the wrong size is refused the same way
+    _, other_lesson, _ = make_quiz_lesson(db, title="Checkpoint 9", n_questions=5)
+    with pytest.raises(HTTPException) as e:
+        r.update_definition(d1.id, DefinitionUpdate(quiz_lesson_id=other_lesson.id),
+                            current_user=admin, db=db)
+    assert e.value.status_code == 400
+    # ...but the row itself is untouched by the rejected requests
+    db.refresh(d1)
+    assert d1.total_questions == 2 and d1.quiz_lesson_id != other_lesson.id
+
+
+def test_editing_an_active_definition_without_touching_the_quiz_is_allowed(db):
+    """A title or required-units edit must not be blocked by a pre-existing mismatch."""
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, _, _, _ = _world(db)           # active, expects 45, quiz has 2
+    out = r.update_definition(d1.id, DefinitionUpdate(title="Checkpoint one"), current_user=admin, db=db)
+    assert out["title"] == "Checkpoint one" and out["is_active"] is True

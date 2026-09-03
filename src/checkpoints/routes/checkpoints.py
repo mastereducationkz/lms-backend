@@ -141,15 +141,24 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
         if clash is not None:
             raise HTTPException(status_code=400,
                                 detail=f"Quiz lesson {body.quiz_lesson_id} is already used by checkpoint {clash[0]}")
-    if body.is_active:
-        # Activating publishes the checkpoint to every enabled group, so refuse if the linked quiz
-        # does not actually hold the expected number of questions. (Difficulty imbalance stays
-        # advisory — the quiz-check endpoint reports it.)
+    will_be_active = d.is_active if body.is_active is None else body.is_active
+    retunes_quiz = ((body.total_questions is not None and body.total_questions != d.total_questions)
+                    or (body.quiz_lesson_id is not None and body.quiz_lesson_id != d.quiz_lesson_id)
+                    or (body.is_active is True and not d.is_active))
+    if will_be_active and retunes_quiz:
+        # An active checkpoint is published to every enabled group, so refuse any change that
+        # would leave it pointing at a quiz that does not hold the expected number of questions —
+        # activation, retuning total_questions, or repointing at another quiz. Reading
+        # `body.is_active` alone missed the last two on an already-active definition.
+        # Edits that do not touch the quiz (title, required units) stay allowed, so a legacy
+        # mismatch never blocks unrelated admin work. (Difficulty imbalance stays advisory —
+        # the quiz-check endpoint reports it.)
         found = len(_quiz_questions_for_lesson(db, quiz_lesson_id))
         if found != total_questions:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot activate: the linked quiz has {found} questions, expected {total_questions}")
+                detail=f"An active checkpoint must match its quiz: the linked quiz has {found} "
+                       f"questions, expected {total_questions}")
 
     if body.title is not None:
         d.title = body.title
