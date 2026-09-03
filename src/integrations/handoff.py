@@ -68,6 +68,14 @@ def handoff_enabled() -> bool:
     return os.getenv("HANDOFF_ENABLED", "").strip().lower() in _TRUTHY
 
 
+def enabled_platforms() -> set[str]:
+    """Platforms that actually redeem handoff tokens (``HANDOFF_PLATFORMS``, default ielts).
+    A platform without a redeem endpoint answers 503 on mint so clients fall back to its
+    bare host instead of sending students to a page that does not exist."""
+    raw = os.getenv("HANDOFF_PLATFORMS", "ielts")
+    return {p.strip().lower() for p in raw.split(",") if p.strip()} & set(PLATFORMS)
+
+
 def platform_base_url(platform: str) -> str:
     return (os.getenv(f"{platform.upper()}_PLATFORM_URL", "").strip() or _DEFAULT_PLATFORM_URLS[platform]).rstrip("/")
 
@@ -180,6 +188,8 @@ def mint_handoff(user, platform: str, return_to: str) -> dict:
     platform = (platform or "").strip().lower()
     if platform not in PLATFORMS:
         raise HandoffError(400, "unknown platform")
+    if platform not in enabled_platforms():
+        raise HandoffError(503, f"handoff is not enabled for {platform}")
     role = token_role(getattr(user, "role", None))
     if role is None:
         raise HandoffError(403, "this account has no platform access")

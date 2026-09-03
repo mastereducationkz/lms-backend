@@ -204,3 +204,25 @@ def test_jwks_503_without_key(make_client, monkeypatch):
     monkeypatch.delenv("HANDOFF_PRIVATE_KEY_PEM", raising=False)
     handoff.reset_caches()
     assert make_client(_user()).get("/.well-known/handoff-jwks.json").status_code == 503
+
+
+# --- platforms that may be handed to (HANDOFF_PLATFORMS, default "ielts") --------------
+
+def test_mint_503_for_a_platform_without_a_redeem_endpoint(make_client, monkeypatch):
+    # SAT has no redeem yet: the client must fall back to the bare host, i.e. see a 503.
+    monkeypatch.delenv("HANDOFF_PLATFORMS", raising=False)
+    resp = make_client(_user()).post("/handoff/mint", json={"platform": "sat", "return_to": "/"})
+    assert resp.status_code == 503
+
+
+def test_mint_allows_platforms_listed_in_env(make_client, monkeypatch):
+    monkeypatch.setenv("HANDOFF_PLATFORMS", "ielts, sat")
+    client = make_client(_user())
+    assert client.post("/handoff/mint", json={"platform": "sat", "return_to": "/"}).status_code == 200
+    assert client.post("/handoff/mint", json={"platform": "ielts", "return_to": "/"}).status_code == 200
+
+
+def test_unknown_platform_is_still_400_not_503(make_client, monkeypatch):
+    monkeypatch.setenv("HANDOFF_PLATFORMS", "ielts, sat")
+    resp = make_client(_user()).post("/handoff/mint", json={"platform": "toefl", "return_to": "/"})
+    assert resp.status_code == 400
