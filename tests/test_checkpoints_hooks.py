@@ -152,3 +152,56 @@ def test_sync_failure_does_not_break_lesson_complete(db, monkeypatch):
     monkeypatch.setattr(service, "sync_student_checkpoints", boom)
     out = progress_routes.mark_lesson_complete(m[0].id, time_spent=0, current_user=s, db=db)
     assert out["detail"] == "Lesson marked as complete" and out["newly_opened_checkpoints"] == []
+
+
+def _update_payload(**kwargs):
+    from src.progress.schemas import QuizAttemptUpdateSchema
+    return QuizAttemptUpdateSchema(**kwargs)
+
+
+def test_patch_finalize_records_checkpoint_submission(db):
+    """The web player autosaves a draft (POST) and finalizes via PATCH — that path must record."""
+    from src.progress.routes.progress import create_quiz_attempt, update_quiz_attempt
+    from src.checkpoints import service
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id)
+    draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True),
+                                current_user=s, db=db)
+    assert draft.is_draft is True
+    final = update_quiz_attempt(draft.id, _update_payload(is_draft=False, correct_answers=40,
+                                                          total_questions=45, score_percentage=88.89,
+                                                          is_graded=True),
+                                current_user=s, db=db)
+    assert final.is_draft is False
+    row = service.get_row(db, s.id, group.id, d1.id)
+    assert row.status == "completed" and row.quiz_attempt_id == final.id and row.correct_answers == 40
+
+
+def test_patch_finalize_past_deadline_is_rejected(db):
+    """Drafts are deadline-exempt, so the deadline must be enforced on the PATCH finalize."""
+    from datetime import timedelta
+    from src.progress.routes.progress import create_quiz_attempt, update_quiz_attempt
+    from src.checkpoints import service
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
+                              now=service.utcnow() - timedelta(days=2))
+    draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True),
+                                current_user=s, db=db)
+    with pytest.raises(HTTPException) as e:
+        update_quiz_attempt(draft.id, _update_payload(is_draft=False, correct_answers=40),
+                            current_user=s, db=db)
+    assert e.value.status_code == 409
+    assert db.get(type(draft), draft.id).is_draft is True
+
+
+def test_patch_draft_autosave_not_deadline_gated(db):
+    from datetime import timedelta
+    from src.progress.routes.progress import create_quiz_attempt, update_quiz_attempt
+    from src.checkpoints import service
+    admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
+    service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
+                              now=service.utcnow() - timedelta(days=2))
+    draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True),
+                                current_user=s, db=db)
+    saved = update_quiz_attempt(draft.id, _update_payload(answers='{"q0": 0}'), current_user=s, db=db)
+    assert saved.is_draft is True and saved.answers == '{"q0": 0}'

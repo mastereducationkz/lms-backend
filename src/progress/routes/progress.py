@@ -1944,13 +1944,27 @@ def update_quiz_attempt(
     
     if not attempt:
         raise HTTPException(status_code=404, detail="Quiz attempt not found")
+
+    # SAT Checkpoints: the web player autosaves a draft (POST) and finalizes through THIS route,
+    # so the gate has to live here too — only the finalize (`is_draft: false`) is deadline-gated,
+    # drafts stay exempt exactly like on POST /progress/quiz-attempt.
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_definition = checkpoint_service.checkpoint_definition_for_step(db, attempt.step_id)
+    if checkpoint_definition is not None:
+        if current_user.role != "student":
+            raise HTTPException(status_code=403, detail="Only students take checkpoints")
+        checkpoint_service.assert_can_submit(
+            db, current_user.id, checkpoint_definition,
+            allow_past_deadline=(update_data.is_draft is not False),
+        )
+
     _forbid_special_group_manual_quiz(
         attempt.step_id,
         update_data.answers if update_data.answers is not None else attempt.answers,
         current_user,
         db,
     )
-    
+
     try:
         was_draft = attempt.is_draft
         if update_data.answers is not None:
@@ -1978,6 +1992,12 @@ def update_quiz_attempt(
         db.refresh(attempt)
 
         if was_draft and not attempt.is_draft:
+            if checkpoint_definition is not None:
+                try:
+                    checkpoint_service.record_submission(db, current_user.id, attempt)
+                except Exception:
+                    _progress_log.exception("checkpoint record_submission failed for attempt %s", attempt.id)
+                    db.rollback()
             _maybe_award_course_quiz_points(
                 db,
                 user_id=attempt.user_id,
