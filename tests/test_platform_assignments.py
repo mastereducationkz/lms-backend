@@ -321,3 +321,27 @@ def test_platform_paths_default_to_ielts_rules_only_for_ielts(db):
     assert content["modules"][0]["path"] is None and content["set_path"] is None
     assert pa.module_path("listening", 41, 13, platform="ielts") == "/exam/test/41"
     assert pa.module_path("math", 1, 61, platform="sat") is None
+
+
+# --- sets without a window (NUET "Week N" curriculum sets opened per group on the platform) -------
+
+def test_set_without_a_window_never_creates_assignments(db):
+    _group(db, "NUET-A", program="nuet")
+    ws = _set(db, set_id=50, title="Weekly Set [NUET] (Week 2)", d_from=None, d_to=None)
+    ws.track = "nuet"
+    db.commit()
+    assert pa.sync_weekly_set(db, ws, now=NOW) == {"created": 0, "updated": 0, "deactivated": 0}
+    assert pa.sync_weekly_set(db, ws, now=NOW, include_past=True)["created"] == 0
+    assert db.query(Assignment).count() == 0
+
+
+def test_existing_assignment_of_a_set_that_lost_its_window_is_deactivated(db):
+    _group(db, "NUET-A", program="nuet")
+    ws = _set(db, set_id=50, title="Weekly Set [NUET] (Week 2)")
+    ws.track = "nuet"
+    db.commit()
+    assert pa.sync_weekly_set(db, ws, now=NOW)["created"] == 1
+    ws.date_from = ws.date_to = None
+    db.commit()
+    assert pa.sync_weekly_set(db, ws, now=NOW) == {"created": 0, "updated": 0, "deactivated": 1}
+    assert db.query(Assignment).one().is_active is False
