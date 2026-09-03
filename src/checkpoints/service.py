@@ -282,14 +282,15 @@ def sync_group(db: Session, group: Group, *, now: Optional[datetime] = None, com
 # ---------------------------------------------------------------- overdue
 
 def refresh_overdue(rows: Iterable[StudentCheckpoint], now: Optional[datetime] = None) -> List[StudentCheckpoint]:
+    """Flip lapsed rows to overdue. This never changes lesson visibility (a locked row was never
+    visible; a row going from open to overdue is still non-locked), so it does not invalidate the
+    lesson caches."""
     now = now or utcnow()
     flipped = []
     for row in rows:
         if row.status in OPEN_STATUSES and row.deadline is not None and naive(row.deadline) < now:
             row.status = STATUS_OVERDUE
             flipped.append(row)
-    if flipped:
-        _invalidate_lesson_caches()
     return flipped
 
 
@@ -360,6 +361,8 @@ def reopen_for_students(db: Session, *, group: Group, definition: CheckpointDefi
 
 def set_deadline(db: Session, row: StudentCheckpoint, deadline: datetime, actor_id: int,
                  now: Optional[datetime] = None, commit: bool = True) -> StudentCheckpoint:
+    """Change a row's deadline (and un-overdue it if the new deadline is in the future). Neither
+    outcome touches locked-ness, so this does not invalidate the lesson caches."""
     now = now or utcnow()
     row.deadline = naive(deadline)
     row.updated_by = actor_id
@@ -368,7 +371,6 @@ def set_deadline(db: Session, row: StudentCheckpoint, deadline: datetime, actor_
     db.flush()
     if commit:
         db.commit()
-    _invalidate_lesson_caches()
     return row
 
 
@@ -434,7 +436,10 @@ def assert_can_submit(db: Session, student_id: int, definition: CheckpointDefini
 
 def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
                       now: Optional[datetime] = None, commit: bool = True) -> List[StudentCheckpoint]:
-    """Copy a finalized quiz attempt into every open row of that checkpoint for the student."""
+    """Copy a finalized quiz attempt into every open row of that checkpoint for the student.
+
+    Completing a checkpoint does not change lesson visibility (it goes from a non-locked status to
+    another non-locked one), so this does not invalidate the lesson caches."""
     now = now or utcnow()
     definition = checkpoint_definition_for_step(db, attempt.step_id)
     if definition is None or attempt.is_draft:
@@ -457,7 +462,6 @@ def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
         db.flush()
         if commit:
             db.commit()
-        _invalidate_lesson_caches()
     return done
 
 

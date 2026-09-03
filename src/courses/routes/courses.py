@@ -2039,6 +2039,8 @@ def get_lesson_materials(
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied")
+    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     materials = db.query(LessonMaterial).filter(

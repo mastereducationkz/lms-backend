@@ -69,6 +69,15 @@ def test_other_checkpoint_lesson_is_forbidden(db):
         assert e.value.status_code == 403
 
 
+def test_other_checkpoint_lesson_materials_are_forbidden(db):
+    from src.courses.routes.courses import get_lesson_materials
+    admin, group, s, d1, d2, _, lessons, steps = _world(db)
+    _open_cp1(db, admin, group, d1)
+    with pytest.raises(HTTPException) as e:
+        get_lesson_materials(lessons[1].id, current_user=s, db=db)
+    assert e.value.status_code == 403
+
+
 def test_check_lesson_access_reports_the_locked_checkpoint(db):
     from src.courses.routes.courses import check_lesson_access
     admin, group, s, d1, d2, _, lessons, steps = _world(db)

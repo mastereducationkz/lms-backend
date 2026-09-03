@@ -68,7 +68,9 @@ def test_no_op_open_does_not_invalidate(db, calls):
     assert calls == []
 
 
-def test_record_submission_invalidates_lesson_caches(db, calls):
+def test_record_submission_does_not_invalidate_lesson_caches(db, calls):
+    """A completed checkpoint goes from one non-locked status to another (open -> completed): it
+    never changes lesson visibility, so no cache should be dropped."""
     from src.checkpoints import service
     from src.progress.models import QuizAttempt
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
@@ -79,10 +81,15 @@ def test_record_submission_invalidates_lesson_caches(db, calls):
     db.add(attempt); db.flush()
     calls.clear()
     assert service.record_submission(db, s.id, attempt)
-    assert calls and set(calls[-1]) == EXPECTED
+    assert calls == []
 
 
-def test_reopen_set_deadline_and_sync_invalidate(db, calls):
+def test_reopen_invalidates_but_set_deadline_and_sync_do_not(db, calls):
+    """reopen_for_students can re-grant a row that was locked/missing, so it stays invalidating.
+    set_deadline and sync_student_checkpoints only ever move a row between non-locked statuses
+    (or open one that is newly eligible -- sync's own invalidation is covered by
+    test_open_for_students_invalidates_lesson_caches's sibling in this file), so neither of the
+    first two should fire here."""
     from datetime import timedelta
     from src.checkpoints import service
     admin, course, v, m, _, _, _, d1, group, s = _world(db)
@@ -91,9 +98,12 @@ def test_reopen_set_deadline_and_sync_invalidate(db, calls):
     row = service.get_row(db, s.id, group.id, d1.id)
     calls.clear()
     service.set_deadline(db, row, service.utcnow() + timedelta(hours=5), actor_id=admin.id)
-    assert calls and set(calls[-1]) == EXPECTED
+    assert calls == []
 
-    # auto-open through sync
+
+def test_sync_student_checkpoints_invalidates_on_auto_open(db, calls):
+    from src.checkpoints import service
+    admin, course, v, m, _, _, _, d1, group, s = _world(db)
     s2 = make_user(db)
     from src.courses.models import GroupStudent
     db.add(GroupStudent(group_id=group.id, student_id=s2.id)); db.flush()
@@ -104,7 +114,9 @@ def test_reopen_set_deadline_and_sync_invalidate(db, calls):
     assert calls and set(calls[-1]) == EXPECTED
 
 
-def test_refresh_overdue_invalidates_only_when_something_flipped(db, calls):
+def test_refresh_overdue_never_invalidates(db, calls):
+    """overdue is itself a non-locked status, so flipping into it never changes lesson
+    visibility."""
     from datetime import timedelta
     from src.checkpoints import service
     admin, course, v, m, _, _, _, d1, group, s = _world(db)
@@ -112,7 +124,7 @@ def test_refresh_overdue_invalidates_only_when_something_flipped(db, calls):
                                      actor_id=admin.id, now=service.utcnow() - timedelta(days=2))
     calls.clear()
     assert service.refresh_overdue(rows)
-    assert calls and set(calls[-1]) == EXPECTED
+    assert calls == []
     calls.clear()
     assert service.refresh_overdue(rows) == []
     assert calls == []
@@ -127,3 +139,36 @@ def test_invalidation_failure_never_breaks_the_action(db, monkeypatch):
     assert service.open_for_students(db, group=group, definition=d1, student_ids=[s.id],
                                      actor_id=admin.id)
     assert service.get_row(db, s.id, group.id, d1.id).status == "available"
+
+
+# --------------------------------------------------------- revocation routes
+
+
+def test_disabling_a_group_invalidates_lesson_caches(db, calls):
+    """update_group_settings can revoke every student's access in the group (checkpoints_enabled
+    or a raised start_number), so it must always invalidate -- not just when it opens rows."""
+    from src.checkpoints.routes import checkpoints as r
+    from src.checkpoints.schemas import GroupSettingsUpdate
+    admin, course, v, m, _, _, _, d1, group, s = _world(db)
+    r.update_group_settings(group.id, GroupSettingsUpdate(enabled=True), current_user=admin, db=db)
+    calls.clear()
+    r.update_group_settings(group.id, GroupSettingsUpdate(enabled=False), current_user=admin, db=db)
+    assert calls and set(calls[-1]) == EXPECTED
+
+
+def test_deactivating_a_definition_invalidates_lesson_caches(db, calls):
+    """update_definition can revoke access via is_active (or repoint quiz_lesson_id / change
+    required_units), so it must always invalidate."""
+    from src.checkpoints.routes import checkpoints as r
+    from src.checkpoints.schemas import DefinitionUpdate
+    admin, course, v, m, _, _, _, d1, group, s = _world(db)
+    calls.clear()
+    r.update_definition(d1.id, DefinitionUpdate(is_active=False), current_user=admin, db=db)
+    assert calls and set(calls[-1]) == EXPECTED
+
+
+def test_lesson_cache_patterns_match_decorated_namespaces():
+    from src.checkpoints.service import LESSON_CACHE_PATTERNS
+    from src.courses.routes.courses import get_lesson, get_lesson_steps, get_module_lessons, get_course_lessons
+    expected = {f"{fn.__cache_namespace__}:*" for fn in (get_lesson, get_lesson_steps, get_module_lessons, get_course_lessons)}
+    assert set(LESSON_CACHE_PATTERNS) == expected

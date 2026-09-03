@@ -183,6 +183,10 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
                             for i, u in enumerate(body.required_units)]
     db.commit()
     db.refresh(d)
+    # is_active/quiz_lesson_id/required_units all change which lesson(s) a student may open or
+    # what a checkpoint's own quiz lesson serves, so any of the four cached lesson endpoints could
+    # now be stale for an affected student.
+    service._invalidate_lesson_caches()
     return _serialize_definition(db, d)
 
 
@@ -249,6 +253,9 @@ def update_group_settings(group_id: int, body: GroupSettingsUpdate,
         group.checkpoints_enabled = body.enabled
     db.commit()
     opened = service.sync_group(db, group, commit=True) if group.checkpoints_enabled else 0
+    # Disabling the group (or raising its start number) revokes lesson access for whichever
+    # students were relying on it; sync_group's own invalidation only fires when it opens rows.
+    service._invalidate_lesson_caches()
     return {"group_id": group.id, "checkpoints_enabled": bool(group.checkpoints_enabled),
             "checkpoints_start_number": group.checkpoints_start_number, "opened": opened}
 
