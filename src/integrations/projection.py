@@ -4,6 +4,7 @@ and a result's status only ever moves forward."""
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -51,12 +52,9 @@ def apply_event(db: Session, event: PlatformEvent) -> None:
             db, event, data, status=_ATTEMPT_STATUS[event_type], attempt_ref=_required(data, ref_key)
         )
     elif event_type == "result.ready":
-        # SAT legacy results have no attempt: key them per test instead (one row per test per student).
         attempt_ref = data.get("attempt_ref")
         if attempt_ref in (None, ""):
-            if data.get("test_id") in (None, ""):
-                raise ProjectionDataError("attempt_ref (or test_id) is required")
-            attempt_ref = f"test:{data['test_id']}"
+            attempt_ref = _legacy_attempt_ref(event, data)
         _upsert_result(db, event, data, status="scored", attempt_ref=attempt_ref)
     else:
         raise UnhandledEventType(event_type)
@@ -106,6 +104,21 @@ def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool =
         row.modules = modules
     db.flush()
     return row
+
+
+def _legacy_attempt_ref(event: PlatformEvent, data: dict) -> str:
+    """SAT legacy results have no attempt: key them per test *per student*, from the student's
+    platform identity (subject, else e-mail) so two students on the same test never share a row
+    — the unique key is (platform, module, attempt_ref), and the sender may not be resolved yet."""
+    if data.get("test_id") in (None, ""):
+        raise ProjectionDataError("attempt_ref (or test_id) is required")
+    if event.zitadel_subject:
+        ident = str(event.zitadel_subject).strip()
+    elif event.email:
+        ident = hashlib.sha1(event.email.strip().lower().encode()).hexdigest()[:16]
+    else:
+        raise ProjectionDataError("result.ready without attempt_ref needs a student identity")
+    return f"test:{_int(data['test_id'], 'test_id')}:{ident}"[:64]
 
 
 # --- results -------------------------------------------------------------------------
