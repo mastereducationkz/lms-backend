@@ -104,38 +104,83 @@ def _post_one(target: dict, row, timeout: float) -> tuple[str, str]:
     except httpx.HTTPError as exc:
         return "retry", f"{target['name']}: transport error: {exc}"
     if resp.status_code in (200, 201, 204):
+        if _body_says_skipped(resp):
+            return "skipped", f"{target['name']}: skipped"
         return "ok", f"{target['name']}: ok"
     if resp.status_code == 503:
         return "not_ready", f"{target['name']}: HTTP 503: {resp.text[:120]}"
     return "retry", f"{target['name']}: HTTP {resp.status_code}: {resp.text[:120]}"
 
 
-def _deliver(row, *, timeout: float = 15.0) -> tuple[str, str]:
-    """Fan a row out to every target that routes its event_type. Aggregate outcome:
+def _body_says_skipped(resp) -> bool:
+    """A consumer answering 2xx ``{"skipped": true}`` / ``{"status": "skipped"}`` has deliberately
+    declined the event (e.g. IELTS for a non-IELTS group). That target is finished — never
+    re-posted — but the row is not an error."""
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001 - empty / non-JSON bodies are a plain ok
+        return False
+    if not isinstance(body, dict):
+        return False
+    return body.get("skipped") is True or body.get("status") == "skipped"
 
-      "ok"        — delivered to all routing targets (2xx/skip); mark done.
+
+# Per-target states that mean "this target is finished with this row".
+_TARGET_FINISHED = ("ok", "skipped")
+
+
+def _deliver(row, *, timeout: float = 15.0) -> tuple[str, str]:
+    """Fan a row out to every configured target that routes its event_type, remembering each
+    target's outcome in ``row.target_state`` so a retry posts ONLY to targets not yet finished
+    (ok/skipped). Aggregate outcome of the targets attempted on this pass:
+
+      "ok"        — every configured target is now ok/skipped; mark done.
       "not_ready" — some target reachable-but-not-ready (503 / key missing); reschedule WITHOUT
                     spending the retry budget (self-heals when that consumer is enabled).
       "retry"     — some target had a transient failure (5xx/timeout/other); spend an attempt,
-                    dead-letter after _MAX_ATTEMPTS.
+                    dead-letter after _MAX_ATTEMPTS on that target.
 
-    Re-posting to an already-succeeded target on retry is harmless — all consumers are idempotent.
-    'retry' outranks 'not_ready' so a real failure isn't masked by a not-ready sibling.
+    'retry' outranks 'not_ready' so a real failure isn't masked by a not-ready sibling. An
+    unconfigured target (no base URL) is outside the contract and never appears in the state.
     """
     routing = [t for t in _targets() if row.event_type in t["routes"]]
     if not routing:
         return "retry", f"no target for event_type {row.event_type}"
-    outcomes = [_post_one(t, row, timeout) for t in routing]
-    detail = "; ".join(d for _, d in outcomes)
-    kinds = {o for o, _ in outcomes}
-    if kinds == {"skip"}:
-        # Every routing target is unconfigured (e.g. only IELTS routes it and IELTS_SYNC_URL unset).
-        return "ok", detail or "no configured target"
+    configured = [t for t in routing if t["base"]]
+    if not configured:
+        # e.g. only IELTS routes it and IELTS_SYNC_URL is unset.
+        return "ok", "no configured target"
+    state = dict(row.target_state or {})
+    attempted: list[tuple[str, str]] = []
+    for target in configured:
+        previous = state.get(target["name"]) or {}
+        if previous.get("status") in _TARGET_FINISHED:
+            continue
+        outcome, detail = _post_one(target, row, timeout)
+        attempts = int(previous.get("attempts") or 0) + (1 if outcome == "retry" else 0)
+        state[target["name"]] = {
+            "status": outcome,
+            "attempts": attempts,
+            "last_error": None if outcome in _TARGET_FINISHED else detail,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        attempted.append((outcome, detail))
+    row.target_state = state  # reassign — JSON columns don't track in-place mutation
+    detail = "; ".join(d for _, d in attempted)
+    kinds = {o for o, _ in attempted}
     if "retry" in kinds:
         return "retry", detail
     if "not_ready" in kinds:
         return "not_ready", detail
-    return "ok", detail
+    return "ok", detail or "all targets already delivered"
+
+
+def _any_target_exhausted(row) -> bool:
+    """True when a single target has spent the whole retry budget (dead-letter the row)."""
+    return any(
+        int((s or {}).get("attempts") or 0) >= _MAX_ATTEMPTS
+        for s in (row.target_state or {}).values()
+    )
 
 
 def run_drain_loop(stop_event=None, poll_seconds: int = 15) -> None:
@@ -208,8 +253,8 @@ def drain_outbox(db: Session, *, batch: int = 50) -> dict:
         else:  # "retry"
             row.attempts = (row.attempts or 0) + 1
             row.last_error = detail
-            if row.attempts >= _MAX_ATTEMPTS:
-                row.status = "failed"  # surfaced for an operator; not retried
+            if row.attempts >= _MAX_ATTEMPTS or _any_target_exhausted(row):
+                row.status = "failed"  # surfaced for an operator; replay via sync_replay
                 failed += 1
             else:
                 backoff = min(3600, 30 * (2 ** (row.attempts - 1)))
