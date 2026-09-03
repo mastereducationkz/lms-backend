@@ -94,7 +94,8 @@ class PlatformWeeklySet(Base):
     date_to = Column(DateTime, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     track = Column(String(16), nullable=True)
-    modules = Column(_JSONB, nullable=True)  # [{module, test_id, test_title}]
+    modules = Column(_JSONB, nullable=True)  # [{module, test_id, test_title, path?}]
+    set_path = Column(String, nullable=True)  # platform path of the set page (Take/Result buttons)
     updated_at = Column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
 
     __table_args__ = (

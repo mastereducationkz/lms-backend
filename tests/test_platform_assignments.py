@@ -268,3 +268,56 @@ def test_nightly_sync_creates_for_groups_added_later(db, monkeypatch):
     _group(db, "late")
     out = reconcile.sync_platform_assignments(db)
     assert out["created"] == 1 and db.query(Assignment).one().group_id
+
+
+# --- SAT/NUET parity: track-aware targeting, platform-provided paths, labels -------------
+
+def test_sat_set_targets_groups_of_its_track_only(db):
+    sat = _group(db, "SAT-A", program="sat")
+    _group(db, "NUET-A", program="nuet")
+    _group(db, "IELTS-A", program="ielts")
+    ws = PlatformWeeklySet(platform="sat", weekly_set_id=59, title="29.08-30.08", date_from=datetime(2026, 8, 29, 0, 0),
+                           date_to=datetime(2026, 8, 30, 23, 59), is_active=True, track="sat",
+                           modules=[{"module": "math", "test_id": 501, "test_title": "Weekly Test [Math] (29.08-30.08)",
+                                     "path": "/tests/501/start"},
+                                    {"module": "verbal", "test_id": 502, "test_title": "Weekly Test [Verbal] (29.08-30.08)",
+                                     "path": "/tests/502/start"}],
+                           set_path="/weekly-sets/59")
+    db.add(ws)
+    db.commit()
+
+    out = pa.sync_weekly_set(db, ws, now=datetime(2026, 8, 29, 10, 0))
+
+    assert out == {"created": 1, "updated": 0, "deactivated": 0}
+    a = db.query(Assignment).one()
+    assert a.group_id == sat.id and a.title == "SAT Weekly Test · 29.08-30.08"
+    content = json.loads(a.content)
+    assert content["track"] == "sat" and content["set_path"] == "/weekly-sets/59"
+    assert [m["path"] for m in content["modules"]] == ["/tests/501/start", "/tests/502/start"]
+
+
+def test_nuet_set_on_the_sat_platform_targets_nuet_groups(db):
+    _group(db, "SAT-A", program="sat")
+    nuet = _group(db, "NUET-A", program="nuet")
+    ws = PlatformWeeklySet(platform="sat", weekly_set_id=60, title="Week 7", date_from=datetime(2026, 8, 29),
+                           date_to=datetime(2026, 8, 30, 23, 59), is_active=True, track="nuet",
+                           modules=[{"module": "nuet", "test_id": 700, "test_title": "NUET Week 7", "path": "/tests/700/start"}])
+    db.add(ws)
+    db.commit()
+    pa.sync_weekly_set(db, ws, now=datetime(2026, 8, 29, 10, 0))
+    a = db.query(Assignment).one()
+    assert a.group_id == nuet.id and a.title == "NUET Weekly Test · Week 7"
+    assert pa.target_groups(db, "nuet")[0].id == nuet.id
+
+
+def test_platform_paths_default_to_ielts_rules_only_for_ielts(db):
+    _group(db, "SAT-A", program="sat")
+    ws = PlatformWeeklySet(platform="sat", weekly_set_id=61, title="x", date_from=datetime(2026, 8, 29),
+                           date_to=datetime(2026, 8, 30), is_active=True, track="sat",
+                           modules=[{"module": "math", "test_id": 1, "test_title": "M"}])   # no path given
+    db.add(ws)
+    db.commit()
+    content = pa.build_content(ws)
+    assert content["modules"][0]["path"] is None and content["set_path"] is None
+    assert pa.module_path("listening", 41, 13, platform="ielts") == "/exam/test/41"
+    assert pa.module_path("math", 1, 61, platform="sat") is None

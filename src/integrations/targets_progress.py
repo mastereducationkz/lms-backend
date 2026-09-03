@@ -52,16 +52,17 @@ def reached(target: Optional[float], current: Optional[float]) -> bool:
 
 # --- IELTS -----------------------------------------------------------------------------------
 
-def window_set_ids(db: Session, platform: str = "ielts", now: Optional[datetime] = None, size: int = WINDOW_SETS) -> list[int]:
-    """The ``size`` most recent weekly sets that have started, newest first."""
+def window_set_ids(db: Session, platform: str = "ielts", now: Optional[datetime] = None, size: int = WINDOW_SETS,
+                   track: Optional[str] = None) -> list[int]:
+    """The ``size`` most recent weekly sets that have started, newest first (optionally one track:
+    the SAT platform carries both sat and nuet sets)."""
     now = now or _utcnow()
-    rows = (
-        db.query(PlatformWeeklySet.weekly_set_id)
-        .filter(PlatformWeeklySet.platform == platform, PlatformWeeklySet.date_from <= now)
-        .order_by(PlatformWeeklySet.date_to.desc(), PlatformWeeklySet.weekly_set_id.desc())
-        .limit(size)
-        .all()
+    query = db.query(PlatformWeeklySet.weekly_set_id).filter(
+        PlatformWeeklySet.platform == platform, PlatformWeeklySet.date_from <= now
     )
+    if track:
+        query = query.filter(PlatformWeeklySet.track == track)
+    rows = query.order_by(PlatformWeeklySet.date_to.desc(), PlatformWeeklySet.weekly_set_id.desc()).limit(size).all()
     return [set_id for (set_id,) in rows]
 
 
@@ -110,6 +111,56 @@ def ielts_progress(db: Session, user_id: int, now: Optional[datetime] = None) ->
 
 
 # --- SAT ---------------------------------------------------------------------------------------
+# Scaled scores from the SAT platform are ESTIMATES predicted from correct counts (lead's rule:
+# always labelled for students/parents; never shown to staff, never in the curator leaderboard).
+
+SAT_MODULES = ("math", "verbal")
+
+
+def sat_current_from_events(db: Session, user_id: int, now: Optional[datetime] = None,
+                            track: str = "sat") -> Optional[dict]:
+    """Latest scored section per module within the last four SAT weekly sets, from stored
+    result.ready events: band = section scaled estimate, raw_score/total = correct/questions.
+    ``total`` only when both sections have a value; ``trend`` vs the previous set's total."""
+    now = now or _utcnow()
+    window = window_set_ids(db, "sat", now, track=track)
+    if not window:
+        return None
+    rank = {set_id: index for index, set_id in enumerate(window)}
+    rows = (
+        db.query(PlatformResult)
+        .filter(PlatformResult.platform == "sat", PlatformResult.user_id == user_id,
+                PlatformResult.status == "scored", PlatformResult.band.isnot(None),
+                PlatformResult.weekly_set_id.in_(window))
+        .all()
+    )
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (rank[r.weekly_set_id], -(r.scored_at or r.updated_at or datetime.min).timestamp(), -r.id))
+    out: dict[str, Any] = {"source": "events", "estimate": True}
+    per_set: dict[int, dict[str, float]] = {}
+    for r in rows:
+        per_set.setdefault(r.weekly_set_id, {}).setdefault(r.module, r.band)
+    for module in SAT_MODULES:
+        latest = next((r for r in rows if r.module == module), None)
+        out[module] = latest.band if latest else None
+        out[f"{module}_correct"] = latest.raw_score if latest else None
+        out[f"{module}_total"] = latest.total if latest else None
+        out[f"{module}_set_id"] = latest.weekly_set_id if latest else None
+        out[f"{module}_result_url"] = latest.result_url if latest else None
+    out["total"] = out["math"] + out["verbal"] if out["math"] is not None and out["verbal"] is not None else None
+    latest_set = next((s for s in window if s in per_set), None)
+    out["set_id"] = latest_set
+    # Previous = the newest OLDER set that has both sections; trend = current total against it.
+    older_totals = [
+        per_set[set_id]["math"] + per_set[set_id]["verbal"]
+        for set_id in window
+        if set_id != latest_set and set_id in per_set and "math" in per_set[set_id] and "verbal" in per_set[set_id]
+    ]
+    out["previous_total"] = older_totals[0] if older_totals else None
+    out["trend"] = (out["total"] - out["previous_total"]) if out["total"] is not None and out["previous_total"] is not None else None
+    return out
+
 
 def sat_current_from_payload(payload: dict, email: str) -> Optional[dict]:
     """Latest completed weekly-set scaled scores for ``email`` from a batch-scores-by-date payload."""
@@ -199,12 +250,20 @@ def student_progress(db: Session, user, targets: dict, *, now: Optional[datetime
         progress["reached"] = reached(goal.get("overall"), progress["overall_now"])
         out["progress"]["ielts"] = progress
     if "sat" in tracks or "sat" in targets:
-        current = sat_current(user.email, now=now, fetch=sat_fetch) if user.email else None
+        from src.integrations.score_display import ESTIMATE_NOTE
+
+        # Stored events first (SAT pushes result.ready); the live weekly-set fetch is the fallback.
+        current = sat_current_from_events(db, user.id, now=now)
+        if current is None and user.email:
+            current = sat_current(user.email, now=now, fetch=sat_fetch)
+            if current:
+                current = {**current, "estimate": True}
         goal = (targets.get("sat") or {}).get("targets") or {}
         out["progress"]["sat"] = {
             "current": current,
             "gaps": {k: gap(goal.get(k), (current or {}).get(k)) for k in ("total", "math", "verbal")},
             "reached": reached(goal.get("total"), (current or {}).get("total")),
+            "note": ESTIMATE_NOTE,
         }
     if "nuet" in tracks or "nuet" in targets:
         out["progress"]["nuet"] = {"current": None, "gaps": {"total": None}, "reached": False}

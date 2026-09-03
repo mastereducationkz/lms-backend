@@ -26,7 +26,7 @@ from src.integrations.models import PlatformTestAssignment, PlatformWeeklySet
 
 _TRUTHY = {"1", "true", "yes", "on"}
 ASSIGNMENT_TYPE = "platform_test"
-PLATFORM_LABEL = {"ielts": "IELTS", "sat": "SAT"}
+PLATFORM_LABEL = {"ielts": "IELTS", "sat": "SAT", "nuet": "NUET"}
 
 
 def enabled() -> bool:
@@ -43,9 +43,17 @@ def _iso_utc(value: Optional[datetime]) -> Optional[str]:
     return value.replace(tzinfo=timezone.utc).isoformat()
 
 
-def module_path(module: str, test_id, weekly_set_id) -> str:
-    """Where a student opens a part on the platform. Writing has no auto-start URL (the timed
-    session must be started by the student's own click), so it goes to the set page."""
+def track_of(ws: PlatformWeeklySet) -> str:
+    """The LMS program a set is for: the emitter's track (sat|nuet|ielts), else the platform."""
+    return str(ws.track or ws.platform or "").lower()
+
+
+def module_path(module: str, test_id, weekly_set_id, platform: str = "ielts") -> Optional[str]:
+    """LMS-side default path of a part when the emitter did not send one. Only IELTS has such
+    rules (Writing has no auto-start URL — the timed session must be started by the student's
+    own click — so it goes to the set page); other platforms send ``path`` in the event."""
+    if (platform or "ielts").lower() != "ielts":
+        return None
     module = (module or "").lower()
     if module in ("listening", "reading"):
         return f"/exam/test/{test_id}"
@@ -54,14 +62,18 @@ def module_path(module: str, test_id, weekly_set_id) -> str:
     return f"/weekly-sets/{weekly_set_id}"
 
 
-def target_groups(db: Session, platform: str = "ielts") -> list:
-    """Active, non-special groups of the platform's program that have not opted out."""
+def default_set_path(ws: PlatformWeeklySet) -> Optional[str]:
+    return f"/weekly-sets/{ws.weekly_set_id}" if (ws.platform or "").lower() == "ielts" else None
+
+
+def target_groups(db: Session, program: str = "ielts") -> list:
+    """Active, non-special groups of the program (sat | nuet | ielts) that have not opted out."""
     from src.courses.models import Group
 
     return (
         db.query(Group)
         .filter(
-            func.lower(Group.program_type) == platform,
+            func.lower(Group.program_type) == (program or "").lower(),
             or_(Group.is_active.is_(True), Group.is_active.is_(None)),
             or_(Group.is_special.is_(False), Group.is_special.is_(None)),
             or_(Group.platform_tests_opt_out.is_(False), Group.platform_tests_opt_out.is_(None)),
@@ -72,7 +84,8 @@ def target_groups(db: Session, platform: str = "ielts") -> list:
 
 
 def build_title(ws: PlatformWeeklySet) -> str:
-    label = PLATFORM_LABEL.get(ws.platform, (ws.platform or "").upper())
+    track = track_of(ws)
+    label = PLATFORM_LABEL.get(track, track.upper())
     return f"{label} Weekly Test · {ws.title or ws.weekly_set_id}"
 
 
@@ -85,21 +98,23 @@ def build_content(ws: PlatformWeeklySet) -> dict:
             "module": module,
             "test_id": test_id,
             "test_title": entry.get("test_title"),
-            "path": module_path(module, test_id, ws.weekly_set_id),
+            "path": entry.get("path") or module_path(module, test_id, ws.weekly_set_id, ws.platform),
         })
     return {
         "platform": ws.platform,
+        "track": track_of(ws),
         "weekly_set_id": ws.weekly_set_id,
         "title": ws.title,
         "date_from": _iso_utc(ws.date_from),
         "date_to": _iso_utc(ws.date_to),
-        "set_path": f"/weekly-sets/{ws.weekly_set_id}",
+        "set_path": getattr(ws, "set_path", None) or default_set_path(ws),
         "modules": modules,
     }
 
 
 def build_description(ws: PlatformWeeklySet) -> str:
-    label = PLATFORM_LABEL.get(ws.platform, ws.platform)
+    track = track_of(ws)
+    label = PLATFORM_LABEL.get(track, track.upper())
     parts = ", ".join(m["module"].capitalize() for m in build_content(ws)["modules"]) or "all parts"
     return (f"Weekly test on the {label} platform: {parts}. "
             "Open each part from this page; your checkmarks update automatically.")
@@ -138,7 +153,7 @@ def sync_weekly_set(db: Session, ws: PlatformWeeklySet, *, now: Optional[datetim
     if not enabled():
         return out
     now = now or _utcnow()
-    targets = {g.id: g for g in target_groups(db, ws.platform)} if ws.is_active else {}
+    targets = {g.id: g for g in target_groups(db, track_of(ws))} if ws.is_active else {}
     may_create = bool(ws.is_active) and (include_past or not is_past(ws, now))
     links = _links_for_set(db, ws)
 
@@ -191,7 +206,8 @@ def set_group_opt_out(db: Session, group, opt_out: bool, *, now: Optional[dateti
     opting back in re-creates/re-activates them for the current sets."""
     group.platform_tests_opt_out = bool(opt_out)
     db.commit()
-    return sync_all_active(db, (group.program_type or "ielts").lower(), now=now)
+    program = (group.program_type or "ielts").lower()
+    return sync_all_active(db, "sat" if program in ("sat", "nuet") else program, now=now)
 
 
 def main() -> None:  # pragma: no cover - operator CLI

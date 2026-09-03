@@ -3759,7 +3759,11 @@ async def get_student_sat_scores(
                     if combined:
                         data["testResults"].append(combined)
             
-            return data
+            # Lead's rule: staff see correct/total only; students/parents see the scaled
+            # ESTIMATES with the disclaimer.
+            from src.integrations.score_display import sanitize_sat_scores
+
+            return sanitize_sat_scores(data, current_user.role)
             
         except Exception as e:
             logger.error(f"Error fetching SAT scores: {str(e)}")

@@ -51,7 +51,13 @@ def apply_event(db: Session, event: PlatformEvent) -> None:
             db, event, data, status=_ATTEMPT_STATUS[event_type], attempt_ref=_required(data, ref_key)
         )
     elif event_type == "result.ready":
-        _upsert_result(db, event, data, status="scored", attempt_ref=_required(data, "attempt_ref"))
+        # SAT legacy results have no attempt: key them per test instead (one row per test per student).
+        attempt_ref = data.get("attempt_ref")
+        if attempt_ref in (None, ""):
+            if data.get("test_id") in (None, ""):
+                raise ProjectionDataError("attempt_ref (or test_id) is required")
+            attempt_ref = f"test:{data['test_id']}"
+        _upsert_result(db, event, data, status="scored", attempt_ref=attempt_ref)
     else:
         raise UnhandledEventType(event_type)
 
@@ -91,6 +97,8 @@ def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool =
         row.is_active = bool(data.get("is_active"))
     if "track" in data:
         row.track = data.get("track")
+    if "set_path" in data:
+        row.set_path = str(data["set_path"]) if data.get("set_path") else None
     if "modules" in data:
         modules = data.get("modules")
         if modules is not None and not isinstance(modules, list):
