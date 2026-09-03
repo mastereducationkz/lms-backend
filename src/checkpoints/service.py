@@ -20,11 +20,28 @@ from src.checkpoints.models import (
 )
 from src.courses.models import CourseGroupAccess, Group, GroupStudent, Lesson, Module, Step
 from src.progress.models import QuizAttempt
+from src.services.cache_service import invalidate
 from src.utils.permissions import get_group_course_ids
 
 _log = logging.getLogger(__name__)
 
 DEADLINE_HOURS = 24
+
+# The four per-user lesson caches whose payloads depend on which checkpoints are open for a
+# student (see _checkpoint_filter_lesson_payload / assert_student_may_view_checkpoint_lesson).
+# TTLs run to 300s, so without this a completed or lapsed checkpoint would keep serving its
+# questions — and a freshly opened one would stay invisible — for minutes.
+LESSON_CACHE_PATTERNS = ("courses:lesson:*", "courses:lesson-steps:*",
+                         "courses:module-lessons:*", "courses:lessons-list:*")
+
+
+def _invalidate_lesson_caches() -> None:
+    """Drop the lesson caches after a checkpoint status change. Never raises: Redis being
+    unavailable must not fail the request that changed the checkpoint."""
+    try:
+        invalidate(*LESSON_CACHE_PATTERNS)
+    except Exception as exc:                                     # pragma: no cover - defensive
+        _log.warning("checkpoint lesson-cache invalidation failed: %s", exc)
 
 
 def utcnow() -> datetime:
@@ -236,6 +253,7 @@ def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[date
             db.flush()
             if commit:
                 db.commit()
+            _invalidate_lesson_caches()
         return opened
     except IntegrityError:
         _log.info("checkpoint open raced for student %s (keys=%s); reusing the existing rows",
@@ -270,6 +288,8 @@ def refresh_overdue(rows: Iterable[StudentCheckpoint], now: Optional[datetime] =
         if row.status in OPEN_STATUSES and row.deadline is not None and naive(row.deadline) < now:
             row.status = STATUS_OVERDUE
             flipped.append(row)
+    if flipped:
+        _invalidate_lesson_caches()
     return flipped
 
 
@@ -304,6 +324,8 @@ def open_for_students(db: Session, *, group: Group, definition: CheckpointDefini
     db.flush()
     if commit:
         db.commit()
+    if changed:
+        _invalidate_lesson_caches()
     return changed
 
 
@@ -331,6 +353,8 @@ def reopen_for_students(db: Session, *, group: Group, definition: CheckpointDefi
     db.flush()
     if commit:
         db.commit()
+    if changed:
+        _invalidate_lesson_caches()
     return changed
 
 
@@ -344,6 +368,7 @@ def set_deadline(db: Session, row: StudentCheckpoint, deadline: datetime, actor_
     db.flush()
     if commit:
         db.commit()
+    _invalidate_lesson_caches()
     return row
 
 
@@ -430,6 +455,7 @@ def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
         db.flush()
         if commit:
             db.commit()
+        _invalidate_lesson_caches()
     return done
 
 
