@@ -101,9 +101,12 @@ def _base(assignment, content: dict, now: datetime) -> dict:
         "group_id": assignment.group_id,
         "title": assignment.title,
         "platform": content.get("platform"),
+        "track": content.get("track") or content.get("platform"),
         "weekly_set_id": content.get("weekly_set_id"),
         "set_title": content.get("title"),
-        "set_path": content.get("set_path") or f"/weekly-sets/{content.get('weekly_set_id')}",
+        "set_path": content.get("set_path") or (
+            f"/weekly-sets/{content.get('weekly_set_id')}" if content.get("platform") == "ielts" else None
+        ),
         "date_from": content.get("date_from"),
         "date_to": content.get("date_to"),
         "due_date": _iso(assignment.due_date),

@@ -279,3 +279,62 @@ def test_sat_current_walks_back_until_a_completed_set(monkeypatch):
     cur = tp.sat_current("stu@x.io", now=datetime(2026, 9, 3, 10, 0), fetch=fetch)
     assert calls == ["29.08", "28.08", "22.08"]
     assert cur["total"] == 840 and cur["week"] == 58 and cur["set_name"] == "22.08-23.08"
+
+
+# --- SAT current level from stored events, live weekly-set fetch as fallback ------------
+
+def _sat_set(db, set_id, d_from, d_to, track="sat"):
+    db.add(PlatformWeeklySet(platform="sat", weekly_set_id=set_id, title=f"set {set_id}", date_from=d_from,
+                             date_to=d_to, is_active=True, track=track, modules=[]))
+    db.commit()
+
+
+def _sat_scored(db, user_id, module, set_id, band, raw, total, scored_at):
+    db.add(PlatformResult(user_id=user_id, platform="sat", track="sat", module=module, attempt_ref=f"{module}-{set_id}",
+                          weekly_set_id=set_id, status="scored", band=band, raw_score=raw, total=total, scored_at=scored_at))
+    db.commit()
+
+
+def test_sat_progress_from_stored_events_latest_math_and_verbal(db):
+    u = _user(db)
+    _sat_set(db, 58, datetime(2026, 8, 22), datetime(2026, 8, 23, 23, 59))
+    _sat_set(db, 59, datetime(2026, 8, 29), datetime(2026, 8, 30, 23, 59))
+    _sat_scored(db, u.id, "math", 58, 450, 8, 22, datetime(2026, 8, 23, 10, 0))
+    _sat_scored(db, u.id, "verbal", 58, 390, 8, 27, datetime(2026, 8, 23, 11, 0))
+    _sat_scored(db, u.id, "math", 59, 520, 12, 22, datetime(2026, 8, 30, 10, 0))
+
+    cur = tp.sat_current_from_events(db, u.id, now=NOW)
+
+    assert cur["math"] == 520 and cur["math_correct"] == 12 and cur["math_total"] == 22 and cur["math_set_id"] == 59
+    assert cur["verbal"] == 390 and cur["verbal_correct"] == 8 and cur["verbal_set_id"] == 58
+    assert cur["total"] == 910 and cur["estimate"] is True and cur["source"] == "events"
+    assert cur["previous_total"] == 840 and cur["trend"] == 70
+
+
+def test_sat_progress_total_needs_both_sections(db):
+    u = _user(db)
+    _sat_set(db, 59, datetime(2026, 8, 29), datetime(2026, 8, 30, 23, 59))
+    _sat_scored(db, u.id, "math", 59, 520, 12, 22, datetime(2026, 8, 30, 10, 0))
+    cur = tp.sat_current_from_events(db, u.id, now=NOW)
+    assert cur["math"] == 520 and cur["verbal"] is None and cur["total"] is None
+
+
+def test_sat_progress_falls_back_to_the_live_weekly_set_when_no_events(db, monkeypatch):
+    u = _user(db)
+    monkeypatch.setattr(tp, "sat_current", lambda email, **kw: {"total": 840, "math": 450, "verbal": 390, "week": 58,
+                                                                  "set_name": "22.08-23.08", "completed_at": None,
+                                                                  "source": "weekly_set"})
+    out = tp.student_progress(db, u, {}, now=NOW, tracks=["sat"])
+    cur = out["progress"]["sat"]["current"]
+    assert cur["total"] == 840 and cur["source"] == "weekly_set" and cur["estimate"] is True
+    assert out["progress"]["sat"]["note"].lower().startswith("scaled scores are estimates")
+
+
+def test_sat_progress_prefers_stored_events_over_the_live_fetch(db, monkeypatch):
+    u = _user(db)
+    _sat_set(db, 59, datetime(2026, 8, 29), datetime(2026, 8, 30, 23, 59))
+    _sat_scored(db, u.id, "math", 59, 520, 12, 22, datetime(2026, 8, 30, 10, 0))
+    _sat_scored(db, u.id, "verbal", 59, 400, 9, 27, datetime(2026, 8, 30, 11, 0))
+    monkeypatch.setattr(tp, "sat_current", lambda email, **kw: pytest.fail("must not fetch live when events exist"))
+    out = tp.student_progress(db, u, {"sat": {"targets": {"total": 1000}}}, now=NOW, tracks=["sat"])
+    assert out["progress"]["sat"]["current"]["total"] == 920 and out["progress"]["sat"]["gaps"]["total"] == 80
