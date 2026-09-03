@@ -136,7 +136,8 @@ class PlatformDiagnostic(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     platform = Column(String(16), nullable=False, default="ielts")
-    payload = Column(_JSONB, nullable=True)
+    # none_as_null: "never took the diagnostic" is SQL NULL, not a JSON null, so counts stay honest.
+    payload = Column(JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"), nullable=True)
     fetched_at = Column(DateTime, nullable=False, default=_utcnow)
 
     __table_args__ = (
