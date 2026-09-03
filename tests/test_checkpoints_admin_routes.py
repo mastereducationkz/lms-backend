@@ -161,3 +161,57 @@ def test_non_admin_cannot_write_but_group_teacher_can_read(db):
     with pytest.raises(HTTPException) as e:
         r.group_matrix(group.id, current_user=outsider, db=db)
     assert e.value.status_code == 403
+
+
+def test_quiz_lesson_cannot_be_shared_by_two_definitions(db):
+    """Two definitions on one quiz lesson would make checkpoint_definition_for_step ambiguous."""
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, _, _, _ = _world(db)
+    d2 = make_definition(db, course, 2, v[2:4], m[1])          # no quiz lesson yet
+    with pytest.raises(HTTPException) as e:
+        r.update_definition(d2.id, DefinitionUpdate(quiz_lesson_id=d1.quiz_lesson_id),
+                            current_user=admin, db=db)
+    assert e.value.status_code == 400
+    # re-pointing a definition at its own quiz lesson is still fine
+    assert r.update_definition(d1.id, DefinitionUpdate(quiz_lesson_id=d1.quiz_lesson_id),
+                               current_user=admin, db=db)["quiz_lesson_id"] == d1.quiz_lesson_id
+
+
+def test_cannot_activate_a_definition_whose_quiz_is_short(db):
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, _, _, _ = _world(db)           # quiz has 2 questions, expects 45
+    r.update_definition(d1.id, DefinitionUpdate(is_active=False), current_user=admin, db=db)
+    with pytest.raises(HTTPException) as e:
+        r.update_definition(d1.id, DefinitionUpdate(is_active=True), current_user=admin, db=db)
+    assert e.value.status_code == 400 and "45" in e.value.detail
+    # matching the expected count in the same call is allowed
+    upd = r.update_definition(d1.id, DefinitionUpdate(is_active=True, total_questions=2),
+                              current_user=admin, db=db)
+    assert upd["is_active"] is True and upd["question_count"] == 2
+
+
+def test_list_groups_counts_students_in_one_query(db):
+    from sqlalchemy import event
+    from src.config import engine
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, group, s1, s2 = _world(db)
+    other = make_group(db, name="cp-grp-2")
+    enroll(db, make_user(db), other, course, admin)
+    empty = make_group(db, name="cp-grp-3")
+    db.commit()
+
+    seen = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            seen.append(statement.split("\n")[0])
+
+    try:
+        out = r.list_groups(program_type="sat", current_user=admin, db=db)
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+
+    counts = {g["id"]: g["student_count"] for g in out}
+    assert counts[group.id] == 2 and counts[other.id] == 1 and counts[empty.id] == 0
+    assert len(seen) <= 4, f"{len(seen)} statements:\n" + "\n".join(seen)

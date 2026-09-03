@@ -7,7 +7,8 @@ import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
 
 from src.checkpoints import service
 from src.checkpoints.completion import completed_lesson_ids
@@ -75,10 +76,10 @@ def _definition_or_404(db: Session, checkpoint_id: int) -> CheckpointDefinition:
     return d
 
 
-def _quiz_questions(db: Session, definition: CheckpointDefinition) -> List[Dict[str, Any]]:
-    if definition.quiz_lesson_id is None:
+def _quiz_questions_for_lesson(db: Session, lesson_id: Optional[int]) -> List[Dict[str, Any]]:
+    if lesson_id is None:
         return []
-    step = db.query(Step).filter(Step.lesson_id == definition.quiz_lesson_id,
+    step = db.query(Step).filter(Step.lesson_id == lesson_id,
                                  Step.content_type == "quiz").order_by(Step.order_index).first()
     if step is None or not step.content_text:
         return []
@@ -86,6 +87,10 @@ def _quiz_questions(db: Session, definition: CheckpointDefinition) -> List[Dict[
         return [q for q in (json.loads(step.content_text).get("questions") or []) if isinstance(q, dict)]
     except (ValueError, AttributeError):
         return []
+
+
+def _quiz_questions(db: Session, definition: CheckpointDefinition) -> List[Dict[str, Any]]:
+    return _quiz_questions_for_lesson(db, definition.quiz_lesson_id)
 
 
 def _serialize_definition(db: Session, d: CheckpointDefinition) -> Dict[str, Any]:
@@ -119,16 +124,39 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
                       db: Session = Depends(get_db)) -> Dict[str, Any]:
     _require_admin(current_user)
     d = _definition_or_404(db, checkpoint_id)
+
+    # Validate against the post-update values BEFORE touching the row, so a rejected request
+    # leaves nothing pending in the session.
+    quiz_lesson_id = d.quiz_lesson_id if body.quiz_lesson_id is None else body.quiz_lesson_id
+    total_questions = d.total_questions if body.total_questions is None else body.total_questions
+    if body.quiz_lesson_id is not None:
+        if db.get(Lesson, body.quiz_lesson_id) is None:
+            raise HTTPException(status_code=404, detail="Quiz lesson not found")
+        # checkpoint_definition_for_step() resolves a step to ONE definition, so a quiz lesson
+        # shared by two checkpoints would gate and record submissions against the wrong one.
+        clash = db.query(CheckpointDefinition.number).filter(
+            CheckpointDefinition.quiz_lesson_id == body.quiz_lesson_id,
+            CheckpointDefinition.id != d.id,
+        ).first()
+        if clash is not None:
+            raise HTTPException(status_code=400,
+                                detail=f"Quiz lesson {body.quiz_lesson_id} is already used by checkpoint {clash[0]}")
+    if body.is_active:
+        # Activating publishes the checkpoint to every enabled group, so refuse if the linked quiz
+        # does not actually hold the expected number of questions. (Difficulty imbalance stays
+        # advisory — the quiz-check endpoint reports it.)
+        found = len(_quiz_questions_for_lesson(db, quiz_lesson_id))
+        if found != total_questions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot activate: the linked quiz has {found} questions, expected {total_questions}")
+
     if body.title is not None:
         d.title = body.title
     if body.is_active is not None:
         d.is_active = body.is_active
-    if body.total_questions is not None:
-        d.total_questions = body.total_questions
-    if body.quiz_lesson_id is not None:
-        if db.get(Lesson, body.quiz_lesson_id) is None:
-            raise HTTPException(status_code=404, detail="Quiz lesson not found")
-        d.quiz_lesson_id = body.quiz_lesson_id
+    d.total_questions = total_questions
+    d.quiz_lesson_id = quiz_lesson_id
     if body.required_units is not None:
         kinds = sorted(u.kind for u in body.required_units)
         if kinds != ["math", "verbal", "verbal"]:
@@ -174,8 +202,9 @@ def quiz_check(checkpoint_id: int, current_user: UserInDB = Depends(get_current_
     return {"question_count": len(questions), "expected": d.total_questions, "by_difficulty": by, "problems": problems}
 
 
-def _serialize_group(db: Session, g: Group) -> Dict[str, Any]:
-    count = db.query(GroupStudent).filter(GroupStudent.group_id == g.id).count()
+def _serialize_group(db: Session, g: Group, student_count: Optional[int] = None) -> Dict[str, Any]:
+    count = (student_count if student_count is not None
+             else db.query(GroupStudent).filter(GroupStudent.group_id == g.id).count())
     return {"id": g.id, "name": g.name, "program_type": g.program_type,
             "teacher_name": g.teacher.name if g.teacher else None, "student_count": count,
             "checkpoints_enabled": bool(g.checkpoints_enabled),
@@ -186,13 +215,17 @@ def _serialize_group(db: Session, g: Group) -> Dict[str, Any]:
 def list_groups(program_type: Optional[str] = Query("sat"),
                 current_user: UserInDB = Depends(get_current_user_dependency),
                 db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
-    q = db.query(Group).filter(Group.is_active == True)  # noqa: E712
+    q = db.query(Group).options(joinedload(Group.teacher)).filter(Group.is_active == True)  # noqa: E712
     if program_type:
         q = q.filter(Group.program_type == program_type)
     groups = q.order_by(Group.name).all()
     if current_user.role not in READ_ROLES:
         groups = [g for g in groups if check_group_access(g.id, current_user, db)]
-    return [_serialize_group(db, g) for g in groups]
+    # One grouped COUNT instead of one per group (the list is every active SAT group).
+    counts = dict(db.query(GroupStudent.group_id, func.count(GroupStudent.student_id)).filter(
+        GroupStudent.group_id.in_([g.id for g in groups])
+    ).group_by(GroupStudent.group_id).all()) if groups else {}
+    return [_serialize_group(db, g, counts.get(g.id, 0)) for g in groups]
 
 
 @checkpoints_admin_router.patch("/groups/{group_id}")
