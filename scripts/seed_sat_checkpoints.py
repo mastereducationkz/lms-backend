@@ -68,10 +68,14 @@ def seed(db: Session, *, sat_course_id: int, blocks: int = 9, quiz_course_title:
 
     quiz_course = _ensure_quiz_course(db, quiz_course_title)
     created = 0
+    updated = 0
     for n, (v1, v2, m1) in enumerate(mapping, start=1):
         lesson = _ensure_quiz_lesson(db, quiz_course, n)
         definition = db.query(CheckpointDefinition).filter_by(course_id=sat_course_id, number=n).first()
         if definition is not None:
+            if definition.quiz_lesson_id is None:
+                definition.quiz_lesson_id = lesson.id
+                updated += 1
             continue
         definition = CheckpointDefinition(course_id=sat_course_id, number=n, title=f"Checkpoint {n}",
                                           quiz_lesson_id=lesson.id, total_questions=DEFAULT_TOTAL_QUESTIONS,
@@ -84,7 +88,7 @@ def seed(db: Session, *, sat_course_id: int, blocks: int = 9, quiz_course_title:
         ])
         created += 1
     db.commit()
-    return {"quiz_course_id": quiz_course.id, "created_definitions": created, "updated_definitions": 0, "mapping": mapping}
+    return {"quiz_course_id": quiz_course.id, "created_definitions": created, "updated_definitions": updated, "mapping": mapping}
 
 
 def main() -> None:  # pragma: no cover - operator CLI

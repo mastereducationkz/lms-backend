@@ -51,3 +51,22 @@ def test_seed_creates_hidden_course_and_definitions_idempotently(db):
     again = seed(db, sat_course_id=course.id, blocks=2, quiz_course_title="SAT Checkpoints (seed test)")
     assert again["created_definitions"] == 0 and again["quiz_course_id"] == quiz_course.id
     assert db.query(CheckpointDefinition).filter_by(course_id=course.id).count() == 2
+
+
+def test_seed_relinks_definition_whose_quiz_lesson_was_deleted(db):
+    from scripts.seed_sat_checkpoints import seed
+    from src.checkpoints.models import CheckpointDefinition
+    course, v, m = make_sat_course(db, n_verbal=2, n_math=1)
+    title = "SAT Checkpoints (relink test)"
+    seed(db, sat_course_id=course.id, blocks=1, quiz_course_title=title)
+    d = db.query(CheckpointDefinition).filter_by(course_id=course.id, number=1).one()
+    old_lesson_id = d.quiz_lesson_id
+    d.quiz_lesson_id = None            # simulate the quiz lesson having been deleted
+    db.query(Step).filter(Step.lesson_id == old_lesson_id).delete(synchronize_session=False)
+    db.query(Lesson).filter(Lesson.id == old_lesson_id).delete(synchronize_session=False)
+    db.flush()
+    out = seed(db, sat_course_id=course.id, blocks=1, quiz_course_title=title)
+    db.refresh(d)
+    assert out["created_definitions"] == 0 and out["updated_definitions"] == 1
+    assert d.quiz_lesson_id is not None and d.quiz_lesson_id != old_lesson_id
+    assert db.get(Lesson, d.quiz_lesson_id).title == "Checkpoint 1"
