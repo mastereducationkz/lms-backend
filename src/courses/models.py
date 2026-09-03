@@ -28,6 +28,12 @@ class StudentSyncOutbox(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     next_attempt_at = Column(DateTime, nullable=True, index=True)
     published_at = Column(DateTime, nullable=True)
+    # Per-target delivery state (Platform Integration Pack §4):
+    #   {"sat": {"status": "ok|not_ready|retry|skipped", "attempts": n, "last_error": "…",
+    #            "updated_at": "…"}, "ielts": {…}}
+    # A retry posts only to targets not yet ok/skipped; NULL (rows enqueued before p17) means
+    # "nothing delivered yet" — every configured target is attempted once.
+    target_state = Column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
 
     __table_args__ = (
         Index("ix_student_sync_outbox_status_next", "status", "next_attempt_at"),

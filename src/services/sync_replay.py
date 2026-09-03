@@ -58,9 +58,22 @@ def replay(db, *, event_type: str | None = None, like_error: str | None = None,
             r.status = "pending"
             r.attempts = 0
             r.next_attempt_at = now
+            r.target_state = _reset_unfinished_targets(r.target_state)
         db.commit()
     return {"replayed": len(rows), "dry_run": dry_run,
             "ids": [r.id for r in rows[:20]] + (["..."] if len(rows) > 20 else [])}
+
+
+def _reset_unfinished_targets(state):
+    """Keep the targets that already succeeded (ok/skipped) so the replay re-posts only to the
+    ones that failed, and give those a fresh attempt budget. NULL stays NULL (attempt all)."""
+    if not state:
+        return state
+    fresh = {}
+    for name, entry in state.items():
+        entry = entry or {}
+        fresh[name] = entry if entry.get("status") in ("ok", "skipped") else {**entry, "attempts": 0}
+    return fresh
 
 
 def main() -> None:
