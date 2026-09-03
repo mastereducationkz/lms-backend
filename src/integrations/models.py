@@ -89,8 +89,9 @@ class PlatformWeeklySet(Base):
     platform = Column(String(16), nullable=False)
     weekly_set_id = Column(Integer, nullable=False)
     title = Column(String, nullable=True)
-    date_from = Column(Date, nullable=True)
-    date_to = Column(Date, nullable=True)
+    # Full timestamps (naive UTC): the AI Speaking part closes at date_to's exact minute.
+    date_from = Column(DateTime, nullable=True)
+    date_to = Column(DateTime, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     track = Column(String(16), nullable=True)
     modules = Column(_JSONB, nullable=True)  # [{module, test_id, test_title}]
@@ -99,4 +100,24 @@ class PlatformWeeklySet(Base):
     __table_args__ = (
         UniqueConstraint("platform", "weekly_set_id", name="uq_platform_weekly_sets_set"),
         Index("ix_platform_weekly_sets_active_window", "platform", "is_active", "date_to"),
+    )
+
+
+class PlatformTestAssignment(Base):
+    """Links one auto-created ``platform_test`` Assignment to its weekly set and group
+    (Platform Integration Pack §6.3, E1). The assignment itself is a normal ``assignments`` row."""
+
+    __tablename__ = "platform_test_assignments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, unique=True)
+    platform = Column(String(16), nullable=False)
+    weekly_set_id = Column(Integer, nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=_utcnow)
+    updated_at = Column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("platform", "weekly_set_id", "group_id", name="uq_platform_test_assignments_set_group"),
+        Index("ix_platform_test_assignments_group", "group_id"),
     )

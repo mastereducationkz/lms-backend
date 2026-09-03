@@ -62,6 +62,10 @@ class Group(Base):
     # Applied when resolving NUET weekly sets: content_week = leaderboard_week − offset.
     weekly_set_week_offset = Column(Integer, nullable=False, default=0, server_default="0")
 
+    # Platform Integration Pack §6.3: when true this group never receives auto-created
+    # platform-test assignments (opt-out is per group; weekly sets are global on IELTS).
+    platform_tests_opt_out = Column(Boolean, nullable=False, default=False, server_default="false")
+
     teacher = relationship("UserInDB", foreign_keys=[teacher_id], post_update=True)
     curator = relationship("UserInDB", foreign_keys=[curator_id], post_update=True)
     students = relationship("GroupStudent", back_populates="group", cascade="all, delete-orphan")
