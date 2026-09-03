@@ -97,8 +97,11 @@ def ielts_progress(db: Session, user_id: int, now: Optional[datetime] = None) ->
         }
     latest_bands = [modules[m]["now"] for m in IELTS_MODULES]
     bests = [modules[m]["best"] for m in IELTS_MODULES]
+    from src.integrations.diagnostics import stored_start
+
     return {
         "modules": modules,
+        "start": stored_start(db, user_id),   # diagnostic entry bands, stored by the nightly job
         "overall_now": ielts_overall(latest_bands) if all(b is not None for b in latest_bands) else None,
         "overall_best": ielts_overall(bests) if all(b is not None for b in bests) else None,
         "overall_missing": [m for m in IELTS_MODULES if modules[m]["now"] is None],

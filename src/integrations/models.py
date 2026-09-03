@@ -126,6 +126,24 @@ class StudentTarget(Base):
     )
 
 
+class PlatformDiagnostic(Base):
+    """A student's diagnostic entry bands on a platform (IELTS: listening/reading/writing, no
+    Speaking), fetched by the nightly job in batches — the "start" segment of the targets tile.
+    ``payload`` is NULL when the platform answered that the student never took the diagnostic."""
+
+    __tablename__ = "platform_diagnostics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    platform = Column(String(16), nullable=False, default="ielts")
+    payload = Column(_JSONB, nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "platform", name="uq_platform_diagnostics_user_platform"),
+    )
+
+
 class PlatformTestAssignment(Base):
     """Links one auto-created ``platform_test`` Assignment to its weekly set and group
     (Platform Integration Pack §6.3, E1). The assignment itself is a normal ``assignments`` row."""
