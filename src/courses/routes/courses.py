@@ -69,7 +69,11 @@ def _trial_filter_lesson_payload(lessons, allowed_ids):
     return lessons
 
 
-def _checkpoint_filter_lesson_payload(db, current_user, lessons, target_user_id=None):
+def _checkpoint_filter_lesson_payload(db, current_user, lessons, target_user_id=None, *,
+                                       strip_steps: bool = True,
+                                       checkpoint_lesson_ids=None,
+                                       visible_checkpoint_ids=None,
+                                       open_checkpoint_ids=None):
     """Apply checkpoint visibility to a list of lesson payload objects, in place.
 
     Students outside a checkpoints-enabled group never see checkpoint lessons at all — the
@@ -81,6 +85,20 @@ def _checkpoint_filter_lesson_payload(db, current_user, lessons, target_user_id=
     ``?student_id=``); left ``None``, staff browsing without a target see everything unfiltered,
     matching every other lesson type.
 
+    ``strip_steps`` controls whether a locked checkpoint's step *content* gets blanked here.
+    ``get_module_lessons`` / ``get_course_lessons`` serialize real ORM step content and need this;
+    ``get_course_modules`` passes ``strip_steps=False`` because it never joinedloads
+    ``Lesson.steps`` in the first place (see the comment near its lesson query) and instead
+    renders steps from a separate lightweight, column-only query that already hardcodes
+    ``content_text=None`` — stripping here would only trigger a wasted lazy-load SELECT of the
+    heavy step columns (content_text/video_url/attachments) that gets thrown away unread.
+
+    ``checkpoint_lesson_ids`` / ``visible_checkpoint_ids`` / ``open_checkpoint_ids`` let a caller
+    that already computed these this request (e.g. ``get_course_modules``) pass them straight in
+    and skip the repeat queries; each falls back to computing itself when omitted. Note
+    ``open_checkpoint_ids`` is only ever consulted when ``strip_steps`` is true, so a caller
+    passing ``strip_steps=False`` need not compute it at all.
+
     Cheap for ordinary courses: one small query over the definition table, and the per-student
     queries only run when this payload actually contains a checkpoint quiz lesson.
     """
@@ -90,14 +108,26 @@ def _checkpoint_filter_lesson_payload(db, current_user, lessons, target_user_id=
     from src.checkpoints import service as checkpoint_service
 
     payload_ids = {int(l.id) for l in lessons}
-    all_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db) & payload_ids
+    all_lesson_ids = (
+        checkpoint_service.checkpoint_quiz_lesson_ids(db)
+        if checkpoint_lesson_ids is None else checkpoint_lesson_ids
+    )
+    all_ids = all_lesson_ids & payload_ids
     if not all_ids:
         return lessons
-    _, visible = checkpoint_service.checkpoint_visibility(db, user_id)
-    open_ids = checkpoint_service.open_checkpoint_lesson_ids_for_student(db, user_id)
+    if visible_checkpoint_ids is None:
+        _, visible = checkpoint_service.checkpoint_visibility(db, user_id, all_lesson_ids=all_lesson_ids)
+    else:
+        visible = visible_checkpoint_ids
     hidden = all_ids - visible
     if hidden:
         lessons[:] = [l for l in lessons if int(l.id) not in hidden]
+    if not strip_steps:
+        return lessons
+    open_ids = (
+        checkpoint_service.open_checkpoint_lesson_ids_for_student(db, user_id)
+        if open_checkpoint_ids is None else open_checkpoint_ids
+    )
     for lesson in lessons:
         lid = int(lesson.id)
         if lid in all_ids and lid not in open_ids:
@@ -759,13 +789,45 @@ def get_course_modules(
                             unlocked_by_redirect_ids.add(les.next_lesson_id)
 
     # Checkpoint quiz lesson ids, fetched once for the whole request (not per module) so an
-    # ordinary course without any checkpoints pays exactly one small extra query.
+    # ordinary course without any checkpoints pays exactly one small extra query. Hoisted
+    # unconditionally — not just when include_lessons — so the "Checkpoints" module can also be
+    # hidden from an include_lessons=False response (see the visibility check right below).
     from src.checkpoints import service as checkpoint_service
-    checkpoint_lesson_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db) if include_lessons else set()
+    checkpoint_lesson_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db)
+
+    # Resolve, once per request, whether the viewer may see ANY checkpoint lesson in this course at
+    # all. Without this, a student outside every checkpoints-enabled group still saw the
+    # "Checkpoints" module's title/id/total_lessons when asking for modules without lessons (the
+    # include_lessons branch below only ever hid an *empty* module, never ran for
+    # include_lessons=False at all). Only touches the DB when this course actually has a
+    # non-empty "Checkpoints" module to begin with, so an ordinary course — or one on a system
+    # where checkpoints don't exist yet — pays nothing beyond the query above.
+    checkpoint_visible_ids: Optional[set] = None
+    checkpoint_open_ids: Optional[set] = None
+    viewer_may_see_any_checkpoint = True
+    checkpoints_module = None
+    if checkpoint_lesson_ids:
+        checkpoints_module = next(
+            (m for m in modules if m.title == "Checkpoints" and lesson_count_map.get(m.id, 0) > 0),
+            None,
+        )
+    if checkpoints_module is not None and checkpoint_target_user_id is not None:
+        checkpoint_lessons_in_course = {l.id for l in checkpoints_module.lessons} & checkpoint_lesson_ids
+        if checkpoint_lessons_in_course:
+            _, checkpoint_visible_ids = checkpoint_service.checkpoint_visibility(
+                db, checkpoint_target_user_id, all_lesson_ids=checkpoint_lesson_ids
+            )
+            viewer_may_see_any_checkpoint = bool(checkpoint_lessons_in_course & checkpoint_visible_ids)
 
     # Enrich with lesson counts
     modules_data = []
     for module in modules:
+        # A "Checkpoints" module this viewer may not see any lesson of does not exist for them —
+        # the feature must be fully invisible outside the pilot, not just empty — regardless of
+        # whether the caller asked for lessons at all (Finding 2 fix).
+        if module is checkpoints_module and not viewer_may_see_any_checkpoint:
+            continue
+
         # Create module data without lessons first
         module_dict = {
             "id": module.id,
@@ -784,8 +846,18 @@ def get_course_modules(
             lessons = sorted(module.lessons, key=lambda x: x.order_index)
 
             if checkpoint_lesson_ids & {l.id for l in lessons}:
+                # strip_steps=False: this endpoint never serializes real step content for
+                # checkpoint lessons (see the docstring) — the steps rendered below always come
+                # from the lightweight, hardcoded-content_text=None query further down, so
+                # stripping here would only trigger a wasted lazy-load of the ORM `.steps`
+                # relationship (Finding 1). checkpoint_lesson_ids/visible_checkpoint_ids reuse the
+                # sets this request already computed above instead of re-querying them here
+                # (Finding 3).
                 lessons = _checkpoint_filter_lesson_payload(
-                    db, current_user, list(lessons), target_user_id=checkpoint_target_user_id
+                    db, current_user, list(lessons), target_user_id=checkpoint_target_user_id,
+                    strip_steps=False,
+                    checkpoint_lesson_ids=checkpoint_lesson_ids,
+                    visible_checkpoint_ids=checkpoint_visible_ids,
                 )
 
             lessons_data = []
@@ -904,12 +976,15 @@ def get_course_modules(
             # whatever visibility left in lessons_data (possibly fewer than the raw module count).
             if checkpoint_lesson_ids & {l["id"] for l in lessons_data}:
                 if checkpoint_target_user_id is not None:
-                    open_ids = checkpoint_service.open_checkpoint_lesson_ids_for_student(
-                        db, checkpoint_target_user_id
-                    )
+                    # Cached on first use so a request with more than one checkpoint-bearing
+                    # module still only pays this query once (Finding 3).
+                    if checkpoint_open_ids is None:
+                        checkpoint_open_ids = checkpoint_service.open_checkpoint_lesson_ids_for_student(
+                            db, checkpoint_target_user_id
+                        )
                     for entry in lessons_data:
                         if entry["id"] in checkpoint_lesson_ids:
-                            entry["is_accessible"] = entry["id"] in open_ids
+                            entry["is_accessible"] = entry["id"] in checkpoint_open_ids
                 module_dict["total_lessons"] = len(lessons_data)
 
             # Check if all lessons in module are completed

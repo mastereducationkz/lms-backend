@@ -226,6 +226,41 @@ def test_course_modules_show_locked_and_open_checkpoints_to_enabled_group(db):
     assert (module["total_lessons"] if isinstance(module, dict) else module.total_lessons) == len(lessons)
 
 
+def test_course_modules_without_lessons_hides_checkpoints_from_non_enabled_groups(db):
+    """Finding 2 regression: the module must be omitted for a non-pilot student even when the
+    caller asks for modules without lessons (include_lessons=False) — not just when it does."""
+    from src.courses.routes.courses import get_course_modules
+    w = _world(db)
+    other_group = make_group(db, enabled=False, name="not-enabled-2")
+    outsider = make_user(db)
+    enroll(db, outsider, other_group, w.sat_course, w.admin)
+
+    mods = get_course_modules(w.sat_course.id, include_lessons=False, student_id=None,
+                              current_user=outsider, db=db)
+    titles = [m["title"] if isinstance(m, dict) else m.title for m in mods]
+    assert "Checkpoints" not in titles
+
+    mods_enabled = get_course_modules(w.sat_course.id, include_lessons=False, student_id=None,
+                                      current_user=w.student, db=db)
+    titles_enabled = [m["title"] if isinstance(m, dict) else m.title for m in mods_enabled]
+    assert "Checkpoints" in titles_enabled
+
+
+def test_course_modules_locked_checkpoint_carries_no_step_content(db):
+    """Finding 1 regression guard: get_course_modules(include_lessons=True) never lazy-loads a
+    locked checkpoint's real steps — its rendered payload must still carry no content_text."""
+    from src.courses.routes.courses import get_course_modules
+    w = _world(db)                      # student has CP1 open, CP2 locked
+    mods = get_course_modules(w.sat_course.id, include_lessons=True, student_id=None,
+                              current_user=w.student, db=db)
+    module = next(m for m in mods if (m["title"] if isinstance(m, dict) else m.title) == "Checkpoints")
+    lessons = module["lessons"] if isinstance(module, dict) else module.lessons
+    by_title = {l["title"]: l for l in lessons}
+    locked_steps = by_title["Checkpoint 2"].get("steps", [])
+    assert locked_steps, "expected the locked checkpoint to still list its step metadata"
+    assert all(s.get("content_text") is None for s in locked_steps)
+
+
 def test_check_lesson_access_reports_the_locked_reason(db):
     from src.courses.routes.courses import check_lesson_access
     w = _world(db)

@@ -471,15 +471,19 @@ def checkpoint_quiz_lesson_ids(db: Session) -> set:
         CheckpointDefinition.quiz_lesson_id.isnot(None)).all()}
 
 
-def checkpoint_visibility(db: Session, user_id: int) -> Tuple[Set[int], Set[int]]:
+def checkpoint_visibility(db: Session, user_id: int, *,
+                           all_lesson_ids: Optional[Set[int]] = None) -> Tuple[Set[int], Set[int]]:
     """(every checkpoint quiz lesson, the ones this student may see at all).
 
     A student in no checkpoints-enabled, active group sees none of them — the feature is invisible
     outside the pilot. Inside an enabled group every checkpoint of that group's courses is listed;
     whether each one is *enterable* is a separate question answered by
     ``open_checkpoint_lesson_ids_for_student``.
+
+    ``all_lesson_ids`` lets a caller that already ran ``checkpoint_quiz_lesson_ids(db)`` this
+    request (e.g. ``get_course_modules``) pass it in and skip the repeat query.
     """
-    all_ids = checkpoint_quiz_lesson_ids(db)
+    all_ids = checkpoint_quiz_lesson_ids(db) if all_lesson_ids is None else all_lesson_ids
     if not all_ids:
         return set(), set()
     course_ids = {
