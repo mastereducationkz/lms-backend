@@ -55,7 +55,7 @@ def test_opens_only_when_all_three_units_done_any_order(db):
     assert [r.checkpoint_number for r in opened] == [1]
     row = opened[0]
     assert row.status == "available" and row.opened_by == "auto"
-    assert row.opened_at == now and row.deadline == now + timedelta(hours=24)
+    assert row.opened_at == now and row.deadline == now + timedelta(hours=service.DEADLINE_HOURS)
     assert row.required_unit_ids == [v[0].id, v[1].id, m[0].id]
     assert row.group_id == group.id and row.checkpoint_id == d1.id
     # idempotent

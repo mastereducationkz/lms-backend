@@ -68,16 +68,28 @@ def _quiz_json(title, n_questions):
     return json.dumps({"title": title, "questions": questions})
 
 
-def make_quiz_lessons(db, n=2, n_questions=2):
-    """Hidden 'SAT Checkpoints' course with `n` quiz lessons. Returns (course, [lessons], [steps]).
+def make_quiz_lessons(db, course=None, n=2, n_questions=2):
+    """Quiz lessons in a "Checkpoints" module. Returns (course, [lessons], [steps]).
 
     Every lesson is `is_initially_unlocked=True`, like the real seed — which is exactly why the
     per-lesson checkpoint guard is needed on top of the course-level access hook.
+
+    With `course` given, the "Checkpoints" module is created (or reused, if one already exists)
+    inside that course — this is the real seed's shape, where checkpoint quizzes live inside the
+    SAT course itself. With `course` omitted, the old pre-move shape is kept exactly: a separate
+    hidden "SAT Checkpoints (test)" course is created to hold them, so existing callers are
+    unaffected.
     """
-    c = Course(title="SAT Checkpoints (test)", course_type="sat", is_active=True)
-    db.add(c); db.flush()
-    m = Module(title="Checkpoints", course_id=c.id, order_index=0)
-    db.add(m); db.flush()
+    if course is None:
+        c = Course(title="SAT Checkpoints (test)", course_type="sat", is_active=True)
+        db.add(c); db.flush()
+    else:
+        c = course
+    m = db.query(Module).filter(Module.course_id == c.id, Module.title == "Checkpoints").first()
+    if m is None:
+        order_index = db.query(Module).filter(Module.course_id == c.id).count()
+        m = Module(title="Checkpoints", course_id=c.id, order_index=order_index)
+        db.add(m); db.flush()
     lessons, steps = [], []
     for i in range(n):
         title = f"Checkpoint {i + 1}"

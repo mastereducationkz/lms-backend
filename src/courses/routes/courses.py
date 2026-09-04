@@ -795,6 +795,16 @@ def get_course_modules(
     from src.checkpoints import service as checkpoint_service
     checkpoint_lesson_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db)
 
+    # Units the target student may not start yet because a checkpoint of theirs is pending
+    # (Task 1: blocked-unit rule). Only computed when there is a concrete target student and this
+    # course actually has checkpoint quizzes at all, so an ordinary viewer — or a course with no
+    # checkpoints — pays nothing.
+    checkpoint_blocked_ids: set = set()
+    if checkpoint_lesson_ids and checkpoint_target_user_id is not None:
+        checkpoint_blocked_ids = checkpoint_service.blocked_unit_lesson_ids_for_student(
+            db, checkpoint_target_user_id
+        )
+
     # Resolve, once per request, whether the viewer may see ANY checkpoint lesson in this course at
     # all. Without this, a student outside every checkpoints-enabled group still saw the
     # "Checkpoints" module's title/id/total_lessons when asking for modules without lessons (the
@@ -965,7 +975,15 @@ def get_course_modules(
                 else:
                     # Teachers and admins can access all lessons
                     lesson_dict["is_accessible"] = True
-                
+
+                # Blocked-unit rule (Task 1): a unit bound to a still-pending checkpoint is
+                # locked regardless of what the sequential logic above decided. Must come last so
+                # it wins over every unlock path (initially-unlocked, redirect, assignment,
+                # manual unlock). Never applies to the checkpoint quiz lessons themselves — those
+                # get their own accessibility override further down.
+                if lesson.id in checkpoint_blocked_ids:
+                    lesson_dict["is_accessible"] = False
+
                 lessons_data.append(lesson_dict)
             
             # Add lessons to module data
@@ -1333,8 +1351,11 @@ def get_lesson(
     # Check course access
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
-    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
     assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     # Efficiently count steps without loading them
@@ -1396,6 +1417,13 @@ def check_lesson_access(
             units = checkpoint_service.unit_progress(db, current_user.id, definition)
             reason = checkpoint_service.locked_reason(units) or reason
         return {"accessible": False, "reason": reason}
+
+    # Blocked-unit rule (Task 1): a unit bound to a still-pending checkpoint is locked until that
+    # checkpoint is done, regardless of any other unlock path below.
+    if lesson_id in checkpoint_service.blocked_unit_lesson_ids_for_student(db, current_user.id):
+        definition = checkpoint_service.blocking_checkpoint_for_student(db, current_user.id)
+        name = definition.title if definition is not None else "your checkpoint"
+        return {"accessible": False, "reason": f"Finish {name} before starting this unit"}
 
     if getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
@@ -1751,8 +1779,11 @@ def get_lesson_steps(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
-    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
     assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     if include_content:
@@ -1879,8 +1910,11 @@ def get_step(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this step")
-    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
     assert_student_may_view_checkpoint_lesson(db, current_user, step.lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, step.lesson_id)
     _trial_hard_gate(db, current_user, step.lesson_id)
 
     return StepSchema.from_orm(step)
@@ -2188,8 +2222,11 @@ def get_lesson_materials(
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied")
-    from src.checkpoints.service import assert_student_may_view_checkpoint_lesson
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
     assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     materials = db.query(LessonMaterial).filter(

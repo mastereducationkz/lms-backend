@@ -143,13 +143,21 @@ def test_staff_can_read_every_checkpoint_lesson(db):
 
 
 def test_non_checkpoint_lessons_are_untouched(db):
-    """The guard must only ever fire on a checkpoint quiz lesson."""
+    """The checkpoint guards must only ever fire on a checkpoint quiz lesson, or on a unit that is
+    actually bound to a pending checkpoint (the blocked-unit rule) — an ordinary lesson with no
+    checkpoint binding at all stays readable even while CP1 is pending. (A required unit of CP2,
+    like d2's, is a *bound* unit and is correctly blocked here — that is covered by
+    tests/test_checkpoints_unit_blocking.py, not this test.)"""
+    from src.schemas.models import Lesson
     from src.courses.routes.courses import get_lesson_steps
     from src.checkpoints import service
     admin, group, s, d1, d2, _, lessons, steps = _world(db)
-    sat_lesson_id = d2.required_units[0].lesson_id
-    assert sat_lesson_id not in service.checkpoint_quiz_lesson_ids(db)
-    assert get_lesson_steps(sat_lesson_id, include_content=True, current_user=s, db=db) is not None
+    module_id = db.query(Lesson.module_id).filter(Lesson.id == d1.required_units[0].lesson_id).scalar()
+    unbound = Lesson(title="Unbound unit", module_id=module_id, order_index=99, is_initially_unlocked=True)
+    db.add(unbound); db.flush()
+    assert unbound.id not in service.checkpoint_quiz_lesson_ids(db)
+    assert unbound.id not in service.blocked_unit_lesson_ids_for_student(db, s.id)
+    assert get_lesson_steps(unbound.id, include_content=True, current_user=s, db=db) is not None
 
 
 def test_course_lesson_listing_strips_the_locked_checkpoint(db):

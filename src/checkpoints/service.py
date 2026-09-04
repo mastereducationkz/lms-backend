@@ -2,7 +2,7 @@
 
 Trigger rule (ТЗ §4-§6, §10): a checkpoint opens for a student when ALL required units of its
 block are completed by that student — nothing else (no calendar week, no lesson counts, no
-attendance). Deadline = opened_at + 24h (§8). Rows are per (student, group, checkpoint).
+attendance). Deadline = opened_at + 72h (§8). Rows are per (student, group, checkpoint).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from src.checkpoints.completion import completed_lesson_ids
 from src.checkpoints.models import (
     OPEN_STATUSES, STATUS_AVAILABLE, STATUS_COMPLETED, STATUS_LOCKED, STATUS_OVERDUE,
-    STATUS_REOPENED, CheckpointDefinition, StudentCheckpoint,
+    STATUS_REOPENED, CheckpointDefinition, CheckpointRequiredUnit, StudentCheckpoint,
 )
 from src.courses.models import CourseGroupAccess, Group, GroupStudent, Lesson, Module, Step
 from src.progress.models import QuizAttempt
@@ -25,7 +25,7 @@ from src.utils.permissions import get_group_course_ids
 
 _log = logging.getLogger(__name__)
 
-DEADLINE_HOURS = 24
+DEADLINE_HOURS = 72
 
 # The four per-user lesson caches whose payloads depend on which checkpoints are open for a
 # student (see _checkpoint_filter_lesson_payload / assert_student_may_view_checkpoint_lesson).
@@ -282,15 +282,18 @@ def sync_group(db: Session, group: Group, *, now: Optional[datetime] = None, com
 # ---------------------------------------------------------------- overdue
 
 def refresh_overdue(rows: Iterable[StudentCheckpoint], now: Optional[datetime] = None) -> List[StudentCheckpoint]:
-    """Flip lapsed rows to overdue. This never changes lesson visibility (a locked row was never
-    visible; a row going from open to overdue is still non-locked), so it does not invalidate the
-    lesson caches."""
+    """Flip lapsed rows to overdue. Since ``overdue`` no longer blocks (see
+    blocked_unit_lesson_ids_for_student), a row flipping from available/reopened to overdue
+    releases whatever checkpoint-bound units it was holding back for that student, so this DOES
+    invalidate the lesson caches when it actually flips anything."""
     now = now or utcnow()
     flipped = []
     for row in rows:
         if row.status in OPEN_STATUSES and row.deadline is not None and naive(row.deadline) < now:
             row.status = STATUS_OVERDUE
             flipped.append(row)
+    if flipped:
+        _invalidate_lesson_caches()
     return flipped
 
 
@@ -361,16 +364,21 @@ def reopen_for_students(db: Session, *, group: Group, definition: CheckpointDefi
 
 def set_deadline(db: Session, row: StudentCheckpoint, deadline: datetime, actor_id: int,
                  now: Optional[datetime] = None, commit: bool = True) -> StudentCheckpoint:
-    """Change a row's deadline (and un-overdue it if the new deadline is in the future). Neither
-    outcome touches locked-ness, so this does not invalidate the lesson caches."""
+    """Change a row's deadline (and un-overdue it if the new deadline is in the future). Moving a
+    row from overdue back to available re-blocks whatever checkpoint-bound units it was holding
+    back, so that transition invalidates the lesson caches; a plain deadline change with no status
+    transition does not."""
     now = now or utcnow()
     row.deadline = naive(deadline)
     row.updated_by = actor_id
-    if row.status == STATUS_OVERDUE and row.deadline > now:
+    was_overdue = row.status == STATUS_OVERDUE
+    if was_overdue and row.deadline > now:
         row.status = STATUS_AVAILABLE
     db.flush()
     if commit:
         db.commit()
+    if was_overdue and row.status == STATUS_AVAILABLE:
+        _invalidate_lesson_caches()
     return row
 
 
@@ -438,8 +446,8 @@ def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
                       now: Optional[datetime] = None, commit: bool = True) -> List[StudentCheckpoint]:
     """Copy a finalized quiz attempt into every open row of that checkpoint for the student.
 
-    Completing a checkpoint does not change lesson visibility (it goes from a non-locked status to
-    another non-locked one), so this does not invalidate the lesson caches."""
+    Completing a checkpoint now unblocks the units of any later checkpoint that were held back by
+    it (see blocked_unit_lesson_ids_for_student), so this invalidates the lesson caches."""
     now = now or utcnow()
     definition = checkpoint_definition_for_step(db, attempt.step_id)
     if definition is None or attempt.is_draft:
@@ -462,6 +470,7 @@ def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
         db.flush()
         if commit:
             db.commit()
+        _invalidate_lesson_caches()
     return done
 
 
@@ -556,6 +565,87 @@ def student_has_checkpoint_access_to_course(db: Session, student_id: int, course
         Group.is_active == True,  # noqa: E712
         Module.course_id == course_id,
     ).first() is not None
+
+
+# ---------------------------------------------------------------- blocked-unit rule
+
+BLOCKING_STATUSES = (STATUS_AVAILABLE, STATUS_REOPENED)
+
+
+def _pending_checkpoint_rows(db: Session, user_id: int) -> List[StudentCheckpoint]:
+    """Rows that hold this student back: open (available/reopened), never completed, and only
+    ever from a checkpoints-enabled, active group with an active definition (the pilot scoping).
+
+    A row that has lapsed into ``overdue`` does NOT hold the student back — once the 72h deadline
+    passes without a submission, the student is free to move on to later checkpoint-bound units
+    rather than being stuck; the missed checkpoint itself stays unsubmittable
+    (``assert_can_submit``) until an admin calls ``reopen_for_students``."""
+    return (
+        db.query(StudentCheckpoint)
+        .join(CheckpointDefinition, CheckpointDefinition.id == StudentCheckpoint.checkpoint_id)
+        .join(Group, Group.id == StudentCheckpoint.group_id)
+        .filter(
+            StudentCheckpoint.student_id == user_id,
+            StudentCheckpoint.status.in_(BLOCKING_STATUSES),
+            CheckpointDefinition.is_active == True,  # noqa: E712
+            Group.checkpoints_enabled == True,  # noqa: E712
+            Group.is_active == True,  # noqa: E712
+        )
+        .order_by(StudentCheckpoint.checkpoint_number)
+        .all()
+    )
+
+
+def blocking_checkpoint_for_student(db: Session, user_id: int) -> Optional[CheckpointDefinition]:
+    """The checkpoint a student must clear before starting further checkpoint units."""
+    rows = _pending_checkpoint_rows(db, user_id)
+    if not rows:
+        return None
+    return db.get(CheckpointDefinition, rows[0].checkpoint_id)
+
+
+def blocked_unit_lesson_ids_for_student(db: Session, user_id: int) -> Set[int]:
+    """Units the student may not start until they finish the checkpoint they owe.
+
+    A unit is blocked when it belongs to some active checkpoint, the student has not completed
+    it, and a checkpoint of theirs is pending. Units bound to no checkpoint are never blocked,
+    and an already-completed unit stays open so past material can be reviewed. Empty for every
+    student outside a checkpoints-enabled group — the feature must not touch anyone else.
+    """
+    rows = _pending_checkpoint_rows(db, user_id)
+    if not rows:
+        return set()
+    course_ids = {
+        cid
+        for group in enabled_groups_for_student(db, user_id)
+        for cid in get_group_course_ids(db, group.id)
+    }
+    if not course_ids:
+        return set()
+    required_ids = {
+        row[0]
+        for row in db.query(CheckpointRequiredUnit.lesson_id)
+        .join(CheckpointDefinition, CheckpointDefinition.id == CheckpointRequiredUnit.checkpoint_id)
+        .filter(
+            CheckpointDefinition.course_id.in_(course_ids),
+            CheckpointDefinition.is_active == True,  # noqa: E712
+        )
+        .all()
+    }
+    if not required_ids:
+        return set()
+    return required_ids - completed_lesson_ids(db, user_id, required_ids)
+
+
+def assert_student_not_blocked_by_checkpoint(db: Session, user, lesson_id: int) -> None:
+    """403 for a unit the student must not start until their pending checkpoint is done."""
+    if getattr(user, "role", None) != "student":
+        return
+    if lesson_id not in blocked_unit_lesson_ids_for_student(db, user.id):
+        return
+    definition = blocking_checkpoint_for_student(db, user.id)
+    name = definition.title if definition is not None else "your checkpoint"
+    raise HTTPException(status_code=403, detail=f"Finish {name} before starting this unit")
 
 
 # ---------------------------------------------------------------- serializers

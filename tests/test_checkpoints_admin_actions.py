@@ -60,13 +60,14 @@ def test_open_for_whole_group_then_single_student_reopen(db):
     now = datetime(2026, 9, 10, 18, 0)
     rows = service.open_for_students(db, group=group, definition=d1, actor_id=admin.id, now=now)
     assert {r.student_id for r in rows} == {s1.id, s2.id}
-    assert all(r.status == "available" and r.opened_by == "admin" and r.deadline == now + timedelta(hours=24) for r in rows)
+    assert all(r.status == "available" and r.opened_by == "admin"
+               and r.deadline == now + timedelta(hours=service.DEADLINE_HOURS) for r in rows)
     # open again is a no-op for already-open rows
     assert service.open_for_students(db, group=group, definition=d1, actor_id=admin.id, now=now) == []
     later = now + timedelta(days=3)
     re = service.reopen_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id, now=later)
     assert len(re) == 1 and re[0].student_id == s1.id and re[0].status == "reopened"
-    assert re[0].reopen_count == 1 and re[0].deadline == later + timedelta(hours=24)
+    assert re[0].reopen_count == 1 and re[0].deadline == later + timedelta(hours=service.DEADLINE_HOURS)
     assert service.get_row(db, s2.id, group.id, d1.id).status == "available"
 
 
@@ -75,7 +76,7 @@ def test_set_deadline_revives_overdue(db):
     admin, _, _, _, _, d1, group, s1, _ = _world(db)
     now = datetime(2026, 9, 12, 12, 0)
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id,
-                                    now=now - timedelta(days=2))[0]
+                                    now=now - timedelta(hours=service.DEADLINE_HOURS + 24))[0]
     service.refresh_overdue([row], now)
     assert row.status == "overdue"
     service.set_deadline(db, row, now + timedelta(hours=5), admin.id, now=now)
@@ -92,10 +93,11 @@ def test_submit_gate_and_recording(db):
     assert e.value.status_code == 403
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id, now=now)[0]
     assert service.assert_can_submit(db, s1.id, d1, now=now) == [row]
-    assert service.assert_can_submit(db, s1.id, d1, now=now + timedelta(hours=25), allow_past_deadline=True) == [row]
+    past_deadline = now + timedelta(hours=service.DEADLINE_HOURS + 1)
+    assert service.assert_can_submit(db, s1.id, d1, now=past_deadline, allow_past_deadline=True) == [row]
     assert row.status == "available"
     with pytest.raises(HTTPException) as e:          # deadline passed
-        service.assert_can_submit(db, s1.id, d1, now=now + timedelta(hours=25))
+        service.assert_can_submit(db, s1.id, d1, now=past_deadline)
     assert e.value.status_code == 409
     attempt = _attempt(db, s1, quiz_course, quiz_lesson, quiz_step, correct=30)
     done = service.record_submission(db, s1.id, attempt, now=now + timedelta(hours=2), commit=False)

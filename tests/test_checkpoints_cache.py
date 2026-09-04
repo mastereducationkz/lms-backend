@@ -68,9 +68,9 @@ def test_no_op_open_does_not_invalidate(db, calls):
     assert calls == []
 
 
-def test_record_submission_does_not_invalidate_lesson_caches(db, calls):
-    """A completed checkpoint goes from one non-locked status to another (open -> completed): it
-    never changes lesson visibility, so no cache should be dropped."""
+def test_record_submission_invalidates_lesson_caches(db, calls):
+    """As of the blocked-unit rule, completing a checkpoint can unblock the units of a later
+    checkpoint that were held back by it, so this must drop the lesson caches."""
     from src.checkpoints import service
     from src.progress.models import QuizAttempt
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
@@ -81,7 +81,7 @@ def test_record_submission_does_not_invalidate_lesson_caches(db, calls):
     db.add(attempt); db.flush()
     calls.clear()
     assert service.record_submission(db, s.id, attempt)
-    assert calls == []
+    assert calls and set(calls[-1]) == EXPECTED
 
 
 def test_reopen_invalidates_but_set_deadline_and_sync_do_not(db, calls):
@@ -114,20 +114,46 @@ def test_sync_student_checkpoints_invalidates_on_auto_open(db, calls):
     assert calls and set(calls[-1]) == EXPECTED
 
 
-def test_refresh_overdue_never_invalidates(db, calls):
-    """overdue is itself a non-locked status, so flipping into it never changes lesson
-    visibility."""
+def test_refresh_overdue_invalidates_when_it_flips_rows(db, calls):
+    """Overdue no longer blocks (the deadline reversal), so a row actually flipping into overdue
+    releases whatever checkpoint-bound units it was holding back and must drop the lesson caches.
+    Re-running on rows that are already overdue flips nothing, so it must not fire again."""
     from datetime import timedelta
     from src.checkpoints import service
     admin, course, v, m, _, _, _, d1, group, s = _world(db)
     rows = service.open_for_students(db, group=group, definition=d1, student_ids=[s.id],
-                                     actor_id=admin.id, now=service.utcnow() - timedelta(days=2))
+                                     actor_id=admin.id, now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))
     calls.clear()
     assert service.refresh_overdue(rows)
-    assert calls == []
+    assert calls and set(calls[-1]) == EXPECTED
     calls.clear()
     assert service.refresh_overdue(rows) == []
     assert calls == []
+
+
+def test_set_deadline_invalidates_only_when_it_unoverdues_a_row(db, calls):
+    """Moving a row from overdue back to available (a future deadline) re-blocks whatever
+    checkpoint-bound units it had released, so that transition must invalidate the lesson caches.
+    A deadline change with no status transition (still overdue, or already available/reopened)
+    must not."""
+    from datetime import timedelta
+    from src.checkpoints import service
+    admin, course, v, m, _, _, _, d1, group, s = _world(db)
+    rows = service.open_for_students(db, group=group, definition=d1, student_ids=[s.id],
+                                     actor_id=admin.id, now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))
+    assert service.refresh_overdue(rows)
+    row = service.get_row(db, s.id, group.id, d1.id)
+    assert row.status == "overdue"
+
+    calls.clear()
+    service.set_deadline(db, row, service.utcnow() - timedelta(hours=1), actor_id=admin.id)
+    assert row.status == "overdue"      # still in the past: no transition
+    assert calls == []
+
+    calls.clear()
+    service.set_deadline(db, row, service.utcnow() + timedelta(hours=5), actor_id=admin.id)
+    assert row.status == "available"    # un-overdue'd: re-blocks
+    assert calls and set(calls[-1]) == EXPECTED
 
 
 def test_invalidation_failure_never_breaks_the_action(db, monkeypatch):

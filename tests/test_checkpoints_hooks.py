@@ -111,7 +111,7 @@ def test_draft_autosave_not_blocked_by_deadline(db):
     from src.checkpoints import service
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
-                                    now=service.utcnow() - timedelta(days=2))[0]   # deadline already passed
+                                    now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))[0]   # deadline already passed
     draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True), current_user=s, db=db)
     assert draft.is_draft is True
     with pytest.raises(HTTPException) as e:   # final submit is still gated
@@ -184,7 +184,7 @@ def test_patch_finalize_past_deadline_is_rejected(db):
     from src.checkpoints import service
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
     service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
-                              now=service.utcnow() - timedelta(days=2))
+                              now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))
     draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True),
                                 current_user=s, db=db)
     with pytest.raises(HTTPException) as e:
@@ -200,7 +200,7 @@ def test_patch_draft_autosave_not_deadline_gated(db):
     from src.checkpoints import service
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
     service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
-                              now=service.utcnow() - timedelta(days=2))
+                              now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))
     draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True),
                                 current_user=s, db=db)
     saved = update_quiz_attempt(draft.id, _update_payload(answers='{"q0": 0}'), current_user=s, db=db)
