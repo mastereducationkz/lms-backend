@@ -236,6 +236,10 @@ class Lesson(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     next_lesson_id = Column(Integer, ForeignKey("lessons.id"), nullable=True)
     is_initially_unlocked = Column(Boolean, default=False)
+    # "unit" = ordinary course unit; "checkpoint" = a block checkpoint assessment. Checkpoints are
+    # lessons so they reuse the quiz player and the course navigation, but they are NOT units: they
+    # never count toward course-progress percentages (see progress/services/lesson_completion.py).
+    kind = Column(String(16), nullable=False, default="unit", server_default="unit")
 
     module = relationship("Module", back_populates="lessons")
     materials = relationship("LessonMaterial", back_populates="lesson", cascade="all, delete-orphan")

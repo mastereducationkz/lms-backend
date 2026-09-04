@@ -110,3 +110,33 @@ def test_seed_moves_legacy_lessons_out_of_the_separate_course(db):
     assert legacy_lesson.module_id == out["module_id"]     # same lesson id, new parent
     assert d.quiz_lesson_id == legacy_lesson.id            # definition untouched
     assert db.query(Step).filter(Step.lesson_id == legacy_lesson.id).count() == 1
+
+
+def test_seed_marks_quiz_lessons_as_checkpoints(db):
+    from scripts.seed_sat_checkpoints import seed
+    course, v, m = make_sat_course(db, n_verbal=3, n_math=1)
+    out = seed(db, sat_course_id=course.id, blocks=1)
+    lesson = db.query(Lesson).filter(Lesson.module_id == out["module_id"]).one()
+    assert lesson.kind == "checkpoint"
+    # ordinary course units are untouched
+    assert db.get(Lesson, v[0].id).kind == "unit"
+
+
+def test_seed_marks_moved_legacy_lessons_as_checkpoints(db):
+    from scripts.seed_sat_checkpoints import seed
+    from src.checkpoints.models import CheckpointDefinition
+    course, v, m = make_sat_course(db, n_verbal=3, n_math=1)
+    legacy_course = Course(title="SAT Checkpoints", course_type="sat", is_active=True)
+    db.add(legacy_course); db.flush()
+    legacy_module = Module(title="Checkpoints", course_id=legacy_course.id, order_index=0)
+    db.add(legacy_module); db.flush()
+    legacy_lesson = Lesson(title="Checkpoint 1", module_id=legacy_module.id, order_index=0,
+                           is_initially_unlocked=True)
+    db.add(legacy_lesson); db.flush()
+    db.add(CheckpointDefinition(course_id=course.id, number=1, title="Checkpoint 1",
+                                quiz_lesson_id=legacy_lesson.id, total_questions=45,
+                                is_active=False))
+    db.flush()
+    seed(db, sat_course_id=course.id, blocks=1)
+    db.refresh(legacy_lesson)
+    assert legacy_lesson.kind == "checkpoint"

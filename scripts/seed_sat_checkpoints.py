@@ -67,9 +67,10 @@ def _move_legacy_lessons(db: Session, sat_course_id: int, module: Module) -> int
     moved = 0
     for definition in definitions:
         lesson = db.get(Lesson, definition.quiz_lesson_id)
-        if lesson is not None and lesson.module_id != module.id:
+        if lesson is not None and (lesson.module_id != module.id or lesson.kind != "checkpoint"):
             lesson.module_id = module.id
             lesson.order_index = definition.number - 1
+            lesson.kind = "checkpoint"
             moved += 1
     if moved:
         db.flush()
@@ -83,7 +84,7 @@ def _ensure_quiz_lesson(db: Session, module: Module, number: int) -> Lesson:
     ).first()
     if lesson is None:
         lesson = Lesson(title=title, module_id=module.id, order_index=number - 1,
-                        is_initially_unlocked=True,
+                        is_initially_unlocked=True, kind="checkpoint",
                         description="45 questions: 2 Verbal units + 1 Math unit, "
                                     "5 easy / 5 medium / 5 hard each.")
         db.add(lesson)
@@ -91,6 +92,8 @@ def _ensure_quiz_lesson(db: Session, module: Module, number: int) -> Lesson:
         db.add(Step(lesson_id=lesson.id, title="Quiz", content_type="quiz", order_index=0,
                     content_text=json.dumps({"title": title, "questions": []})))
         db.flush()
+    lesson.kind = "checkpoint"
+    db.flush()
     return lesson
 
 
