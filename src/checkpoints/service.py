@@ -6,7 +6,7 @@ attendance). Deadline = opened_at + 24h (§8). Rows are per (student, group, che
 """
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy import tuple_
@@ -469,6 +469,34 @@ def checkpoint_quiz_lesson_ids(db: Session) -> set:
     """Every lesson that carries a checkpoint quiz (all definitions, active or not)."""
     return {r[0] for r in db.query(CheckpointDefinition.quiz_lesson_id).filter(
         CheckpointDefinition.quiz_lesson_id.isnot(None)).all()}
+
+
+def checkpoint_visibility(db: Session, user_id: int) -> Tuple[Set[int], Set[int]]:
+    """(every checkpoint quiz lesson, the ones this student may see at all).
+
+    A student in no checkpoints-enabled, active group sees none of them — the feature is invisible
+    outside the pilot. Inside an enabled group every checkpoint of that group's courses is listed;
+    whether each one is *enterable* is a separate question answered by
+    ``open_checkpoint_lesson_ids_for_student``.
+    """
+    all_ids = checkpoint_quiz_lesson_ids(db)
+    if not all_ids:
+        return set(), set()
+    course_ids = {
+        cid
+        for group in enabled_groups_for_student(db, user_id)
+        for cid in get_group_course_ids(db, group.id)
+    }
+    if not course_ids:
+        return all_ids, set()
+    visible = {
+        row[0]
+        for row in db.query(CheckpointDefinition.quiz_lesson_id).filter(
+            CheckpointDefinition.course_id.in_(course_ids),
+            CheckpointDefinition.quiz_lesson_id.isnot(None),
+        ).all()
+    }
+    return all_ids, visible
 
 
 def open_checkpoint_lesson_ids_for_student(db: Session, student_id: int) -> set:

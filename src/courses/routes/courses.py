@@ -69,28 +69,58 @@ def _trial_filter_lesson_payload(lessons, allowed_ids):
     return lessons
 
 
-def _checkpoint_filter_lesson_payload(db, current_user, lessons):
-    """Drop checkpoint quiz lessons that are not open for this student.
+def _checkpoint_filter_lesson_payload(db, current_user, lessons, target_user_id=None):
+    """Apply checkpoint visibility to a list of lesson payload objects, in place.
 
-    The hidden checkpoint course is granted as a whole once ONE checkpoint is open, and these
-    listings serialize every step (``content_text`` and all), so without this a student holding
-    Checkpoint 1 could read the questions of Checkpoints 2-9 straight off the listing endpoints.
-    Dropping rather than blanking: a checkpoint that is not open should not exist for the student.
+    Students outside a checkpoints-enabled group never see checkpoint lessons at all — the
+    feature stays invisible outside the pilot. Inside one, every checkpoint of that group's
+    courses is listed, but only an open one may carry its questions: a locked checkpoint is
+    shown the way any locked lesson is, with no step content.
+
+    ``target_user_id`` lets staff ask "what would this student see" (e.g. course-modules with
+    ``?student_id=``); left ``None``, staff browsing without a target see everything unfiltered,
+    matching every other lesson type.
 
     Cheap for ordinary courses: one small query over the definition table, and the per-student
-    query only runs when this payload actually contains a checkpoint quiz lesson.
+    queries only run when this payload actually contains a checkpoint quiz lesson.
     """
-    if getattr(current_user, "role", None) != "student":
+    if getattr(current_user, "role", None) != "student" and target_user_id is None:
         return lessons
+    user_id = target_user_id or current_user.id
     from src.checkpoints import service as checkpoint_service
+
     payload_ids = {int(l.id) for l in lessons}
-    quiz_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db) & payload_ids
-    if not quiz_ids:
+    all_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db) & payload_ids
+    if not all_ids:
         return lessons
-    hidden = quiz_ids - checkpoint_service.open_checkpoint_lesson_ids_for_student(db, current_user.id)
+    _, visible = checkpoint_service.checkpoint_visibility(db, user_id)
+    open_ids = checkpoint_service.open_checkpoint_lesson_ids_for_student(db, user_id)
+    hidden = all_ids - visible
     if hidden:
         lessons[:] = [l for l in lessons if int(l.id) not in hidden]
+    for lesson in lessons:
+        lid = int(lesson.id)
+        if lid in all_ids and lid not in open_ids:
+            _strip_lesson_steps(lesson)
     return lessons
+
+
+def _strip_lesson_steps(lesson) -> None:
+    """Remove step payload from a lesson the student may see but not enter."""
+    steps = getattr(lesson, "steps", None)
+    if steps is None and isinstance(lesson, dict):
+        steps = lesson.get("steps")
+    if not steps:
+        return
+    for step in steps:
+        if isinstance(step, dict):
+            step["content_text"] = None
+            step["video_url"] = None
+            step["attachments"] = None
+        else:
+            step.content_text = None
+            step.video_url = None
+            step.attachments = None
 
 # =============================================================================
 # COURSE MANAGEMENT
@@ -554,6 +584,11 @@ def get_course_modules(
             raise HTTPException(status_code=403, detail="Only teachers, admins, and head curators can view other students' progress")
         target_user_id = student_id
 
+    # Checkpoint visibility only ever applies to a concrete student: the student themself, or the
+    # student staff explicitly asked about via ?student_id=. Staff browsing without a target see
+    # every lesson unfiltered, same as any other lesson type.
+    checkpoint_target_user_id = target_user_id if (current_user.role == "student" or student_id) else None
+
     # Weekly release: modules unlocked by week based on group start_date
     unlocked_module_ids: Optional[set] = None
     if course.release_schedule == "weekly" and (current_user.role == "student" or student_id):
@@ -723,6 +758,11 @@ def get_course_modules(
                         if is_completed_db or all_steps_done:
                             unlocked_by_redirect_ids.add(les.next_lesson_id)
 
+    # Checkpoint quiz lesson ids, fetched once for the whole request (not per module) so an
+    # ordinary course without any checkpoints pays exactly one small extra query.
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_lesson_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db) if include_lessons else set()
+
     # Enrich with lesson counts
     modules_data = []
     for module in modules:
@@ -742,7 +782,12 @@ def get_course_modules(
         if include_lessons:
             # Use already loaded lessons from joinedload
             lessons = sorted(module.lessons, key=lambda x: x.order_index)
-            
+
+            if checkpoint_lesson_ids & {l.id for l in lessons}:
+                lessons = _checkpoint_filter_lesson_payload(
+                    db, current_user, list(lessons), target_user_id=checkpoint_target_user_id
+                )
+
             lessons_data = []
             for lesson_idx, lesson in enumerate(lessons):
                 # Get steps for this lesson from our lightweight map
@@ -853,13 +898,32 @@ def get_course_modules(
             
             # Add lessons to module data
             module_dict["lessons"] = lessons_data
-            
+
+            # Checkpoint lessons don't follow the sequential-access rule above: accessibility is
+            # "is this checkpoint open for the target student", and total_lessons must reflect
+            # whatever visibility left in lessons_data (possibly fewer than the raw module count).
+            if checkpoint_lesson_ids & {l["id"] for l in lessons_data}:
+                if checkpoint_target_user_id is not None:
+                    open_ids = checkpoint_service.open_checkpoint_lesson_ids_for_student(
+                        db, checkpoint_target_user_id
+                    )
+                    for entry in lessons_data:
+                        if entry["id"] in checkpoint_lesson_ids:
+                            entry["is_accessible"] = entry["id"] in open_ids
+                module_dict["total_lessons"] = len(lessons_data)
+
             # Check if all lessons in module are completed
             if lessons_data and all(l["is_completed"] for l in lessons_data):
                 module_dict["is_completed"] = True
             else:
                 module_dict["is_completed"] = False
-        
+
+            # A "Checkpoints" module that lost every lesson to the visibility filter above (no
+            # checkpoints-enabled group) does not exist for this student — the feature must be
+            # fully invisible outside the pilot, not just empty.
+            if not lessons_data and module.title == "Checkpoints":
+                continue
+
         modules_data.append(module_dict)
 
     if current_user.role == "student" and getattr(current_user, "is_trial", False):
@@ -1241,12 +1305,22 @@ def check_lesson_access(
     if current_user.role != "student":
         return {"accessible": True}
 
-    # A checkpoint quiz lesson is reachable only while that checkpoint is open for this student.
-    from src.checkpoints.service import (
-        student_may_view_checkpoint_lesson, CHECKPOINT_LESSON_DENIED,
-    )
-    if not student_may_view_checkpoint_lesson(db, current_user, lesson_id):
-        return {"accessible": False, "reason": CHECKPOINT_LESSON_DENIED}
+    # A checkpoint quiz lesson is reachable only while that checkpoint is open for this student;
+    # when locked, explain which required unit(s) are still outstanding rather than a bare denial.
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db)
+    if lesson_id in checkpoint_ids:
+        if lesson_id in checkpoint_service.open_checkpoint_lesson_ids_for_student(db, current_user.id):
+            return {"accessible": True}
+        from src.checkpoints.models import CheckpointDefinition
+        definition = db.query(CheckpointDefinition).filter(
+            CheckpointDefinition.quiz_lesson_id == lesson_id
+        ).first()
+        reason = "This checkpoint is not open yet."
+        if definition is not None:
+            units = checkpoint_service.unit_progress(db, current_user.id, definition)
+            reason = checkpoint_service.locked_reason(units) or reason
+        return {"accessible": False, "reason": reason}
 
     if getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
