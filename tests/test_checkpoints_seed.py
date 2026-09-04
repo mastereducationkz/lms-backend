@@ -42,7 +42,9 @@ def test_seed_creates_hidden_course_and_definitions_idempotently(db):
     lessons = db.query(Lesson).filter(Lesson.module_id == module.id).order_by(Lesson.order_index).all()
     assert [l.title for l in lessons] == ["Checkpoint 1", "Checkpoint 2"] and all(l.is_initially_unlocked for l in lessons)
     step = db.query(Step).filter(Step.lesson_id == lessons[0].id).one()
-    assert step.content_type == "quiz" and json.loads(step.content_text) == {"title": "Checkpoint 1", "questions": []}
+    assert step.content_type == "quiz" and json.loads(step.content_text) == {
+        "title": "Checkpoint 1", "questions": [], "display_mode": "all_at_once",
+    }
     d = db.query(CheckpointDefinition).filter_by(course_id=course.id, number=1).one()
     assert d.quiz_lesson_id == lessons[0].id and d.is_active is False and d.total_questions == 45
 

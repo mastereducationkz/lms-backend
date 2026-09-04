@@ -90,7 +90,12 @@ def _ensure_quiz_lesson(db: Session, module: Module, number: int) -> Lesson:
         db.add(lesson)
         db.flush()
         db.add(Step(lesson_id=lesson.id, title="Quiz", content_type="quiz", order_index=0,
-                    content_text=json.dumps({"title": title, "questions": []})))
+                    # display_mode "all_at_once": a checkpoint is a 45-question assessment, so it
+                    # shows as a single page rather than paging one question at a time. The lesson
+                    # editor reads and preserves this field, so authoring the questions keeps it.
+                    content_text=json.dumps({
+                        "title": title, "questions": [], "display_mode": "all_at_once",
+                    })))
         db.flush()
     lesson.kind = "checkpoint"
     db.flush()
