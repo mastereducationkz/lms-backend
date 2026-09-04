@@ -267,3 +267,65 @@ def test_events_apply_in_occurred_at_order_within_a_batch(db):
 def test_occurred_at_is_stored_as_naive_utc(db):
     ingest_batch(db, "ielts", [_env(occurred_at="2026-09-03T15:14:05+05:00")])
     assert db.query(PlatformEvent).one().occurred_at == datetime(2026, 9, 3, 10, 14, 5)
+
+
+# --- SAT parity: legacy results without an attempt, section scaled estimates ------------------
+
+def test_sat_result_without_attempt_ref_is_keyed_by_test(db):
+    _user(db)
+    ready = _env("result.ready", platform="sat", data={"module": "math", "test_id": 501, "attempt_ref": None,
+                                                        "weekly_set_id": 59, "band": 520, "raw_score": 12, "total": 22,
+                                                        "result_url": "/detailed-results/501",
+                                                        "scored_at": "2026-08-30T10:00:00Z"})
+    out = ingest_batch(db, "sat", [ready])
+    assert out["accepted"] == [ready["event_id"]]
+    r = db.query(PlatformResult).one()
+    assert (r.platform, r.module, r.status) == ("sat", "math", "scored") and r.attempt_ref.startswith("test:501:")
+    assert r.band == 520 and r.raw_score == 12 and r.total == 22 and r.track == "sat"
+
+
+def test_sat_result_without_attempt_ref_or_test_id_is_rejected(db):
+    bad = _env("result.ready", platform="sat", data={"module": "math", "attempt_ref": None, "weekly_set_id": 59, "band": 520})
+    out = ingest_batch(db, "sat", [bad])
+    assert [r["event_id"] for r in out["rejected"]] == [bad["event_id"]] and "attempt_ref" in out["rejected"][0]["reason"]
+
+
+def test_weekly_set_event_keeps_platform_paths_and_set_path(db):
+    env = _env("weekly_set.published", platform="sat", student=False, data={
+        "weekly_set_id": 59, "title": "29.08-30.08", "date_from": "2026-08-29T00:00:00+05:00",
+        "date_to": "2026-08-30T23:59:59+05:00", "is_active": True, "track": "sat", "week_number": 59,
+        "set_path": "/weekly-sets/59",
+        "modules": [{"module": "math", "test_id": 501, "test_title": "Weekly Test [Math] (29.08-30.08)", "path": "/module/math/1?testId=501"}],
+    })
+    ingest_batch(db, "sat", [env])
+    ws = db.query(PlatformWeeklySet).one()
+    assert ws.set_path == "/weekly-sets/59" and ws.modules[0]["path"] == "/module/math/1?testId=501" and ws.track == "sat"
+    assert ws.date_from == datetime(2026, 8, 28, 19, 0) and ws.date_to == datetime(2026, 8, 30, 18, 59, 59)
+
+
+def test_sat_results_without_attempt_ref_are_keyed_per_student(db):
+    """Two students, same test, no attempt: one row each — never one row overwritten twice."""
+    a = _user(db, email="a@x.io", subject="111")
+    b = _user(db, email="b@x.io", subject="222")
+    common = {"module": "math", "test_id": 501, "attempt_ref": None, "weekly_set_id": 59, "total": 22}
+    out = ingest_batch(db, "sat", [
+        _env("result.ready", platform="sat", email="a@x.io", subject="111", data={**common, "band": 520, "raw_score": 12}),
+        _env("result.ready", platform="sat", email="b@x.io", subject="222", data={**common, "band": 600, "raw_score": 17}),
+    ])
+    assert out["rejected"] == []
+    rows = {r.user_id: r for r in db.query(PlatformResult).all()}
+    assert set(rows) == {a.id, b.id}
+    assert rows[a.id].raw_score == 12 and rows[b.id].raw_score == 17
+    assert rows[a.id].attempt_ref != rows[b.id].attempt_ref
+    assert all(len(r.attempt_ref) <= 64 for r in rows.values())
+
+
+def test_sat_result_without_attempt_ref_resent_updates_the_same_row(db):
+    a = _user(db, email="a@x.io")  # no subject: keyed by email
+    data = {"module": "math", "test_id": 501, "attempt_ref": None, "weekly_set_id": 59,
+            "band": 520, "raw_score": 12, "total": 22}
+    ingest_batch(db, "sat", [_env("result.ready", platform="sat", email="a@x.io", data=data)])
+    ingest_batch(db, "sat", [_env("result.ready", platform="sat", email="a@x.io",
+                                  data={**data, "band": 540, "raw_score": 13})])
+    r = db.query(PlatformResult).one()
+    assert r.user_id == a.id and r.raw_score == 13 and r.band == 540
