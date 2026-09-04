@@ -28,6 +28,7 @@ import logging
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import os
+import time
 import uuid
 
 # Configure logging
@@ -269,6 +270,84 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise HTTPException(status_code=404, detail="User not found")
 
     return build_user_schema_response(user, db)
+
+class SsoCallbackErrorReport(BaseModel):
+    """What the browser saw when /auth/callback could not finish (SSO Phase 2).
+
+    Unauthenticated by necessity — a failed SSO login has no session yet — so every field is
+    treated as untrusted input: bounded, truncated, and only ever written to the log.
+    """
+
+    reason: str
+    detail: str | None = None
+    idp_error: str | None = None
+    hint_email: str | None = None
+    user_agent: str | None = None
+
+
+# Known classifications from the frontend. Anything else is logged as "other" so an
+# unexpected value can never shape the log line.
+_SSO_FAILURE_REASONS = {
+    "idp_rejected",
+    "link_expired",
+    "storage_blocked",
+    "not_configured",
+    "network",
+    "lms_unreachable",
+    "no_lms_account",
+    "token_rejected",
+    "unknown",
+}
+
+
+def _clip(value, limit: int) -> str:
+    """Bound an untrusted string and strip newlines so it can't forge extra log lines."""
+    if not value:
+        return ""
+    return str(value).replace("\r", " ").replace("\n", " ")[:limit]
+
+
+# The report endpoint has to be unauthenticated (a failed login has no session), so cap how
+# much log it can produce. Real failures arrive in ones and twos; anything above this is
+# noise or abuse and is dropped rather than written.
+_SSO_REPORT_MAX_PER_MINUTE = 60
+_sso_report_window: list = [0.0, 0]  # [window_start_epoch, count_in_window]
+
+
+def _sso_report_allowed(now: float) -> bool:
+    if now - _sso_report_window[0] >= 60:
+        _sso_report_window[0] = now
+        _sso_report_window[1] = 0
+    if _sso_report_window[1] >= _SSO_REPORT_MAX_PER_MINUTE:
+        return False
+    _sso_report_window[1] += 1
+    return True
+
+
+@router.post("/sso-callback-error", status_code=204)
+def report_sso_callback_error(report: SsoCallbackErrorReport, request: Request) -> Response:
+    """Record why a "Continue with Master Education" login died at /auth/callback.
+
+    Before this existed, every SSO failure — a spent one-time link, an IdP that refused the
+    account, a browser blocking storage, a rejected token — reached the user as one identical
+    sentence and reached us as nothing at all. There was no way to tell a self-inflicted
+    double-submit from a genuinely broken account, so the same report ("SSO doesn't work for
+    this student") was unanswerable. This is the missing half of that loop.
+    """
+    if not _sso_report_allowed(time.time()):
+        return Response(status_code=204)
+    reason = report.reason if report.reason in _SSO_FAILURE_REASONS else "other"
+    logger.warning(
+        "SSO callback failed: reason=%s idp_error=%s hint_email=%s ip=%s ua=%s detail=%s",
+        reason,
+        _clip(report.idp_error, 200) or "-",
+        _clip(report.hint_email, 200) or "-",
+        request.client.host if request.client else "-",
+        _clip(report.user_agent, 300) or "-",
+        _clip(report.detail, 500) or "-",
+    )
+    return Response(status_code=204)
+
 
 @router.post("/logout")
 def logout(response: Response, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
