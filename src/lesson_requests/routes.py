@@ -350,6 +350,7 @@ async def reject_lesson_request(
 async def get_available_teachers(
     datetime_str: str = Query(..., description="ISO datetime for the lesson slot"),
     group_id: Optional[int] = None,
+    event_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
@@ -362,8 +363,18 @@ async def get_available_teachers(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid datetime format, use ISO format")
 
-    window_start = target_dt - timedelta(minutes=30)
-    window_end = target_dt + timedelta(minutes=90)
+    # Use the real lesson's own start/end when we have it (event_id), instead of
+    # guessing a fixed buffer around the start time — a flat +90min window used to
+    # flag teachers as "busy" merely for having a back-to-back lesson immediately
+    # before/after the slot, with zero actual time overlap.
+    target_start = target_dt
+    target_end = target_dt + timedelta(minutes=60)
+    if event_id:
+        target_event = db.query(Event).filter(Event.id == event_id).first()
+        if target_event:
+            target_start = target_event.start_datetime
+            target_end = target_event.end_datetime
+    slot_duration = target_end - target_start
 
     query = db.query(UserInDB).filter(
         UserInDB.role == "teacher",
@@ -416,16 +427,18 @@ async def get_available_teachers(
     busy_events = db.query(Event).filter(
         Event.is_active == True,
         Event.teacher_id.isnot(None),
-        Event.start_datetime < window_end,
-        Event.end_datetime > window_start,
+        Event.start_datetime < target_end,
+        Event.end_datetime > target_start,
     ).all()
     for ev in busy_events:
         busy_teacher_ids.add(ev.teacher_id)
 
+    # LessonSchedule rows have no end time (not yet materialized into a real Event),
+    # so approximate each one's end using the target slot's own duration.
     busy_schedules = db.query(LessonSchedule).filter(
         LessonSchedule.is_active == True,
-        LessonSchedule.scheduled_at >= window_start,
-        LessonSchedule.scheduled_at < window_end,
+        LessonSchedule.scheduled_at < target_end,
+        LessonSchedule.scheduled_at > target_start - slot_duration,
     ).all()
     for sched in busy_schedules:
         if sched.group and sched.group.teacher_id:

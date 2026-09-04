@@ -238,6 +238,7 @@ async def crm_get_my_lesson_requests(
 async def crm_get_available_teachers(
     datetime_str: str = Query(..., description="ISO datetime for the lesson slot"),
     group_id: Optional[int] = None,
+    event_id: Optional[int] = None,
     teacher_id: int = Depends(_require_lms_teacher_id),
     db: Session = Depends(get_db),
 ):
@@ -255,8 +256,17 @@ async def crm_get_available_teachers(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid datetime format")
 
-    window_start = target_dt - timedelta(minutes=30)
-    window_end = target_dt + timedelta(minutes=90)
+    # Use the real lesson's own start/end when we have it (event_id), instead of
+    # guessing a fixed buffer around the start time — a flat +90min window used to
+    # flag teachers as "busy" merely for having a back-to-back lesson immediately
+    # before/after the slot, with zero actual time overlap.
+    target_start = target_dt
+    target_end = target_dt + timedelta(minutes=60)
+    if event_id:
+        target_event = db.query(Event).filter(Event.id == event_id).first()
+        if target_event:
+            target_start = target_event.start_datetime
+            target_end = target_event.end_datetime
 
     query = db.query(UserInDB).filter(
         UserInDB.role == "teacher",
@@ -298,8 +308,8 @@ async def crm_get_available_teachers(
     for ev in db.query(Event).filter(
         Event.is_active == True,
         Event.teacher_id.isnot(None),
-        Event.start_datetime < window_end,
-        Event.end_datetime > window_start,
+        Event.start_datetime < target_end,
+        Event.end_datetime > target_start,
     ).all():
         busy_teacher_ids.add(ev.teacher_id)
 
