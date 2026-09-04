@@ -72,6 +72,12 @@ def _maybe_award_course_quiz_points(
         return
 
     step = db.query(Step).filter(Step.id == step_id).first()
+    # Checkpoints are pilot-only assessments: awarding points would let pilot students outscore
+    # classmates who cannot take them (user decision, 2026-09-04).
+    if step is not None:
+        lesson_kind = db.query(Lesson.kind).filter(Lesson.id == step.lesson_id).scalar()
+        if lesson_kind == "checkpoint":
+            return
     pass_pct = resolve_quiz_passing_score_percent(
         step.content_text if step else None,
         is_optional=bool(step.is_optional) if step else False,
