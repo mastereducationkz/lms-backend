@@ -144,3 +144,21 @@ def complete_lesson_via_steps(db, student, course, lesson):
                             step_id=s.id, status="completed",
                             completed_at=datetime.now(timezone.utc)))
     db.flush()
+
+
+def complete_checkpoint(db, student, definition, *, correct=40, total=45):
+    """Submit a passing quiz attempt for `definition` and record it onto the student's row(s),
+    flipping their status to 'completed' — i.e. this checkpoint is now "cleared" per the ordinal
+    blocking rule."""
+    from src.checkpoints import service
+    from src.schemas.models import QuizAttempt, Step, Lesson, Module
+    quiz_step = db.query(Step).filter(Step.lesson_id == definition.quiz_lesson_id).first()
+    quiz_course_id = db.query(Module.course_id).join(
+        Lesson, Lesson.module_id == Module.id).filter(Lesson.id == definition.quiz_lesson_id).scalar()
+    attempt = QuizAttempt(user_id=student.id, step_id=quiz_step.id, course_id=quiz_course_id,
+                          lesson_id=definition.quiz_lesson_id, total_questions=total,
+                          correct_answers=correct, score_percentage=round(100 * correct / total, 2),
+                          is_draft=False, completed_at=datetime.now(timezone.utc).replace(tzinfo=None))
+    db.add(attempt); db.flush()
+    service.record_submission(db, student.id, attempt)
+    return attempt
