@@ -589,6 +589,17 @@ def student_has_checkpoint_access_to_course(db: Session, student_id: int, course
 CLEARING_STATUSES = (STATUS_COMPLETED, STATUS_OVERDUE)
 
 
+def is_skipped(group: Group, definition: CheckpointDefinition, row: Optional[StudentCheckpoint]) -> bool:
+    """A checkpoint numbered below the group's checkpoints_start_number that never got a row was
+    passed over on purpose (the group joined mid-course): it never auto-opens and never gates
+    later blocks. An admin may still open it by hand, after which it behaves like any other."""
+    return row is None and definition.number < (group.checkpoints_start_number or 1)
+
+
+def skipped_reason(group: Group) -> str:
+    return f"Not required for this group — it starts from Checkpoint {group.checkpoints_start_number or 1}"
+
+
 def _checkpoint_chain_for_student(
     db: Session, user_id: int
 ) -> Dict[int, List[Tuple[CheckpointDefinition, bool]]]:
@@ -602,7 +613,14 @@ def _checkpoint_chain_for_student(
     groups = enabled_groups_for_student(db, user_id)
     if not groups:
         return {}
-    course_ids = {cid for group in groups for cid in get_group_course_ids(db, group.id)}
+    # Per course, the lowest checkpoints_start_number among the enabled groups that reach it: a
+    # definition numbered below that was skipped on purpose for a mid-course group (is_skipped).
+    start_by_course: Dict[int, int] = {}
+    for group in groups:
+        start = group.checkpoints_start_number or 1
+        for cid in get_group_course_ids(db, group.id):
+            start_by_course[cid] = min(start_by_course.get(cid, start), start)
+    course_ids = set(start_by_course)
     if not course_ids:
         return {}
     definitions = (
@@ -639,7 +657,13 @@ def _checkpoint_chain_for_student(
 
     by_course: Dict[int, List[Tuple[CheckpointDefinition, bool]]] = {}
     for definition in definitions:
-        cleared = cleared_by_def_id.get(definition.id, False)
+        if definition.id in cleared_by_def_id:
+            cleared = cleared_by_def_id[definition.id]
+        else:
+            # No row at all. Below the group's start number the checkpoint was skipped on purpose
+            # (see is_skipped), so it must not hold later blocks back; at or above it, the
+            # checkpoint simply has not been cleared yet.
+            cleared = definition.number < start_by_course.get(definition.course_id, 1)
         by_course.setdefault(definition.course_id, []).append((definition, cleared))
     return by_course
 
@@ -731,6 +755,7 @@ def _serialize_item(group: Group, definition: CheckpointDefinition,
               "completed": u.lesson_id in ctx.completed} for u in definition.required_units]
     base = serialize_row(row)
     status = base["status"]
+    skipped = is_skipped(group, definition, row)
     quiz = None
     if status != STATUS_LOCKED and definition.quiz_lesson_id is not None:
         course_id = ctx.quiz_course_by_lesson.get(definition.quiz_lesson_id)
@@ -744,7 +769,8 @@ def _serialize_item(group: Group, definition: CheckpointDefinition,
         "group_name": group.name,
         "covers": units,
         "total_questions": base["total_questions"] or definition.total_questions,
-        "locked_reason": locked_reason(units) if status == STATUS_LOCKED else None,
+        "skipped": skipped,
+        "locked_reason": (skipped_reason(group) if skipped else locked_reason(units)) if status == STATUS_LOCKED else None,
         "quiz": quiz,
     })
     return base
@@ -773,7 +799,9 @@ def serialize_for_student(db: Session, student_id: int, group: Group, definition
         "group_name": group.name,
         "covers": units,
         "total_questions": base["total_questions"] or definition.total_questions,
-        "locked_reason": locked_reason(units) if status == STATUS_LOCKED else None,
+        "skipped": is_skipped(group, definition, row),
+        "locked_reason": ((skipped_reason(group) if is_skipped(group, definition, row) else locked_reason(units))
+                          if status == STATUS_LOCKED else None),
         "quiz": quiz_ref(db, definition) if status != STATUS_LOCKED else None,
     })
     return base

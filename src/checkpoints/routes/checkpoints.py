@@ -290,8 +290,10 @@ def group_matrix(group_id: int, current_user: UserInDB = Depends(get_current_use
             units = [{"lesson_id": u.lesson_id, "title": titles.get(u.lesson_id, ""), "kind": u.kind,
                      "completed": u.lesson_id in done} for u in d.required_units]
             cell = service.serialize_row(row)
-            cell.update({"checkpoint_id": d.id, "number": d.number, "units": units,
-                         "locked_reason": service.locked_reason(units) if cell["status"] == "locked" else None})
+            skipped = service.is_skipped(group, d, row)
+            cell.update({"checkpoint_id": d.id, "number": d.number, "units": units, "skipped": skipped,
+                         "locked_reason": ((service.skipped_reason(group) if skipped else service.locked_reason(units))
+                                           if cell["status"] == "locked" else None)})
             cells.append(cell)
         out_students.append({"student_id": s.id, "name": s.name, "email": s.email, "cells": cells})
     if dirty:

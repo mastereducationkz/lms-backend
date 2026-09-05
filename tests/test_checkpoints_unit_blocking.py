@@ -210,3 +210,63 @@ def test_blocked_unit_reads_are_refused(db):
     with pytest.raises(HTTPException) as e:
         get_lesson_steps(v[2].id, include_content=True, current_user=student, db=db)
     assert e.value.status_code == 403 and "Checkpoint 1" in str(e.value.detail)
+
+
+def test_start_number_skips_earlier_blocks_in_the_gate(db):
+    """A group that joins mid-course sets checkpoints_start_number so the earlier checkpoints
+    never auto-open. Those skipped checkpoints must not hold later blocks back either — otherwise
+    every unit from block 2 onward stays locked behind a Checkpoint 1 that can never open, which
+    is exactly the pilot (mid-course group) scenario."""
+    from src.checkpoints import service
+    _, course, v, m, defs, group, student = _world(db, n_blocks=4)
+    group.checkpoints_start_number = 3
+    db.flush()
+    blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
+    # blocks 1-3 are open: 1 and 2 are skipped for this group, 3 is the first gated block
+    assert blocked.isdisjoint({v[0].id, v[1].id, m[0].id, v[2].id, v[3].id, m[1].id, v[4].id, v[5].id, m[2].id})
+    # block 4 is still held back by checkpoint 3, which is not cleared
+    assert {v[6].id, v[7].id, m[3].id} <= blocked
+    definition = service.blocking_checkpoint_for_student(db, student.id)
+    assert definition is not None and definition.id == defs[2].id
+
+
+def test_admin_opened_checkpoint_below_start_number_still_gates(db):
+    """Skipping is only for checkpoints that never got a row. Once an admin opens one of them by
+    hand it behaves like any other pending checkpoint: it holds the next block back until it is
+    cleared."""
+    from src.checkpoints import service
+    admin, course, v, m, defs, group, student = _world(db, n_blocks=4)
+    group.checkpoints_start_number = 3
+    db.flush()
+    service.open_for_students(db, group=group, definition=defs[1], student_ids=[student.id], actor_id=admin.id)
+
+    blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
+    assert {v[4].id, v[5].id, m[2].id} <= blocked          # block 3 now waits for checkpoint 2
+    assert service.blocking_checkpoint_for_student(db, student.id).id == defs[1].id
+
+    complete_checkpoint(db, student, defs[1])
+    blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
+    assert blocked.isdisjoint({v[4].id, v[5].id, m[2].id})
+    assert {v[6].id, v[7].id, m[3].id} <= blocked          # block 4 still behind checkpoint 3
+
+
+def test_skipped_checkpoints_are_flagged_for_student_and_matrix(db):
+    """The student list and the admin matrix both say when a checkpoint was skipped for the group,
+    and stop saying so the moment an admin opens it by hand."""
+    from src.checkpoints import service
+    from src.checkpoints.routes.checkpoints import group_matrix
+    admin, course, v, m, defs, group, student = _world(db, n_blocks=3)
+    group.checkpoints_start_number = 3
+    db.flush()
+    items = {i["number"]: i for i in service.serialize_items_for_student(db, student.id, [group])}
+    assert items[1]["skipped"] and items[2]["skipped"] and not items[3]["skipped"]
+    assert "starts from Checkpoint 3" in items[1]["locked_reason"]
+    assert items[3]["locked_reason"].startswith("Locked")
+    matrix = group_matrix(group.id, current_user=admin, db=db)
+    cells = {c["number"]: c for c in matrix["students"][0]["cells"]}
+    assert cells[1]["skipped"] and "starts from Checkpoint 3" in cells[1]["locked_reason"]
+    assert not cells[3]["skipped"]
+
+    service.open_for_students(db, group=group, definition=defs[0], student_ids=[student.id], actor_id=admin.id)
+    items = {i["number"]: i for i in service.serialize_items_for_student(db, student.id, [group])}
+    assert not items[1]["skipped"] and items[1]["status"] == "available"
