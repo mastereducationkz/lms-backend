@@ -161,3 +161,23 @@ def test_run_reads_the_bank_file_refuses_problems_and_invalidates_caches(db, tmp
     path.write_text(json.dumps({"checkpoints": [_bank_entry(1, units)]}))
     reports = run(db, course_id=course.id, data=path, weeks=[1], remap_units=True, activate=False, dry_run=False)
     assert len(reports) == 1 and calls == [1]
+
+
+def test_import_binds_units_but_leaves_the_quiz_alone_without_answers(db):
+    """Weeks whose teacher key has not arrived: the IT mapping still applies, the quiz waits."""
+    course, v, m = _seeded(db, blocks=1)
+    units = [{"lesson_id": v[2].id, "kind": "verbal"}, {"lesson_id": v[3].id, "kind": "verbal"}, {"lesson_id": m[1].id, "kind": "math"}]
+    cp = _bank_entry(1, units)
+    for q in cp["questions"]:
+        q["answer"] = None
+    report = import_checkpoint(db, course.id, cp, activate=True)
+    definition = db.query(CheckpointDefinition).filter_by(course_id=course.id, number=1).one()
+    step = db.query(Step).filter(Step.lesson_id == definition.quiz_lesson_id).one()
+    assert report["questions_written"] is False and report["answers_missing"] is True and report["activated"] is False
+    assert json.loads(step.content_text)["questions"] == [] and definition.is_active is False
+    assert [u.lesson_id for u in definition.required_units] == [v[2].id, v[3].id, m[1].id]
+
+    cp = _bank_entry(1, units)
+    report = import_checkpoint(db, course.id, cp, write_questions=False)
+    assert report["questions_written"] is False and report["answers_missing"] is False
+    assert json.loads(step.content_text)["questions"] == []

@@ -255,6 +255,7 @@ def build_week(number: int, student: Path, key: Optional[Path], *, allow_missing
         "lessons": lessons,
         "units": [{"lesson_id": lid, "kind": kind} for lid, kind in PDF_UNITS[number]],
         "source": {"student": student.name, "key": key.name if key else None},
+        "answers_complete": all(q["answer"] is not None for q in questions),
         "questions": questions,
         "problems": problems,
     }
