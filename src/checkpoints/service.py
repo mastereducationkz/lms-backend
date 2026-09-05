@@ -2,7 +2,8 @@
 
 Trigger rule (ТЗ §4-§6, §10): a checkpoint opens for a student when ALL required units of its
 block are completed by that student — nothing else (no calendar week, no lesson counts, no
-attendance). Deadline = opened_at + 72h (§8). Rows are per (student, group, checkpoint).
+attendance). Deadline = opened_at + 24h, and it is soft: a late submission is accepted and
+flagged (assert_can_submit / serialize_row). Rows are per (student, group, checkpoint).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,10 @@ from src.utils.permissions import get_group_course_ids
 
 _log = logging.getLogger(__name__)
 
-DEADLINE_HOURS = 72
+DEADLINE_HOURS = 24
+# Rows a quiz attempt may land on. `overdue` is included on purpose: the deadline is soft, a late
+# submission is recorded and flagged rather than refused.
+SUBMITTABLE_STATUSES = (STATUS_AVAILABLE, STATUS_REOPENED, STATUS_OVERDUE)
 
 # The four per-user lesson caches whose payloads depend on which checkpoints are open for a
 # student (see _checkpoint_filter_lesson_payload / assert_student_may_view_checkpoint_lesson).
@@ -282,10 +286,9 @@ def sync_group(db: Session, group: Group, *, now: Optional[datetime] = None, com
 # ---------------------------------------------------------------- overdue
 
 def refresh_overdue(rows: Iterable[StudentCheckpoint], now: Optional[datetime] = None) -> List[StudentCheckpoint]:
-    """Flip lapsed rows to overdue. Since ``overdue`` no longer blocks (see
-    blocked_unit_lesson_ids_for_student), a row flipping from available/reopened to overdue
-    releases whatever checkpoint-bound units it was holding back for that student, so this DOES
-    invalidate the lesson caches when it actually flips anything."""
+    """Flip lapsed rows to overdue. An overdue checkpoint can still be submitted (late) and
+    still holds the next block back; the flip changes what the student is told, and the cached
+    lesson payloads carry that, so the lesson caches are dropped when anything flips."""
     now = now or utcnow()
     flipped = []
     for row in rows:
@@ -416,30 +419,23 @@ def _live_rows_for_student_definition(db: Session, student_id: int,
 
 
 def assert_can_submit(db: Session, student_id: int, definition: CheckpointDefinition,
-                      now: Optional[datetime] = None, *,
-                      allow_past_deadline: bool = False) -> List[StudentCheckpoint]:
-    """Server-side gate for POST /progress/quiz-attempt on a checkpoint quiz step.
+                      now: Optional[datetime] = None) -> List[StudentCheckpoint]:
+    """Server-side gate for a checkpoint quiz attempt, drafts and final submissions alike.
 
-    `allow_past_deadline` relaxes only the deadline check (used for draft autosaves) —
-    a locked or completed checkpoint still rejects the submission.
+    A locked checkpoint refuses (403). A completed one refuses another attempt (409) until an
+    admin reopens it. The deadline is soft (user decision 2026-09-05): a row past its deadline —
+    still `available`/`reopened`, or already flipped to `overdue` — accepts the submission, which
+    record_submission stores with its timestamp so staff see exactly how late it was.
     """
     now = now or utcnow()
     rows = _live_rows_for_student_definition(db, student_id, definition)
     if not rows or all(r.status == STATUS_LOCKED for r in rows):
         raise HTTPException(status_code=403, detail="Checkpoint is locked: complete the required units first")
-    open_rows = [r for r in rows if r.status in OPEN_STATUSES]
-    if not open_rows:
-        if any(r.status == STATUS_COMPLETED for r in rows):
-            raise HTTPException(status_code=409, detail="Checkpoint already completed")
-        raise HTTPException(status_code=409, detail="Checkpoint deadline has passed; ask your admin to reopen it")
-    if allow_past_deadline:
-        return open_rows
-    live = [r for r in open_rows if r.deadline is None or naive(r.deadline) >= now]
-    if not live:
-        refresh_overdue(open_rows, now)
-        db.flush()
-        raise HTTPException(status_code=409, detail="Checkpoint deadline has passed; ask your admin to reopen it")
-    return live
+    submittable = [r for r in rows if r.status in SUBMITTABLE_STATUSES]
+    if not submittable:
+        raise HTTPException(status_code=409, detail="Checkpoint already completed")
+    refresh_overdue(submittable, now)   # a lapsed row is flagged overdue as it is being answered
+    return submittable
 
 
 def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
@@ -454,10 +450,10 @@ def record_submission(db: Session, student_id: int, attempt: QuizAttempt,
         return []
     done = []
     for row in _rows_for_student_definition(db, student_id, definition):
-        # Deadline gating already happened in assert_can_submit; record onto anything not
-        # already terminal (locked/completed), including a row flipped to overdue in the
-        # meantime — the attempt itself was accepted before the deadline lapsed.
-        if row.status in (STATUS_LOCKED, STATUS_COMPLETED):
+        # Record onto every submittable row (available / reopened / overdue). The deadline is
+        # soft: an overdue row completes too, and serialize_row reports it as late by comparing
+        # submitted_at with the deadline.
+        if row.status not in SUBMITTABLE_STATUSES:
             continue
         row.status = STATUS_COMPLETED
         row.submitted_at = now
@@ -578,15 +574,13 @@ def student_has_checkpoint_access_to_course(db: Session, student_id: int, course
 # below closes that hole: block N is blocked by definition whenever ANY earlier block in the same
 # course is not cleared, whether or not that earlier checkpoint ever opened at all.
 
-# A row counts as clearing its checkpoint only once it is `completed` or has lapsed into
-# `overdue`. `overdue` clears deliberately, on top of `completed` — this was an explicit product
-# call: a lapsed deadline must never strand a student behind a checkpoint they can no longer
-# submit ("убери блокировку у чекпоинтов если поздно сдаешь"). The consequence, also deliberate,
-# is that simply waiting out the 72h deadline without submitting is a way past the gate; the
-# missed checkpoint itself still can't be submitted (see assert_can_submit) until an admin calls
-# reopen_for_students. Every other status — no row at all, `locked`, `available`, `reopened` — is
-# NOT cleared and holds the next block back.
-CLEARING_STATUSES = (STATUS_COMPLETED, STATUS_OVERDUE)
+# A row clears its checkpoint only once it is `completed` (on time or late). Since 2026-09-05
+# the deadline is soft — an overdue checkpoint can still be submitted, flagged late — so a lapsed
+# deadline no longer opens the gate on its own: the student is never stranded (they can submit
+# any time), and the next block waits for the submission. Every other status — no row at all,
+# `locked`, `available`, `reopened`, `overdue` — holds the next block back. A checkpoint skipped
+# by the group's start number is treated as cleared (see is_skipped).
+CLEARING_STATUSES = (STATUS_COMPLETED,)
 
 
 def is_skipped(group: Group, definition: CheckpointDefinition, row: Optional[StudentCheckpoint]) -> bool:
@@ -735,16 +729,29 @@ def quiz_ref(db: Session, definition: CheckpointDefinition) -> Optional[Dict[str
     return {"course_id": int(course_id), "lesson_id": int(definition.quiz_lesson_id)}
 
 
+def late_minutes(row: Optional[StudentCheckpoint]) -> Optional[int]:
+    """Minutes between the deadline and the submission when the submission came after it;
+    None when the row was not submitted, has no deadline, or was submitted on time."""
+    if row is None or row.submitted_at is None or row.deadline is None:
+        return None
+    delta = naive(row.submitted_at) - naive(row.deadline)
+    minutes = int(delta.total_seconds() // 60)
+    return minutes if minutes > 0 else None
+
+
 def serialize_row(row: Optional[StudentCheckpoint]) -> Dict[str, Any]:
     if row is None:
         return {"id": None, "status": STATUS_LOCKED, "opened_at": None, "deadline": None, "submitted_at": None,
                 "correct_answers": None, "total_questions": None, "percentage": None,
-                "opened_by": None, "reopen_count": 0, "quiz_attempt_id": None}
+                "opened_by": None, "reopen_count": 0, "quiz_attempt_id": None,
+                "late": False, "late_minutes": None}
+    late = late_minutes(row)
     return {
         "id": row.id, "status": row.status, "opened_at": _iso(row.opened_at), "deadline": _iso(row.deadline),
         "submitted_at": _iso(row.submitted_at), "correct_answers": row.correct_answers,
         "total_questions": row.total_questions, "percentage": row.percentage,
         "opened_by": row.opened_by, "reopen_count": row.reopen_count or 0, "quiz_attempt_id": row.quiz_attempt_id,
+        "late": late is not None, "late_minutes": late,
     }
 
 

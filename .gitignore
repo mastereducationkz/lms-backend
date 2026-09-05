@@ -22,3 +22,8 @@ sync_prod_db.sh
 .swarm/
 
 .venv
+
+# SAT checkpoint source documents (question bank lives in scripts/data)
+docs/checkpoints_LMS/
+docs/SAT_Checkpoints_LMS_Mapping_IT.pdf
+docs/.DS_Store

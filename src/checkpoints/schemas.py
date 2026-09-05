@@ -24,7 +24,7 @@ class GroupSettingsUpdate(BaseModel):
 
 class OpenRequest(BaseModel):
     student_ids: Optional[List[int]] = None   # None = whole group
-    deadline: Optional[datetime] = None       # None = now + 72h
+    deadline: Optional[datetime] = None       # None = now + DEADLINE_HOURS (24h)
 
 
 class DeadlineUpdate(BaseModel):
