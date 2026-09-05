@@ -248,3 +248,40 @@ def test_group_matrix_lists_every_student(db):
     assert [r["user_id"] for r in rows] == [u1.id, u2.id]
     assert rows[0]["modules"][0]["state"] == "done" and rows[0]["status"] == "in_progress"
     assert rows[1]["status"] == "not_started" and rows[1]["name"] == "b"
+
+
+# --- lead decision 2026-09-05: the countdown card is fed by the sets, not by homework rows -------
+
+def test_weekly_tests_come_from_the_sets_without_homework_rows(db, monkeypatch):
+    monkeypatch.delenv("PLATFORM_TEST_HOMEWORK", raising=False)
+    u = _user(db); g = _group(db); _enrol(db, g, u)
+    _set(db, set_id=12, title="22.08-23.08", d_from=datetime(2026, 8, 22, 3, 1), d_to=datetime(2026, 8, 29, 13, 1))
+    _set(db)
+    db.add(PlatformWeeklySet(platform="sat", weekly_set_id=75, title="Weekly Set (05.09-06.09)", track="sat",
+                             date_from=datetime(2026, 9, 4, 19, 0), date_to=datetime(2026, 9, 6, 18, 59), is_active=True,
+                             modules=[{"module": "math", "test_id": 1, "path": "/module/math/1?testId=1"}]))
+    db.commit()
+    assert db.query(Assignment).count() == 0
+
+    items = pp.weekly_tests_for_student(db, u.id, now=NOW)
+
+    assert [i["weekly_set_id"] for i in items] == [13, 12]           # own track only, current first
+    current = items[0]
+    assert current["assignment_id"] is None and current["group_id"] is None
+    assert current["title"] == "IELTS Weekly Test · 29.08-30.08" and current["track"] == "ielts"
+    assert current["status"] == "not_started" and current["days_left"] == 9
+    assert current["due_date"] == "2026-09-12T13:01:00+00:00" and current["set_path"] == "/weekly-sets/13"
+    assert {m["module"]: m["deadline_kind"] for m in current["modules"]}["speaking"] == "closes"
+    assert items[1]["days_left"] == -5
+
+
+def test_weekly_tests_skip_opted_out_groups_undated_sets_and_old_sets(db, monkeypatch):
+    monkeypatch.delenv("PLATFORM_TEST_HOMEWORK", raising=False)
+    u = _user(db); g = _group(db); _enrol(db, g, u)
+    _set(db)
+    _set(db, set_id=5, title="18.07-19.07", d_from=datetime(2026, 7, 18, 3, 1), d_to=datetime(2026, 7, 25, 13, 1))
+    _set(db, set_id=50, title="undated", d_from=None, d_to=None)
+    assert [i["weekly_set_id"] for i in pp.weekly_tests_for_student(db, u.id, now=NOW)] == [13]
+    g.platform_tests_opt_out = True
+    db.commit()
+    assert pp.weekly_tests_for_student(db, u.id, now=NOW) == []
