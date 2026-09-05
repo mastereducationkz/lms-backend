@@ -19,6 +19,7 @@ from src.auth.models import UserInDB
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
 from src.integrations import platform_assignments as pa
+from src.integrations import platform_progress as pp
 from src.integrations.assignment_routes import platform_assignments_router
 from src.integrations.models import (
     PlatformEvent, PlatformResult, PlatformTestAssignment, PlatformWeeklySet,
@@ -58,6 +59,11 @@ def db():
 def _flag_on(monkeypatch):
     monkeypatch.setenv("PLATFORM_ASSIGNMENTS_ENABLED", "true")
     monkeypatch.setattr(pa, "_utcnow", lambda: NOW)
+    # platform_progress keeps its own _utcnow, and that is the one the HTTP routes reach for
+    # when they derive days_left. Leaving it on the wall clock made this module a time bomb:
+    # the fixed `date_to` drifts one day closer every day, so the suite passed when written
+    # and went red on its own two days later. Freeze both clocks, as the fixture intended.
+    monkeypatch.setattr(pp, "_utcnow", lambda: NOW)
 
 
 @pytest.fixture()
