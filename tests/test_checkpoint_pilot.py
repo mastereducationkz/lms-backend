@@ -50,11 +50,26 @@ def test_report_suggests_the_block_most_of_the_group_is_on(db):
     _, course, v, m, group, students = _world(db)
     rep = group_report(db, course.id, group.id)
     by = {r["name"]: r for r in rep["students"]}
-    assert by["Ahead"]["highest_contiguous_block"] == 2 and by["Behind"]["highest_contiguous_block"] == 0
-    assert by["Middle"]["highest_contiguous_block"] == 1
+    assert by["Ahead"]["highest_block"] == 2 and by["Behind"]["highest_block"] == 0
+    assert by["Middle"]["highest_block"] == 1
     assert rep["suggested_start"] == 2                          # median highest block is 1 -> start at 2
     assert by["Ahead"]["would_open_now"] == [2] and by["Middle"]["would_open_now"] == []
     assert rep["opens_immediately"] == 1 and rep["enabled"] is False
+
+
+def test_report_uses_the_highest_block_not_the_contiguous_run(db):
+    """A student who did blocks 1, 3 and 4 (block 2 has one unit never marked complete) is on
+    block 5, not block 2 — a gap must not drag the suggestion back to the start."""
+    _, course, v, m, group, students = _world(db)
+    behind = students[1]
+    for l in (v[0], v[1], m[0], v[4], v[5], m[2]):          # blocks 1 and 3, block 2 untouched
+        complete_lesson_explicit(db, behind, course, l)
+    db.flush()
+    rep = group_report(db, course.id, group.id)
+    by = {r["name"]: r for r in rep["students"]}
+    assert by["Behind"]["complete_blocks"] == [1, 3] and by["Behind"]["highest_block"] == 3
+    assert rep["suggested_start"] == 3                          # highest blocks 2, 3, 1 -> median 2 -> start 3
+    assert by["Behind"]["would_open_now"] == [3] and by["Ahead"]["would_open_now"] == []
 
 
 def test_activate_only_definitions_whose_quiz_is_full(db):
