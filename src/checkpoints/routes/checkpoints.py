@@ -208,6 +208,15 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
     return _serialize_definition(db, d)
 
 
+@checkpoints_admin_router.get("/definitions/{checkpoint_id}/unit-options")
+def definition_unit_options(checkpoint_id: int, current_user: UserInDB = Depends(get_current_user_dependency),
+                            db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    """Units of the checkpoint's course that may be required, for the picker on the console."""
+    _require_staff(current_user)
+    d = _definition_or_404(db, checkpoint_id)
+    return service.unit_options(db, d.course_id)
+
+
 @checkpoints_admin_router.get("/definitions/{checkpoint_id}/quiz-check")
 def quiz_check(checkpoint_id: int, current_user: UserInDB = Depends(get_current_user_dependency),
                db: Session = Depends(get_db)) -> Dict[str, Any]:

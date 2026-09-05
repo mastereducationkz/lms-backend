@@ -131,3 +131,57 @@ def test_archived_group_revokes_checkpoint_access(db):
     assert e.value.status_code == 403
     assert service.student_has_checkpoint_access_to_course(db, s.id, quiz_course_id) is False
     assert d1.quiz_lesson_id not in service.open_checkpoint_lesson_ids_for_student(db, s.id)
+
+
+def test_several_checkpoints_opening_at_once_get_staggered_deadlines(db):
+    """A student who already finished blocks 1 and 2 when the group is switched on gets both
+    checkpoints, due a day apart in checkpoint order — not both due in 24 hours."""
+    from src.checkpoints import service
+    _, course, v, m, d1, d2, group, s = _world(db)
+    for l in (v[0], v[1], m[0], v[2], v[3], m[1]):
+        complete_lesson_explicit(db, s, course, l)
+    now = datetime(2026, 9, 10, 12, 0)
+    opened = service.sync_student_checkpoints(db, s.id, now=now, commit=False)
+    assert [r.checkpoint_number for r in opened] == [1, 2]
+    assert opened[0].deadline == now + timedelta(hours=24)
+    assert opened[1].deadline == now + timedelta(hours=48)
+    assert service.sync_student_checkpoints(db, s.id, now=now + timedelta(hours=1), commit=False) == []
+
+
+def test_a_checkpoint_passed_in_another_group_carries_over(db):
+    """Moving a student to another checkpoints-enabled group must not make them retake what they
+    already passed: the new group's row is created completed with the same result."""
+    from src.checkpoints import service
+    from tests.checkpoint_fixtures import complete_checkpoint
+    admin, course, v, m, d1, d2, group, s = _world(db)
+    for l in (v[0], v[1], m[0]):
+        complete_lesson_explicit(db, s, course, l)
+    service.sync_student_checkpoints(db, s.id, commit=False)
+    complete_checkpoint(db, s, d1, correct=40, total=45)
+    old_row = service.get_row(db, s.id, group.id, d1.id)
+    assert old_row.status == "completed"
+
+    new_group = make_group(db, enabled=True, name="cp-grp-2")
+    enroll(db, s, new_group, course, admin)
+    opened = service.sync_student_checkpoints(db, s.id, commit=False)
+    assert opened == []                                   # nothing newly opened for the student
+    carried = service.get_row(db, s.id, new_group.id, d1.id)
+    assert carried is not None and carried.status == "completed" and carried.opened_by == "transfer"
+    assert (carried.correct_answers, carried.total_questions, carried.percentage) == (40, 45, old_row.percentage)
+    assert carried.quiz_attempt_id == old_row.quiz_attempt_id and carried.submitted_at == old_row.submitted_at
+    assert service.blocked_unit_lesson_ids_for_student(db, s.id) == set()    # cleared in the new group too
+
+
+def test_unit_options_follow_the_modules(db):
+    from src.checkpoints import service
+    from tests.checkpoint_fixtures import make_quiz_lessons
+    from src.courses.models import Lesson, Module
+    _, course, v, m, d1, d2, group, s = _world(db)
+    make_quiz_lessons(db, course, 1)                                          # a checkpoint lesson: excluded
+    verbal_module = db.query(Module).filter_by(course_id=course.id, title="Verbal").one()
+    db.add(Lesson(title="Unit 0. Getting Started", module_id=verbal_module.id, order_index=0)); db.flush()
+    options = service.unit_options(db, course.id)
+    assert [o["lesson_id"] for o in options] == [l.id for l in v] + [l.id for l in m]
+    assert {o["kind"] for o in options if o["lesson_id"] in {l.id for l in v}} == {"verbal"}
+    assert {o["kind"] for o in options if o["lesson_id"] in {l.id for l in m}} == {"math"}
+    assert all(o["module"] in ("Verbal", "Math") for o in options)

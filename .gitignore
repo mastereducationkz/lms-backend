@@ -27,3 +27,7 @@ sync_prod_db.sh
 docs/checkpoints_LMS/
 docs/SAT_Checkpoints_LMS_Mapping_IT.pdf
 docs/.DS_Store
+
+# Claude Code worktrees and macOS metadata
+.claude/worktrees/
+.DS_Store
