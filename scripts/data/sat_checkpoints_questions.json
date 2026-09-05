@@ -1,5 +1,5 @@
 {
- "built_at": "2026-09-05T07:10Z",
+ "built_at": "2026-09-05T07:32Z",
  "source_dir": "/Users/fikrat/Documents/master.lms/lms-backend/docs/checkpoints_LMS",
  "checkpoints": [
   {
@@ -28,6 +28,7 @@
     "student": "MasterSAT_Week_1_Checkpoint_45Q.docx",
     "key": "MasterSAT_Week_1_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -827,6 +828,7 @@
     "student": "MasterSAT_Week_2_SAT_Style_Checkpoint_45Q.docx",
     "key": "MasterSAT_Week_2_SAT_Style_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -1616,6 +1618,7 @@
     "student": "MasterSAT_Week_3_SAT_Style_Checkpoint_45Q.docx",
     "key": "MasterSAT_Week_3_SAT_Style_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -2376,6 +2379,1577 @@
    "problems": []
   },
   {
+   "number": 4,
+   "title": "Checkpoint 4",
+   "lessons": [
+    "Verbs (Tense)",
+    "Transitions",
+    "Exponents, Radicals & Exponential Functions"
+   ],
+   "units": [
+    {
+     "lesson_id": 45,
+     "kind": "verbal"
+    },
+    {
+     "lesson_id": 4,
+     "kind": "verbal"
+    },
+    {
+     "lesson_id": 11,
+     "kind": "math"
+    },
+    {
+     "lesson_id": 57,
+     "kind": "math"
+    }
+   ],
+   "source": {
+    "student": "MasterSAT_Week_4_SAT_Style_Checkpoint_45Q.docx",
+    "key": null
+   },
+   "answers_complete": false,
+   "questions": [
+    {
+     "number": 1,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "Every winter, the research station _____ average snowfall at the same five locations.",
+     "options": [
+      "measured",
+      "measures",
+      "is measuring",
+      "has measured"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 2,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "In 2022, engineers _____ the bridge after inspectors found cracks in two support beams.",
+     "options": [
+      "repair",
+      "repaired",
+      "have repaired",
+      "had repaired"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 3,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "Since the museum opened, it _____ more than three million visitors.",
+     "options": [
+      "welcomed",
+      "has welcomed",
+      "had welcomed",
+      "will welcome"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 4,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "By the time the rescue team arrived, the hikers _____ a temporary shelter.",
+     "options": [
+      "build",
+      "built",
+      "had built",
+      "have built"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 5,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "By next May, the laboratory _____ all 600 samples in the collection.",
+     "options": [
+      "analyzes",
+      "analyzed",
+      "will analyze",
+      "will have analyzed"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 6,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "This semester, Professor Malik _____ at a second campus while a colleague is on leave.",
+     "options": [
+      "teaches",
+      "is teaching",
+      "has taught",
+      "taught"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 7,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The astronomers _____ the telescope when a sudden power failure interrupted the observation.",
+     "options": [
+      "calibrated",
+      "were calibrating",
+      "have calibrated",
+      "had calibrated"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 8,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The researchers _____ the same coral reef for five years, and the project is still continuing.",
+     "options": [
+      "monitor",
+      "monitored",
+      "have been monitoring",
+      "had been monitoring"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 9,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "When the bus finally arrived, the passengers _____ in the rain for nearly an hour.",
+     "options": [
+      "waited",
+      "were waiting",
+      "had been waiting",
+      "have been waiting"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 10,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "At 8:00 tomorrow evening, the team _____ data from the final field site.",
+     "options": [
+      "collects",
+      "will collect",
+      "will be collecting",
+      "will have collected"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 11,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "By June, Dr. Chen _____ at the observatory for exactly ten years.",
+     "options": [
+      "will work",
+      "will have worked",
+      "will have been working",
+      "has been working"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 12,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "When historians reexamined the letters in 2025, they discovered that an earlier archivist _____ several dates incorrectly.",
+     "options": [
+      "records",
+      "recorded",
+      "has recorded",
+      "had recorded"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 13,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The city _____ air-quality data continuously since the sensor network was installed in 2018.",
+     "options": [
+      "collected",
+      "has collected",
+      "had collected",
+      "will collect"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 14,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The archive contains thousands of photographs _____ daily life in the city during the 1930s.",
+     "options": [
+      "document",
+      "documented",
+      "documenting",
+      "documents"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 15,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "For more than a decade, the university _____ the historic theater building next to its main library.",
+     "options": [
+      "has been owning",
+      "has owned",
+      "is owning",
+      "was owning"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 16,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The new telescope can detect fainter objects than its predecessor. _____, it can collect images at a much faster rate.",
+     "options": [
+      "However",
+      "Moreover",
+      "Instead",
+      "Consequently"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 17,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The team expected the coating to reduce heat loss. _____, the treated surface performed no better than the untreated one.",
+     "options": [
+      "For example",
+      "Likewise",
+      "However",
+      "Therefore"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 18,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A landslide blocked the only road into the valley. _____, deliveries were delayed for three days.",
+     "options": [
+      "Similarly",
+      "Consequently",
+      "Specifically",
+      "Nevertheless"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 19,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "Some desert animals avoid daytime heat by becoming active after sunset. _____, kangaroo rats often forage at night.",
+     "options": [
+      "For example",
+      "In contrast",
+      "As a result",
+      "Ultimately"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 20,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The researchers first removed duplicate records from the database. _____, they standardized the spelling of location names.",
+     "options": [
+      "Previously",
+      "Next",
+      "Nevertheless",
+      "Indeed"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 21,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The policy does not ban private vehicles from downtown. _____, it limits the hours during which they may enter certain streets.",
+     "options": [
+      "In other words",
+      "By contrast",
+      "For example",
+      "Consequently"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 22,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The cave system is unusually extensive. _____, surveyors have mapped more than 180 kilometers of passages so far.",
+     "options": [
+      "Indeed",
+      "Instead",
+      "Nevertheless",
+      "Subsequently"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 23,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The northern population migrates hundreds of kilometers each winter. _____, the southern population travels long distances seasonally.",
+     "options": [
+      "Similarly",
+      "However",
+      "Therefore",
+      "Namely"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 24,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The first prototype was expensive to manufacture. _____, its unusually low energy use made further development worthwhile.",
+     "options": [
+      "Granted",
+      "For instance",
+      "Therefore",
+      "Likewise"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 25,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The team could repair the damaged sensor array. _____, it could replace the entire unit with a newer model.",
+     "options": [
+      "Alternatively",
+      "Consequently",
+      "Indeed",
+      "Specifically"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 26,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The study included only 42 participants, so its conclusions should be interpreted cautiously. _____, the results are consistent with those of several larger studies.",
+     "options": [
+      "That said",
+      "Namely",
+      "As a result",
+      "For instance"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 27,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The restoration project focused on one urgent problem: _____, saltwater intrusion into the freshwater marsh.",
+     "options": [
+      "nevertheless",
+      "namely",
+      "consequently",
+      "similarly"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 28,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A larger sample can reduce the influence of unusual individual cases. _____, a very small sample can make such cases disproportionately important.",
+     "options": [
+      "By the same token",
+      "In sum",
+      "For example",
+      "Predictably"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 29,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The reserve receives most of its rainfall in a brief three-month period. _____, managers store water during the wet season for use later in the year.",
+     "options": [
+      "With this in mind",
+      "Alas",
+      "On the contrary",
+      "Namely"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 30,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "The new method is faster, requires less material, and produces results as accurate as the older procedure. _____, it offers several practical advantages without sacrificing precision.",
+     "options": [
+      "In sum",
+      "Yet",
+      "Previously",
+      "For instance"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 31,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "Which expression is equivalent to x⁴ · x³?",
+     "options": [
+      "x⁷",
+      "x¹²",
+      "2x⁷",
+      "x"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 32,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "What is the value of √196?",
+     "options": [
+      "7",
+      "12",
+      "14",
+      "28"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 33,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "Which expression is equivalent to √72?",
+     "options": [
+      "3√8",
+      "6√2",
+      "8√2",
+      "12√2"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 34,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "A population begins at 600 and increases by 15% each year. Which expression models the population after t years?",
+     "options": [
+      "600(0.15)^t",
+      "600(0.85)^t",
+      "600(1.15)^t",
+      "615^t"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 35,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "A quantity decreases by 12% each period. What multiplicative factor represents one period of decay?",
+     "options": [
+      "0.12",
+      "0.88",
+      "1.12",
+      "12"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 36,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "Which expression is equivalent to (2x³)⁴?",
+     "options": [
+      "8x⁷",
+      "8x¹²",
+      "16x⁷",
+      "16x¹²"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 37,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "If √(x + 5) = 9, what is the value of x?",
+     "options": [
+      "4",
+      "14",
+      "76",
+      "86"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 38,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "The formula Q = kr² relates positive quantities Q, k, and r. Which expression gives r in terms of Q and k?",
+     "options": [
+      "Q/k²",
+      "√(Q/k)",
+      "Q²/k",
+      "k/√Q"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 39,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "A quantity grows by 8% every 6 months. In a model of the form A(1.08)^n, what value of n represents 18 months?",
+     "options": [
+      "2",
+      "3",
+      "6",
+      "18"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 40,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "For x ≥ 0, which expression is equivalent to x^(5/2)?",
+     "options": [
+      "x²√x",
+      "x√x",
+      "x⁵√x",
+      "√(x⁵)/x"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 41,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "If 8^(x+1) = 4^(2x-1), what is the value of x?",
+     "options": [
+      "1",
+      "3",
+      "5",
+      "7"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 42,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "A quantity is modeled by P(t)=1200(0.81)^(t/2), where t is measured in years. By what percent does the quantity decrease each year?",
+     "options": [
+      "9%",
+      "10%",
+      "19%",
+      "20%"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 43,
+     "lesson_index": 2,
+     "type": "short_answer",
+     "text": "A culture starts with 300 cells and grows by 20% every 3 hours. How many cells does the model predict after 12 hours?",
+     "options": [],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 44,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "If y = √((x - 3)/5), which expression gives x in terms of y?",
+     "options": [
+      "5y² + 3",
+      "5y + 3",
+      "y²/5 + 3",
+      "5(y - 3)²"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 45,
+     "lesson_index": 2,
+     "type": "short_answer",
+     "text": "N = 640(1.25)^(2t). What is N when t = 2?",
+     "options": [],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    }
+   ],
+   "problems": []
+  },
+  {
+   "number": 5,
+   "title": "Checkpoint 5",
+   "lessons": [
+    "Rhetorical Synthesis",
+    "Research, Keywords & Big Picture",
+    "Quadratic Equations & Functions"
+   ],
+   "units": [
+    {
+     "lesson_id": 46,
+     "kind": "verbal"
+    },
+    {
+     "lesson_id": 47,
+     "kind": "verbal"
+    },
+    {
+     "lesson_id": 58,
+     "kind": "math"
+    }
+   ],
+   "source": {
+    "student": "MasterSAT_Week_5_SAT_Style_Checkpoint_45Q.docx",
+    "key": null
+   },
+   "answers_complete": false,
+   "questions": [
+    {
+     "number": 1,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "A student wants to introduce biologist Rachel Carson and her best-known book. Which choice most effectively uses the notes to accomplish this goal?",
+     "options": [
+      "Rachel Carson was born in Pennsylvania in 1907.",
+      "Biologist Rachel Carson wrote Silent Spring, a 1962 book that examined the environmental effects of pesticides.",
+      "Silent Spring was published in 1962, many years after Carson was born.",
+      "Pesticides were widely used before Silent Spring was published."
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 2,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to emphasize a similarity between the two bridges. Which choice most effectively uses the notes?",
+     "options": [
+      "The Golden Gate Bridge opened earlier than the Akashi Kaikyo Bridge.",
+      "Both bridges are suspension bridges that cross straits.",
+      "The Akashi Kaikyo Bridge is in Japan, whereas the Golden Gate Bridge is in the United States.",
+      "The Golden Gate Bridge opened in 1937."
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 3,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to state the study’s main finding. Which choice most effectively uses the notes?",
+     "options": [
+      "The researchers studied 120 students for six weeks.",
+      "Students who slept at least eight hours performed better on the memory task than students who slept less.",
+      "The memory task was administered after six weeks.",
+      "Sleep is important for many aspects of health."
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 4,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to emphasize a chronological sequence. Which choice most effectively uses the notes?",
+     "options": [
+      "The observatory was completed in 1894 and later received a new 100-inch telescope in 1923.",
+      "The observatory received a telescope in 1923 because it was built in 1894.",
+      "The observatory, which is on a mountain, has a telescope.",
+      "In 1923, the observatory was already several decades old."
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 5,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to explain why mangroves are valuable to coastal communities. Which choice most effectively uses the notes?",
+     "options": [
+      "Mangroves grow in tropical and subtropical coastal regions.",
+      "Mangrove roots can reduce wave energy and provide habitat for young fish, helping protect coasts and support fisheries.",
+      "Young fish often live among mangrove roots.",
+      "Some coastal plants tolerate salt water."
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 6,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to contrast the energy sources while emphasizing one advantage of wind power. Which choice most effectively uses the notes?",
+     "options": [
+      "Wind and coal can both generate electricity, but coal has been used for longer.",
+      "Unlike coal, wind power produces electricity without direct carbon dioxide emissions during operation.",
+      "Wind turbines depend on moving air, while coal is a fossil fuel.",
+      "Coal plants can operate at night, and wind turbines can also operate at night when wind is available."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 7,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to make a claim about how the artist’s technique changed over time. Which choice most effectively uses the notes?",
+     "options": [
+      "The artist exhibited paintings in both 2010 and 2020.",
+      "The artist’s 2010 paintings used muted colors and thin layers, whereas the 2020 works featured bright colors and thick visible brushstrokes.",
+      "The artist used oil paint in both series.",
+      "Bright colors are often associated with modern art."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 8,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to support the claim that the city’s bike-share program expanded substantially. Which choice most effectively uses the notes?",
+     "options": [
+      "The program launched in 2016 with 40 stations and by 2024 had 210 stations.",
+      "The program uses bicycles that riders can borrow.",
+      "The city added some stations after the program began.",
+      "Bike-share programs exist in many cities."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 9,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to introduce a disagreement between two researchers. Which choice most effectively uses the notes?",
+     "options": [
+      "Both researchers study the same archaeological site.",
+      "Nguyen argues that drought caused the settlement’s abandonment, whereas Patel argues that disruption of regional trade was the primary cause.",
+      "The settlement was abandoned centuries ago.",
+      "Drought and trade can both affect settlements."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 10,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to explain the purpose of the experiment, not its results. Which choice most effectively uses the notes?",
+     "options": [
+      "Researchers exposed seedlings to three light levels to test whether light intensity affects growth rate.",
+      "Seedlings under medium light grew 12% faster than seedlings under low light.",
+      "The experiment lasted four weeks and used 90 seedlings.",
+      "Light intensity can affect photosynthesis."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 11,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to qualify the broad claim that urban trees always reduce city temperatures. Which choice most effectively uses the notes?",
+     "options": [
+      "Urban trees provide shade in many cities.",
+      "Although trees can reduce local temperatures through shade and transpiration, the size of the effect varies with tree species, canopy density, and local climate.",
+      "Cities with trees are cooler than cities without trees.",
+      "Tree species differ in height and leaf shape."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 12,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to explain concisely why the 1919 eclipse expedition changed scientists’ views. Which choice most effectively uses the notes?",
+     "options": [
+      "The 1919 expedition traveled to observe a solar eclipse.",
+      "Measurements during the 1919 eclipse showed that starlight appeared to bend near the Sun, evidence consistent with Einstein’s prediction and influential in increasing acceptance of general relativity.",
+      "Einstein had published a theory before 1919.",
+      "Eclipses allow astronomers to observe stars near the Sun."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 13,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to make a cautious generalization about the relationship described in the notes. Which choice most effectively uses the notes?",
+     "options": [
+      "Every city with more public parks has lower summer temperatures.",
+      "Across the twelve cities studied, greater park coverage was generally associated with lower average summer surface temperatures.",
+      "The city with the most parks had exactly 18% lower temperatures than every other city.",
+      "Public parks always cause lower temperatures regardless of local climate."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 14,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to begin a brief narrative about the discovery. Which choice most effectively uses the notes?",
+     "options": [
+      "The cave contains mineral formations and prehistoric paintings.",
+      "In 1994, three hikers followed a narrow passage beneath the valley and unexpectedly entered a chamber whose walls were covered with prehistoric paintings.",
+      "The cave was discovered in 1994 and later studied by archaeologists.",
+      "Prehistoric paintings can provide evidence about past cultures."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 15,
+     "lesson_index": 0,
+     "type": "single_choice",
+     "text": "The student wants to provide an overview of the research project. Which choice most effectively uses the notes?",
+     "options": [
+      "The project lasted three years and used 24 sensors.",
+      "Researchers used 24 sensors across urban and rural sites over three years to examine how nighttime temperature and humidity differ between the two environments.",
+      "Urban sensors recorded higher nighttime temperatures.",
+      "The researchers used equipment to collect environmental data."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 16,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A broad explanation proposes that sleep duration influences cognitive performance. A researcher predicts that students who sleep fewer than six hours will score lower on a memory test than students who sleep eight hours. The prediction is best described as a",
+     "options": [
+      "theory",
+      "hypothesis",
+      "dependent variable",
+      "trend line"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 17,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "Researchers assign plants to receive 4, 8, or 12 hours of light per day and then measure growth. What is the independent variable?",
+     "options": [
+      "plant growth",
+      "hours of light per day",
+      "plant species",
+      "number of leaves at the end"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 18,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "In the same study, researchers measure each plant’s increase in height after four weeks. What is the dependent variable?",
+     "options": [
+      "hours of light",
+      "plant height increase",
+      "number of treatment groups",
+      "length of the study"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 19,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A dataset shows that as weekly study hours increase, average quiz scores also tend to increase. This pattern is best described as a",
+     "options": [
+      "positive relationship",
+      "negative relationship",
+      "no relationship",
+      "randomized trial"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 20,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A graph shows that as distance from a city center increases, average traffic noise generally decreases. This pattern is best described as a",
+     "options": [
+      "positive relationship",
+      "negative relationship",
+      "no relationship",
+      "constant relationship"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 21,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A scatterplot of shoe size and vocabulary score shows points spread randomly with no upward or downward pattern. Which description best fits the relationship?",
+     "options": [
+      "Strong positive",
+      "Strong negative",
+      "No clear relationship",
+      "Direct proportion"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 22,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "Read this research summary: “A team examined how sleep deprivation affects reaction time. Participants who slept four hours responded more slowly than participants who slept eight hours.” Which set contains the most useful keywords?",
+     "options": [
+      "team, participants, hours",
+      "sleep deprivation, reaction time, responded more slowly",
+      "examined, four, eight",
+      "research, summary, participants"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 23,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "For decades, biologists assumed that the species was active only at night. However, new camera-trap data show frequent daytime activity during the dry season. Which statement best captures the passage’s big picture?",
+     "options": [
+      "Camera traps are widely used by biologists.",
+      "The species is nocturnal in every season.",
+      "New evidence challenges the traditional view that the species is active only at night.",
+      "Dry seasons are longer than wet seasons."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 24,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "Many urban planners once treated street trees mainly as decorative features. Recent research, however, indicates that dense tree canopies can reduce surface temperatures and slow stormwater runoff. What is the main idea?",
+     "options": [
+      "Street trees are difficult to maintain.",
+      "Research suggests that street trees can provide practical environmental benefits beyond decoration.",
+      "All cities should replace drainage systems with trees.",
+      "Decorative features are unnecessary in cities."
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 25,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A researcher predicts that increasing water temperature will shorten the time needed for a tablet to dissolve. In the experiment, water temperature is varied and dissolving time is measured. Which pairing correctly identifies the variables?",
+     "options": [
+      "Independent: dissolving time; Dependent: water temperature",
+      "Independent: water temperature; Dependent: dissolving time",
+      "Independent: prediction; Dependent: tablet",
+      "Independent: tablet; Dependent: researcher"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 26,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A theory proposes that greater access to green space reduces stress by increasing opportunities for outdoor activity. Which statement is the most appropriate hypothesis derived from that theory?",
+     "options": [
+      "Green space is important in many cities.",
+      "Residents living within 500 meters of a public park will report lower average stress scores than residents living more than 2 kilometers away.",
+      "Stress can be measured in several different ways.",
+      "Public parks contain trees, paths, and recreational areas."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 27,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "Researchers report a correlation of -0.78 between weekly exercise time and resting heart rate in a sample. Which interpretation best matches this result?",
+     "options": [
+      "People who exercise more tend to have lower resting heart rates.",
+      "People who exercise more always have higher resting heart rates.",
+      "Exercise time and heart rate have no relationship.",
+      "The result proves that exercise is the only cause of resting heart rate."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 28,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A passage reports that “as ocean acidity increased, shell thickness in juvenile oysters declined, especially at the highest carbon-dioxide concentrations.” Which set of keywords best preserves the research story?",
+     "options": [
+      "ocean, oysters, concentrations",
+      "ocean acidity, shell thickness, declined",
+      "juvenile, especially, highest",
+      "passage, reports, carbon dioxide"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 29,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "Scientists traditionally believed that a certain desert moss became metabolically active only after rainfall. New sensor measurements reveal that the moss can also become active when it absorbs moisture directly from fog. Which choice best states the big picture?",
+     "options": [
+      "Fog is common in every desert ecosystem.",
+      "Rainfall is the only source of water available to desert mosses.",
+      "New evidence expands the accepted explanation of when the moss can become metabolically active.",
+      "Sensors measure moisture more accurately than rainfall gauges."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 30,
+     "lesson_index": 1,
+     "type": "single_choice",
+     "text": "A study examines whether sleep duration predicts reaction speed. The report states that participants sleeping under six hours had slower average response times than those sleeping seven to nine hours. Which evidence most directly supports the study’s central claim?",
+     "options": [
+      "The study included adults from several age groups.",
+      "Participants completed the task in a quiet laboratory.",
+      "Average response time was 410 ms in the under-six-hour group and 330 ms in the seven-to-nine-hour group.",
+      "Some participants reported drinking coffee before the study."
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 31,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "Which equation represents a quadratic function?",
+     "options": [
+      "y=4x-7",
+      "y=3(1.2)^x",
+      "y=2x²-5x+1",
+      "y=7/x"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 32,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "The function f(x)=(x-4)²+7 has vertex",
+     "options": [
+      "(-4,7)",
+      "(4,7)",
+      "(7,4)",
+      "(4,-7)"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 33,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "What are the x-intercepts of y=(x+2)(x-5)?",
+     "options": [
+      "-5 and 2",
+      "-2 and 5",
+      "2 and 5",
+      "-2 and -5"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 34,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "For y=2x²-3x+8, what is the y-intercept?",
+     "options": [
+      "-3",
+      "2",
+      "8",
+      "16"
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 35,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "For x²+4x+8=0, which statement about the discriminant is true?",
+     "options": [
+      "It is positive.",
+      "It is zero.",
+      "It is negative.",
+      "It equals 8."
+     ],
+     "answer": null,
+     "difficulty": "easy",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 36,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "What is the x-coordinate of the vertex of y=2x²-12x+5?",
+     "options": [
+      "-3",
+      "3",
+      "5",
+      "6"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 37,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "The function y=-3(x+1)²+12 has a",
+     "options": [
+      "minimum value of -1",
+      "minimum value of 12",
+      "maximum value of 12",
+      "maximum value of -3"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 38,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "If x²+px+12=0 has roots 3 and 4, what is the value of p?",
+     "options": [
+      "-7",
+      "-1",
+      "7",
+      "12"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 39,
+     "lesson_index": 2,
+     "type": "short_answer",
+     "text": "For what value of k does x²-6x+k=0 have exactly one real solution?",
+     "options": [],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 40,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "What is the axis of symmetry of y=-2x²+8x+1?",
+     "options": [
+      "x=-4",
+      "x=-2",
+      "x=2",
+      "x=4"
+     ],
+     "answer": null,
+     "difficulty": "medium",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 41,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "A parabola has x-intercepts at x=-2 and x=8. What is the x-coordinate of its vertex?",
+     "options": [
+      "2",
+      "3",
+      "4",
+      "5"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 42,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "If r and s are the roots of 3x²-10x+2=0, what is rs?",
+     "options": [
+      "-10/3",
+      "2/3",
+      "10/3",
+      "3/2"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 43,
+     "lesson_index": 2,
+     "type": "short_answer",
+     "text": "A quadratic has zeros at x=1 and x=7 and passes through (0,14). If f(x)=a(x-1)(x-7), what is a?",
+     "options": [],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 44,
+     "lesson_index": 2,
+     "type": "short_answer",
+     "text": "A quadratic has vertex (5,-4) and passes through (7,8). If f(x)=a(x-5)²-4, what is a?",
+     "options": [],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    },
+    {
+     "number": 45,
+     "lesson_index": 2,
+     "type": "single_choice",
+     "text": "The equation x²+(k-3)x+k=0 has roots whose sum is 5. What is the value of k?",
+     "options": [
+      "-5",
+      "-2",
+      "2",
+      "5"
+     ],
+     "answer": null,
+     "difficulty": "hard",
+     "skill": "",
+     "explanation": "",
+     "answer_source": "position"
+    }
+   ],
+   "problems": []
+  },
+  {
    "number": 6,
    "title": "Checkpoint 6",
    "lessons": [
@@ -2401,6 +3975,7 @@
     "student": "MasterSAT_Week_6_SAT_Style_Checkpoint_45Q.docx",
     "key": "MasterSAT_Week_6_SAT_Style_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -3196,6 +4771,7 @@
     "student": "MasterSAT_Week_7_SAT_Style_Checkpoint_45Q.docx",
     "key": "MasterSAT_Week_7_SAT_Style_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -3991,6 +5567,7 @@
     "student": "MasterSAT_Week_8_SAT_Style_Checkpoint_45Q.docx",
     "key": "MasterSAT_Week_8_SAT_Style_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -4786,6 +6363,7 @@
     "student": "MasterSAT_Week_9_SAT_Style_Checkpoint_45Q (1).docx",
     "key": "MasterSAT_Week_9_SAT_Style_Checkpoint_Teacher_Key.docx"
    },
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,

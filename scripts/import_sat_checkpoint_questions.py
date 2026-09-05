@@ -12,7 +12,9 @@ weekly documents):
   * the definition's required units are replaced with the bank's list (the IT mapping PDF), unless
     --no-units;
   * with --activate, a definition whose quiz now holds exactly total_questions questions is
-    activated. Without it, definitions are left as they are (inactive after the seed).
+    activated. Without it, definitions are left as they are (inactive after the seed);
+  * a checkpoint whose bank entry has no answers yet (no teacher key) still gets its units bound,
+    but its quiz is left untouched; --units-only does that for every checkpoint.
 
 Idempotent: re-running writes the same content again. The lesson caches are invalidated so the
 new questions are served immediately. Run the seed first — a missing definition is an error.
@@ -137,11 +139,12 @@ def _resolve_units(db: Session, course_id: int, units: List[Dict[str, Any]]) -> 
 
 def import_checkpoint(db: Session, course_id: int, cp: Dict[str, Any], *, remap_units: bool = True,
                       activate: bool = False, dry_run: bool = False,
-                      shuffle_options: bool = True) -> Dict[str, Any]:
+                      shuffle_options: bool = True, write_questions: bool = True) -> Dict[str, Any]:
     definition = db.query(CheckpointDefinition).filter_by(course_id=course_id, number=cp["number"]).first()
     if definition is None:
         raise ImportError_(f"checkpoint {cp['number']}: no definition for course {course_id} (run the seed first)")
-    questions = build_questions(cp, shuffle_options=shuffle_options)
+    has_answers = bool(cp["questions"]) and all(q.get("answer") not in (None, "") for q in cp["questions"])
+    questions = build_questions(cp, shuffle_options=shuffle_options) if (write_questions and has_answers) else []
     step = _quiz_step(db, definition)
     units = _resolve_units(db, course_id, cp["units"]) if remap_units else None
 
@@ -153,20 +156,22 @@ def import_checkpoint(db: Session, course_id: int, cp: Dict[str, Any], *, remap_
         "answer_letters": {L: sum(1 for q in questions if q["question_type"] == "single_choice" and q["correct_answer"] == i)
                            for i, L in enumerate("ABCD")},
         "units": units, "activated": False, "dry_run": dry_run,
+        "questions_written": bool(questions), "answers_missing": not has_answers,
     }
     if dry_run:
         return report
 
-    try:
-        content = json.loads(step.content_text) if step.content_text else {}
-        if not isinstance(content, dict):
+    if questions:
+        try:
+            content = json.loads(step.content_text) if step.content_text else {}
+            if not isinstance(content, dict):
+                content = {}
+        except ValueError:
             content = {}
-    except ValueError:
-        content = {}
-    content.setdefault("title", cp.get("title") or f"Checkpoint {definition.number}")
-    content.setdefault("display_mode", "all_at_once")
-    content["questions"] = questions
-    step.content_text = json.dumps(content, ensure_ascii=False)
+        content.setdefault("title", cp.get("title") or f"Checkpoint {definition.number}")
+        content.setdefault("display_mode", "all_at_once")
+        content["questions"] = questions
+        step.content_text = json.dumps(content, ensure_ascii=False)
 
     if units is not None:
         db.query(CheckpointRequiredUnit).filter(CheckpointRequiredUnit.checkpoint_id == definition.id).delete(
@@ -175,7 +180,7 @@ def import_checkpoint(db: Session, course_id: int, cp: Dict[str, Any], *, remap_
         db.expire(definition, ["required_units"])
         definition.required_units = [CheckpointRequiredUnit(lesson_id=u["lesson_id"], kind=u["kind"], position=i)
                                      for i, u in enumerate(units)]
-    if activate and len(questions) == definition.total_questions:
+    if activate and questions and len(questions) == definition.total_questions:
         definition.is_active = True
         report["activated"] = True
     db.commit()
@@ -183,7 +188,7 @@ def import_checkpoint(db: Session, course_id: int, cp: Dict[str, Any], *, remap_
 
 
 def run(db: Session, *, course_id: int, data: Path, weeks: List[int], remap_units: bool, activate: bool,
-        dry_run: bool, shuffle_options: bool = True) -> List[Dict[str, Any]]:
+        dry_run: bool, shuffle_options: bool = True, write_questions: bool = True) -> List[Dict[str, Any]]:
     bank = json.loads(Path(data).read_text())
     reports = []
     for cp in bank["checkpoints"]:
@@ -192,7 +197,8 @@ def run(db: Session, *, course_id: int, data: Path, weeks: List[int], remap_unit
         if cp.get("problems"):
             raise ImportError_(f"checkpoint {cp['number']} has unresolved problems in the bank: {cp['problems'][:3]}")
         reports.append(import_checkpoint(db, course_id, cp, remap_units=remap_units, activate=activate,
-                                         dry_run=dry_run, shuffle_options=shuffle_options))
+                                         dry_run=dry_run, shuffle_options=shuffle_options,
+                                         write_questions=write_questions))
     if reports and not dry_run:
         from src.checkpoints import service
         service._invalidate_lesson_caches()
@@ -206,6 +212,7 @@ def main() -> None:  # pragma: no cover - operator CLI
     ap.add_argument("--data", type=Path, default=DEFAULT_DATA)
     ap.add_argument("--weeks", default="", help="comma-separated checkpoint numbers (default: all in the bank)")
     ap.add_argument("--no-units", action="store_true", help="leave the definitions' required units untouched")
+    ap.add_argument("--units-only", action="store_true", help="bind the required units, leave every quiz untouched")
     ap.add_argument("--activate", action="store_true")
     ap.add_argument("--keep-option-order", action="store_true",
                     help="keep the documents' A-D order (default: deal the options into a fixed per-question order)")
@@ -215,7 +222,8 @@ def main() -> None:  # pragma: no cover - operator CLI
     db = SessionLocal()
     try:
         reports = run(db, course_id=args.course_id, data=args.data, weeks=weeks, remap_units=not args.no_units,
-                      activate=args.activate, dry_run=args.dry_run, shuffle_options=not args.keep_option_order)
+                      activate=args.activate, dry_run=args.dry_run, shuffle_options=not args.keep_option_order,
+                      write_questions=not args.units_only)
     except ImportError_ as exc:
         raise SystemExit(f"error: {exc}")
     finally:
@@ -224,9 +232,13 @@ def main() -> None:  # pragma: no cover - operator CLI
         d = r["by_difficulty"]
         units = ", ".join(f"{u['lesson_id']} {u['title']} ({u['kind'][0]})" for u in r["units"]) if r["units"] else "(unchanged)"
         letters = "/".join(str(r["answer_letters"][L]) for L in "ABCD")
-        print(f"Checkpoint {r['number']}: {r['questions']} questions ({r['short_answer']} short-answer), "
-              f"difficulty {d['easy']}/{d['medium']}/{d['hard']}, correct letter A/B/C/D {letters}, "
-              f"{'ACTIVATED' if r['activated'] else 'inactive'}{' [dry-run]' if r['dry_run'] else ''}\n    units: {units}")
+        if r["questions_written"]:
+            summary = (f"{r['questions']} questions ({r['short_answer']} short-answer), "
+                       f"difficulty {d['easy']}/{d['medium']}/{d['hard']}, correct letter A/B/C/D {letters}")
+        else:
+            summary = "quiz untouched" + (" (the bank has no answers for it yet)" if r["answers_missing"] else " (--units-only)")
+        print(f"Checkpoint {r['number']}: {summary}, {'ACTIVATED' if r['activated'] else 'inactive'}"
+              f"{' [dry-run]' if r['dry_run'] else ''}\n    units: {units}")
 
 
 if __name__ == "__main__":
