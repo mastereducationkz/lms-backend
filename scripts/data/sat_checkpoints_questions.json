@@ -1,5 +1,5 @@
 {
- "built_at": "2026-09-05T07:32Z",
+ "built_at": "2026-09-05T07:35Z",
  "source_dir": "/Users/fikrat/Documents/master.lms/lms-backend/docs/checkpoints_LMS",
  "checkpoints": [
   {
@@ -2406,9 +2406,9 @@
    ],
    "source": {
     "student": "MasterSAT_Week_4_SAT_Style_Checkpoint_45Q.docx",
-    "key": null
+    "key": "MasterSAT_Week_4_Checkpoint_Teacher_Key.docx"
    },
-   "answers_complete": false,
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -2421,11 +2421,11 @@
       "is measuring",
       "has measured"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Present simple",
+     "explanation": "“Every winter” signals a repeated action, so “measures” is the correct simple present form.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 2,
@@ -2438,11 +2438,11 @@
       "have repaired",
       "had repaired"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Simple past",
+     "explanation": "The completed action occurred in 2022, so “repaired” is required.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 3,
@@ -2455,11 +2455,11 @@
       "had welcomed",
       "will welcome"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Present perfect",
+     "explanation": "“Since the museum opened” connects a past starting point to the present: “has welcomed.”",
+     "answer_source": "teacher_key"
     },
     {
      "number": 4,
@@ -2472,11 +2472,11 @@
       "had built",
       "have built"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Past perfect",
+     "explanation": "The shelter was completed before the rescue team arrived, so “had built” marks the earlier past action.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 5,
@@ -2489,11 +2489,11 @@
       "will analyze",
       "will have analyzed"
      ],
-     "answer": null,
+     "answer": "D",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Future perfect",
+     "explanation": "“By next May” calls for an action completed before a future deadline: “will have analyzed.”",
+     "answer_source": "teacher_key"
     },
     {
      "number": 6,
@@ -2506,11 +2506,11 @@
       "has taught",
       "taught"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Present progressive",
+     "explanation": "“This semester” describes a temporary current arrangement, so “is teaching” fits best.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 7,
@@ -2523,11 +2523,11 @@
       "have calibrated",
       "had calibrated"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Past progressive",
+     "explanation": "The calibration was in progress when the power failure interrupted it: “were calibrating.”",
+     "answer_source": "teacher_key"
     },
     {
      "number": 8,
@@ -2540,11 +2540,11 @@
       "have been monitoring",
       "had been monitoring"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Present perfect progressive",
+     "explanation": "The action began five years ago and is still continuing, so “have been monitoring” is correct.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 9,
@@ -2557,11 +2557,11 @@
       "had been waiting",
       "have been waiting"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Past perfect progressive",
+     "explanation": "The waiting continued for nearly an hour before the bus arrived: “had been waiting.”",
+     "answer_source": "teacher_key"
     },
     {
      "number": 10,
@@ -2574,11 +2574,11 @@
       "will be collecting",
       "will have collected"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Future progressive",
+     "explanation": "At a specific time tomorrow, the action will be in progress: “will be collecting.”",
+     "answer_source": "teacher_key"
     },
     {
      "number": 11,
@@ -2591,11 +2591,11 @@
       "will have been working",
       "has been working"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Future perfect progressive",
+     "explanation": "“By June” plus “for exactly ten years” emphasizes duration up to a future point: “will have been working.”",
+     "answer_source": "teacher_key"
     },
     {
      "number": 12,
@@ -2608,11 +2608,11 @@
       "has recorded",
       "had recorded"
      ],
-     "answer": null,
+     "answer": "D",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Past perfect",
+     "explanation": "The incorrect recording happened before historians reexamined the letters, so “had recorded” is correct.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 13,
@@ -2625,11 +2625,11 @@
       "had collected",
       "will collect"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Present perfect",
+     "explanation": "“Since ... 2018” requires a present-perfect form; among the choices, “has collected” is correct.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 14,
@@ -2642,11 +2642,11 @@
       "documenting",
       "documents"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Participle modifier",
+     "explanation": "“Documenting” is a participle modifying “photographs”; no additional finite verb is needed.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 15,
@@ -2659,11 +2659,11 @@
       "is owning",
       "was owning"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Stative verb",
+     "explanation": "“Own” is normally stative, so the correct perfect form is “has owned,” not a progressive form.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 16,
@@ -2676,11 +2676,11 @@
       "Instead",
       "Consequently"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Addition transition",
+     "explanation": "The second sentence adds another advantage of the telescope, so “Moreover” fits.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 17,
@@ -2693,11 +2693,11 @@
       "However",
       "Therefore"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Contrast transition",
+     "explanation": "The actual result contradicts the team’s expectation, so “However” is correct.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 18,
@@ -2710,11 +2710,11 @@
       "Specifically",
       "Nevertheless"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Cause and effect",
+     "explanation": "The blocked road caused the delivery delay, so “Consequently” expresses the result.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 19,
@@ -2727,11 +2727,11 @@
       "As a result",
       "Ultimately"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Example transition",
+     "explanation": "Kangaroo rats provide a specific example of desert animals being active at night.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 20,
@@ -2744,11 +2744,11 @@
       "Nevertheless",
       "Indeed"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Sequence transition",
+     "explanation": "After duplicate records were removed, the next step was standardizing location names.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 21,
@@ -2761,11 +2761,11 @@
       "For example",
       "Consequently"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Restatement / clarification",
+     "explanation": "The second sentence clarifies what the policy does instead of banning vehicles outright; “In other words” best restates the idea.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 22,
@@ -2778,11 +2778,11 @@
       "Nevertheless",
       "Subsequently"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Emphasis transition",
+     "explanation": "The mapped distance provides strong evidence for the claim that the cave system is extensive, so “Indeed” fits.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 23,
@@ -2795,11 +2795,11 @@
       "Therefore",
       "Namely"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Similarity transition",
+     "explanation": "Both populations migrate long distances seasonally, so “Similarly” is appropriate.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 24,
@@ -2812,11 +2812,11 @@
       "Therefore",
       "Likewise"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Concession",
+     "explanation": "“Granted” introduces a concession: although the first prototype was expensive, its low energy use justified further development.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 25,
@@ -2829,11 +2829,11 @@
       "Indeed",
       "Specifically"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Alternative transition",
+     "explanation": "The sentence presents two possible actions: repair the array or, alternatively, replace it.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 26,
@@ -2846,11 +2846,11 @@
       "As a result",
       "For instance"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Concession / contrast",
+     "explanation": "“That said” acknowledges the limitation while introducing evidence that still supports the findings.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 27,
@@ -2863,11 +2863,11 @@
       "consequently",
       "similarly"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Specification",
+     "explanation": "“Namely” introduces the specific urgent problem: saltwater intrusion.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 28,
@@ -2880,11 +2880,11 @@
       "For example",
       "Predictably"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Parallel logic",
+     "explanation": "The second sentence applies the same sampling logic in the opposite case, so “By the same token” is appropriate.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 29,
@@ -2897,11 +2897,11 @@
       "On the contrary",
       "Namely"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Decision based on context",
+     "explanation": "Because rainfall is concentrated in a short wet season, managers plan storage with that fact in mind.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 30,
@@ -2914,11 +2914,11 @@
       "Previously",
       "For instance"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Summary transition",
+     "explanation": "The final sentence summarizes the listed advantages, so “In sum” is correct.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 31,
@@ -2931,11 +2931,11 @@
       "2x⁷",
       "x"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Exponent product rule",
+     "explanation": "When multiplying like bases, add exponents: x^4 * x^3 = x^7.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 32,
@@ -2948,11 +2948,11 @@
       "14",
       "28"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Square roots",
+     "explanation": "14^2 = 196, so sqrt(196) = 14.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 33,
@@ -2965,11 +2965,11 @@
       "8√2",
       "12√2"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Simplifying radicals",
+     "explanation": "sqrt(72)=sqrt(36*2)=6sqrt(2).",
+     "answer_source": "teacher_key"
     },
     {
      "number": 34,
@@ -2982,11 +2982,11 @@
       "600(1.15)^t",
       "615^t"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Exponential growth",
+     "explanation": "A 15% yearly increase uses growth factor 1.15, giving 600(1.15)^t.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 35,
@@ -2999,11 +2999,11 @@
       "1.12",
       "12"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Exponential decay",
+     "explanation": "A 12% decrease leaves 88% each period, so the multiplier is 0.88.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 36,
@@ -3016,11 +3016,11 @@
       "16x⁷",
       "16x¹²"
      ],
-     "answer": null,
+     "answer": "D",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Power of a product",
+     "explanation": "(2x^3)^4 = 2^4 * x^12 = 16x^12.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 37,
@@ -3033,11 +3033,11 @@
       "76",
       "86"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Radical equation",
+     "explanation": "sqrt(x+5)=9 gives x+5=81, so x=76.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 38,
@@ -3050,11 +3050,11 @@
       "Q²/k",
       "k/√Q"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Isolating a variable",
+     "explanation": "From Q=kr^2, divide by k and take the positive square root: r=sqrt(Q/k).",
+     "answer_source": "teacher_key"
     },
     {
      "number": 39,
@@ -3067,11 +3067,11 @@
       "6",
       "18"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Exponential periods",
+     "explanation": "18 months contains three 6-month periods, so n=3.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 40,
@@ -3084,11 +3084,11 @@
       "x⁵√x",
       "√(x⁵)/x"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Rational exponents",
+     "explanation": "x^(5/2)=x^2*x^(1/2)=x^2 sqrt(x) for x&gt;=0.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 41,
@@ -3101,11 +3101,11 @@
       "5",
       "7"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Equivalent exponential bases",
+     "explanation": "8^(x+1)=4^(2x-1) becomes 2^(3x+3)=2^(4x-2), so x=5.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 42,
@@ -3118,11 +3118,11 @@
       "19%",
       "20%"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Compound decay",
+     "explanation": "The two-year factor is 0.81; the one-year factor is sqrt(0.81)=0.90, a 10% yearly decrease.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 43,
@@ -3130,11 +3130,11 @@
      "type": "short_answer",
      "text": "A culture starts with 300 cells and grows by 20% every 3 hours. How many cells does the model predict after 12 hours?",
      "options": [],
-     "answer": null,
+     "answer": "622.08",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Exponential growth",
+     "explanation": "SPR: Four 3-hour periods occur in 12 hours. 300(1.20)^4 = 622.08.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 44,
@@ -3147,11 +3147,11 @@
       "y²/5 + 3",
       "5(y - 3)²"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Radical inverse / isolating x",
+     "explanation": "y=sqrt((x-3)/5) gives y^2=(x-3)/5, so x=5y^2+3.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 45,
@@ -3159,11 +3159,11 @@
      "type": "short_answer",
      "text": "N = 640(1.25)^(2t). What is N when t = 2?",
      "options": [],
-     "answer": null,
+     "answer": "1562.5",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Exponential evaluation",
+     "explanation": "SPR: At t=2, exponent 2t=4. N=640(1.25)^4=1562.5.",
+     "answer_source": "teacher_key"
     }
    ],
    "problems": []
@@ -3192,9 +3192,9 @@
    ],
    "source": {
     "student": "MasterSAT_Week_5_SAT_Style_Checkpoint_45Q.docx",
-    "key": null
+    "key": "MasterSAT_Week_5_Checkpoint_Teacher_Key (1).docx"
    },
-   "answers_complete": false,
+   "answers_complete": true,
    "questions": [
     {
      "number": 1,
@@ -3207,11 +3207,11 @@
       "Silent Spring was published in 1962, many years after Carson was born.",
       "Pesticides were widely used before Silent Spring was published."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Introduce source + key work",
+     "explanation": "Choice B introduces Carson by profession, names Silent Spring, gives its date, and states the book’s focus.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 2,
@@ -3224,11 +3224,11 @@
       "The Akashi Kaikyo Bridge is in Japan, whereas the Golden Gate Bridge is in the United States.",
       "The Golden Gate Bridge opened in 1937."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Compare / similarity",
+     "explanation": "Choice B directly states the relevant similarity: both are suspension bridges crossing straits.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 3,
@@ -3241,11 +3241,11 @@
       "The memory task was administered after six weeks.",
       "Sleep is important for many aspects of health."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "State main finding",
+     "explanation": "Choice B reports the key comparison between students sleeping at least eight hours and those sleeping less.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 4,
@@ -3258,11 +3258,11 @@
       "The observatory, which is on a mountain, has a telescope.",
       "In 1923, the observatory was already several decades old."
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Chronological sequence",
+     "explanation": "Choice A clearly orders the 1894 completion before the 1923 telescope installation.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 5,
@@ -3275,11 +3275,11 @@
       "Young fish often live among mangrove roots.",
       "Some coastal plants tolerate salt water."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Explain value / synthesize notes",
+     "explanation": "Choice B combines coastal protection and fish nursery habitat to explain value to communities and fisheries.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 6,
@@ -3292,11 +3292,11 @@
       "Wind turbines depend on moving air, while coal is a fossil fuel.",
       "Coal plants can operate at night, and wind turbines can also operate at night when wind is available."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Contrast with advantage",
+     "explanation": "Choice B contrasts wind with coal and highlights wind’s lack of direct CO2 emissions during operation.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 7,
@@ -3309,11 +3309,11 @@
       "The artist used oil paint in both series.",
       "Bright colors are often associated with modern art."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Describe change over time",
+     "explanation": "Choice B directly contrasts the artist’s 2010 and 2020 techniques using the relevant notes.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 8,
@@ -3326,11 +3326,11 @@
       "The city added some stations after the program began.",
       "Bike-share programs exist in many cities."
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Support expansion claim",
+     "explanation": "The change from 40 stations in 2016 to 210 in 2024 directly demonstrates substantial expansion.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 9,
@@ -3343,11 +3343,11 @@
       "The settlement was abandoned centuries ago.",
       "Drought and trade can both affect settlements."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Introduce disagreement",
+     "explanation": "Choice B accurately contrasts Nguyen’s drought explanation with Patel’s trade-disruption explanation.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 10,
@@ -3360,11 +3360,11 @@
       "The experiment lasted four weeks and used 90 seedlings.",
       "Light intensity can affect photosynthesis."
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "State research purpose",
+     "explanation": "Choice A focuses on the experimental purpose—testing whether light intensity affects growth—without reporting results.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 11,
@@ -3377,11 +3377,11 @@
       "Cities with trees are cooler than cities without trees.",
       "Tree species differ in height and leaf shape."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Qualify a broad claim",
+     "explanation": "Choice B preserves the benefit while adding the conditions that make the cooling effect vary.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 12,
@@ -3394,11 +3394,11 @@
       "Einstein had published a theory before 1919.",
       "Eclipses allow astronomers to observe stars near the Sun."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Explain significance",
+     "explanation": "Choice B connects the eclipse measurements to Einstein’s prediction and explains why they increased acceptance of relativity.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 13,
@@ -3411,11 +3411,11 @@
       "The city with the most parks had exactly 18% lower temperatures than every other city.",
       "Public parks always cause lower temperatures regardless of local climate."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Cautious generalization",
+     "explanation": "Because the study is observational, “generally associated with” is appropriately cautious and supported by the notes.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 14,
@@ -3428,11 +3428,11 @@
       "The cave was discovered in 1994 and later studied by archaeologists.",
       "Prehistoric paintings can provide evidence about past cultures."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Narrative opening",
+     "explanation": "Choice B gives a chronological, engaging opening centered on the hikers’ unexpected discovery.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 15,
@@ -3445,11 +3445,11 @@
       "Urban sensors recorded higher nighttime temperatures.",
       "The researchers used equipment to collect environmental data."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Research overview",
+     "explanation": "Choice B combines method, duration, sites, variables, and the project’s comparative purpose without overfocusing on one result.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 16,
@@ -3462,11 +3462,11 @@
       "dependent variable",
       "trend line"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Theory vs. hypothesis",
+     "explanation": "A specific, testable prediction derived from a broader explanation is a hypothesis.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 17,
@@ -3479,11 +3479,11 @@
       "plant species",
       "number of leaves at the end"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Independent variable",
+     "explanation": "Researchers manipulate the hours of light per day, making it the independent variable.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 18,
@@ -3496,11 +3496,11 @@
       "number of treatment groups",
       "length of the study"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Dependent variable",
+     "explanation": "Plant height increase is the measured outcome, so it is the dependent variable.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 19,
@@ -3513,11 +3513,11 @@
       "no relationship",
       "randomized trial"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Positive relationship",
+     "explanation": "Both variables tend to increase together, indicating a positive relationship.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 20,
@@ -3530,11 +3530,11 @@
       "no relationship",
       "constant relationship"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Negative relationship",
+     "explanation": "Noise decreases as distance increases, indicating a negative relationship.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 21,
@@ -3547,11 +3547,11 @@
       "No clear relationship",
       "Direct proportion"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "No relationship",
+     "explanation": "Random scatter with no upward or downward pattern indicates no clear relationship.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 22,
@@ -3564,11 +3564,11 @@
       "examined, four, eight",
       "research, summary, participants"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Keywords",
+     "explanation": "The terms “sleep deprivation,” “reaction time,” and “responded more slowly” preserve the research variables and result.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 23,
@@ -3581,11 +3581,11 @@
       "New evidence challenges the traditional view that the species is active only at night.",
       "Dry seasons are longer than wet seasons."
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Big picture / new evidence",
+     "explanation": "The key shift is that new camera data challenge the traditional “only at night” view.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 24,
@@ -3598,11 +3598,11 @@
       "All cities should replace drainage systems with trees.",
       "Decorative features are unnecessary in cities."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Main idea",
+     "explanation": "The passage shifts from decoration to evidence of practical environmental benefits from street trees.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 25,
@@ -3615,11 +3615,11 @@
       "Independent: prediction; Dependent: tablet",
       "Independent: tablet; Dependent: researcher"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Variables",
+     "explanation": "Water temperature is manipulated; dissolving time is measured.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 26,
@@ -3632,11 +3632,11 @@
       "Stress can be measured in several different ways.",
       "Public parks contain trees, paths, and recreational areas."
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Hypothesis from theory",
+     "explanation": "Choice B is specific, measurable, and directly derived from the theory about green space and stress.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 27,
@@ -3649,11 +3649,11 @@
       "Exercise time and heart rate have no relationship.",
       "The result proves that exercise is the only cause of resting heart rate."
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Interpreting correlation",
+     "explanation": "A correlation of -0.78 indicates a strong negative association: more exercise tends to accompany lower resting heart rate.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 28,
@@ -3666,11 +3666,11 @@
       "juvenile, especially, highest",
       "passage, reports, carbon dioxide"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Research keywords",
+     "explanation": "“Ocean acidity,” “shell thickness,” and “declined” capture the variables and direction of the result.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 29,
@@ -3683,11 +3683,11 @@
       "New evidence expands the accepted explanation of when the moss can become metabolically active.",
       "Sensors measure moisture more accurately than rainfall gauges."
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Big-picture shift",
+     "explanation": "The new sensor evidence expands the accepted explanation beyond rainfall to include moisture from fog.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 30,
@@ -3700,11 +3700,11 @@
       "Average response time was 410 ms in the under-six-hour group and 330 ms in the seven-to-nine-hour group.",
       "Some participants reported drinking coffee before the study."
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Evidence for central claim",
+     "explanation": "The group means of 410 ms vs. 330 ms directly quantify the slower responses associated with shorter sleep.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 31,
@@ -3717,11 +3717,11 @@
       "y=2x²-5x+1",
       "y=7/x"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Identify a quadratic",
+     "explanation": "A quadratic function contains a nonzero x^2 term; y=2x^2-5x+1 does.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 32,
@@ -3734,11 +3734,11 @@
       "(7,4)",
       "(4,-7)"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vertex form",
+     "explanation": "In (x-h)^2+k, the vertex is (h,k), so the vertex is (4,7).",
+     "answer_source": "teacher_key"
     },
     {
      "number": 33,
@@ -3751,11 +3751,11 @@
       "2 and 5",
       "-2 and -5"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Zeros / factored form",
+     "explanation": "Set each factor to zero: x+2=0 or x-5=0, giving -2 and 5.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 34,
@@ -3768,11 +3768,11 @@
       "8",
       "16"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Y-intercept",
+     "explanation": "At x=0, y=8, so the y-intercept is 8.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 35,
@@ -3785,11 +3785,11 @@
       "It is negative.",
       "It equals 8."
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "easy",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Discriminant",
+     "explanation": "b^2-4ac = 16-32 = -16, which is negative.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 36,
@@ -3802,11 +3802,11 @@
       "5",
       "6"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vertex x-coordinate",
+     "explanation": "x=-b/(2a)=12/4=3.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 37,
@@ -3819,11 +3819,11 @@
       "maximum value of 12",
       "maximum value of -3"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Maximum / vertex form",
+     "explanation": "The negative leading coefficient opens the parabola downward; its vertex value 12 is the maximum.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 38,
@@ -3836,11 +3836,11 @@
       "7",
       "12"
      ],
-     "answer": null,
+     "answer": "A",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vieta / sum of roots",
+     "explanation": "For roots 3 and 4, the sum is 7 = -p, so p=-7.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 39,
@@ -3848,11 +3848,11 @@
      "type": "short_answer",
      "text": "For what value of k does x²-6x+k=0 have exactly one real solution?",
      "options": [],
-     "answer": null,
+     "answer": "9",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Discriminant / one root",
+     "explanation": "SPR: Exactly one real solution means discriminant 0: 36-4k=0, so k=9.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 40,
@@ -3865,11 +3865,11 @@
       "x=2",
       "x=4"
      ],
-     "answer": null,
+     "answer": "C",
      "difficulty": "medium",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Axis of symmetry",
+     "explanation": "For y=-2x^2+8x+1, x=-b/(2a)=-8/(-4)=2.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 41,
@@ -3882,11 +3882,11 @@
       "4",
       "5"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vertex from roots",
+     "explanation": "The axis of symmetry is midway between -2 and 8: (-2+8)/2=3.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 42,
@@ -3899,11 +3899,11 @@
       "10/3",
       "3/2"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vieta / product of roots",
+     "explanation": "For ax^2+bx+c=0, rs=c/a=2/3.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 43,
@@ -3911,11 +3911,11 @@
      "type": "short_answer",
      "text": "A quadratic has zeros at x=1 and x=7 and passes through (0,14). If f(x)=a(x-1)(x-7), what is a?",
      "options": [],
-     "answer": null,
+     "answer": "2",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Quadratic from zeros",
+     "explanation": "SPR: f(0)=a(-1)(-7)=7a=14, so a=2.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 44,
@@ -3923,11 +3923,11 @@
      "type": "short_answer",
      "text": "A quadratic has vertex (5,-4) and passes through (7,8). If f(x)=a(x-5)²-4, what is a?",
      "options": [],
-     "answer": null,
+     "answer": "3",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vertex form parameter",
+     "explanation": "SPR: 8=a(7-5)^2-4=4a-4, so 4a=12 and a=3.",
+     "answer_source": "teacher_key"
     },
     {
      "number": 45,
@@ -3940,11 +3940,11 @@
       "2",
       "5"
      ],
-     "answer": null,
+     "answer": "B",
      "difficulty": "hard",
-     "skill": "",
-     "explanation": "",
-     "answer_source": "position"
+     "skill": "Vieta / parameter",
+     "explanation": "The sum of roots is -(k-3)=3-k. Set 3-k=5 to get k=-2.",
+     "answer_source": "teacher_key"
     }
    ],
    "problems": []
