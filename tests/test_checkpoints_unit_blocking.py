@@ -116,12 +116,10 @@ def test_completing_the_checkpoint_clears_the_block(db):
     assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()
 
 
-def test_overdue_checkpoint_releases_the_block(db):
-    """A lapsed checkpoint counts as cleared too — once the 72h deadline passes without a
-    submission, the student is free to move on to later checkpoint-bound units rather than being
-    stranded; the missed checkpoint itself stays unsubmittable (assert_can_submit) until an admin
-    calls reopen_for_students. This is deliberate: waiting out the deadline is a known way past
-    the gate, traded off against never leaving a student stuck."""
+def test_overdue_checkpoint_keeps_the_block_until_the_late_submission(db):
+    """The deadline is soft (2026-09-05): a lapsed checkpoint can still be submitted, so it keeps
+    holding the next block back until that late submission clears it — the student is never
+    stranded, and waiting out the deadline is no longer a way past the gate."""
     from datetime import timedelta
     from src.checkpoints import service
     admin, course, v, m, defs, group, student = _world(db)
@@ -135,6 +133,12 @@ def test_overdue_checkpoint_releases_the_block(db):
     service.refresh_overdue([row])
     db.flush()
     assert row.status == "overdue"
+    assert {v[2].id, v[3].id, m[1].id} <= service.blocked_unit_lesson_ids_for_student(db, student.id)
+    assert service.blocking_checkpoint_for_student(db, student.id).id == defs[0].id
+
+    complete_checkpoint(db, student, defs[0])                                 # late, but it counts
+    db.refresh(row)
+    assert row.status == "completed" and service.serialize_row(row)["late"] is True
     assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()
 
 

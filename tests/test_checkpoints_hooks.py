@@ -105,18 +105,25 @@ def test_non_student_cannot_submit_checkpoint(db):
     assert e.value.status_code == 403
 
 
-def test_draft_autosave_not_blocked_by_deadline(db):
+def test_late_submission_is_accepted_and_flagged(db):
+    """The deadline is soft: past it, the draft autosave and the final submission both go
+    through, the row completes, and it is reported late by the overshoot."""
     from datetime import timedelta
     from src.progress.routes.progress import create_quiz_attempt
     from src.checkpoints import service
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
-                                    now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))[0]   # deadline already passed
+                                    now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))[0]   # deadline passed a day ago
     draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True), current_user=s, db=db)
     assert draft.is_draft is True
-    with pytest.raises(HTTPException) as e:   # final submit is still gated
-        create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step), current_user=s, db=db)
-    assert e.value.status_code == 409
+    db.refresh(row)
+    assert row.status == "overdue"                                          # flagged while being answered
+    final = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step), current_user=s, db=db)
+    assert final.is_draft is False
+    db.refresh(row)
+    assert row.status == "completed" and row.quiz_attempt_id == final.id
+    payload = service.serialize_row(row)
+    assert payload["late"] is True and 23 * 60 <= payload["late_minutes"] <= 25 * 60
 
 
 def test_record_submission_failure_does_not_500_the_attempt(db, monkeypatch):
@@ -177,21 +184,25 @@ def test_patch_finalize_records_checkpoint_submission(db):
     assert row.status == "completed" and row.quiz_attempt_id == final.id and row.correct_answers == 40
 
 
-def test_patch_finalize_past_deadline_is_rejected(db):
-    """Drafts are deadline-exempt, so the deadline must be enforced on the PATCH finalize."""
+def test_patch_finalize_past_deadline_is_accepted_and_flagged_late(db):
+    """The web player finalizes through PATCH: a late finalize is recorded, not refused — and
+    only once."""
     from datetime import timedelta
     from src.progress.routes.progress import create_quiz_attempt, update_quiz_attempt
     from src.checkpoints import service
     admin, course, v, m, quiz_course, quiz_lesson, quiz_step, d1, group, s = _world(db)
-    service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
-                              now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))
+    row = service.open_for_students(db, group=group, definition=d1, student_ids=[s.id], actor_id=admin.id,
+                                    now=service.utcnow() - timedelta(hours=service.DEADLINE_HOURS + 24))[0]
     draft = create_quiz_attempt(_attempt_payload(quiz_course, quiz_lesson, quiz_step, is_draft=True),
                                 current_user=s, db=db)
+    final = update_quiz_attempt(draft.id, _update_payload(is_draft=False, correct_answers=40), current_user=s, db=db)
+    assert final.is_draft is False
+    db.refresh(row)
+    assert row.status == "completed" and row.correct_answers == 40
+    assert service.serialize_row(row)["late"] is True
     with pytest.raises(HTTPException) as e:
-        update_quiz_attempt(draft.id, _update_payload(is_draft=False, correct_answers=40),
-                            current_user=s, db=db)
+        update_quiz_attempt(draft.id, _update_payload(is_draft=False, correct_answers=45), current_user=s, db=db)
     assert e.value.status_code == 409
-    assert db.get(type(draft), draft.id).is_draft is True
 
 
 def test_patch_draft_autosave_not_deadline_gated(db):

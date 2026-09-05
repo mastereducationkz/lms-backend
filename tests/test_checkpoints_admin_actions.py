@@ -92,21 +92,34 @@ def test_submit_gate_and_recording(db):
         service.assert_can_submit(db, s1.id, d1, now=now)
     assert e.value.status_code == 403
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id, now=now)[0]
+    assert row.deadline == now + timedelta(hours=24)                       # 24 hours from opening
     assert service.assert_can_submit(db, s1.id, d1, now=now) == [row]
     past_deadline = now + timedelta(hours=service.DEADLINE_HOURS + 1)
-    assert service.assert_can_submit(db, s1.id, d1, now=past_deadline, allow_past_deadline=True) == [row]
-    assert row.status == "available"
-    with pytest.raises(HTTPException) as e:          # deadline passed
-        service.assert_can_submit(db, s1.id, d1, now=past_deadline)
-    assert e.value.status_code == 409
+    # The deadline is soft: past it the row is flagged overdue but still accepts the attempt.
+    assert service.assert_can_submit(db, s1.id, d1, now=past_deadline) == [row]
+    assert row.status == "overdue"
     attempt = _attempt(db, s1, quiz_course, quiz_lesson, quiz_step, correct=30)
-    done = service.record_submission(db, s1.id, attempt, now=now + timedelta(hours=2), commit=False)
+    done = service.record_submission(db, s1.id, attempt, now=past_deadline + timedelta(minutes=30), commit=False)
     assert done == [row] and row.status == "completed" and row.quiz_attempt_id == attempt.id
     assert (row.correct_answers, row.total_questions, row.percentage) == (30, 45, 66.67)
-    assert row.submitted_at == now + timedelta(hours=2)
+    assert row.submitted_at == past_deadline + timedelta(minutes=30)
+    payload = service.serialize_row(row)
+    assert payload["late"] is True and payload["late_minutes"] == 90       # 1h past the deadline + 30 min
     with pytest.raises(HTTPException) as e:          # already completed
-        service.assert_can_submit(db, s1.id, d1, now=now + timedelta(hours=3))
+        service.assert_can_submit(db, s1.id, d1, now=past_deadline + timedelta(hours=3))
     assert e.value.status_code == 409
+
+
+def test_on_time_submission_is_not_late(db):
+    from src.checkpoints import service
+    admin, course, quiz_course, quiz_lesson, quiz_step, d1, group, s1, s2 = _world(db)
+    now = datetime(2026, 9, 11, 9, 0)
+    row = service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id, now=now)[0]
+    attempt = _attempt(db, s1, quiz_course, quiz_lesson, quiz_step, correct=45)
+    service.record_submission(db, s1.id, attempt, now=now + timedelta(hours=2), commit=False)
+    payload = service.serialize_row(row)
+    assert payload["status"] == "completed" and payload["late"] is False and payload["late_minutes"] is None
+    assert service.serialize_row(None)["late"] is False
 
 
 def test_course_access_via_checkpoint(db):
