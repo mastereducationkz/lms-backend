@@ -68,6 +68,90 @@ def _trial_filter_lesson_payload(lessons, allowed_ids):
                 lesson.total_steps = 0
     return lessons
 
+
+def _checkpoint_filter_lesson_payload(db, current_user, lessons, target_user_id=None, *,
+                                       strip_steps: bool = True,
+                                       checkpoint_lesson_ids=None,
+                                       visible_checkpoint_ids=None,
+                                       open_checkpoint_ids=None):
+    """Apply checkpoint visibility to a list of lesson payload objects, in place.
+
+    Students outside a checkpoints-enabled group never see checkpoint lessons at all — the
+    feature stays invisible outside the pilot. Inside one, every checkpoint of that group's
+    courses is listed, but only an open one may carry its questions: a locked checkpoint is
+    shown the way any locked lesson is, with no step content.
+
+    ``target_user_id`` lets staff ask "what would this student see" (e.g. course-modules with
+    ``?student_id=``); left ``None``, staff browsing without a target see everything unfiltered,
+    matching every other lesson type.
+
+    ``strip_steps`` controls whether a locked checkpoint's step *content* gets blanked here.
+    ``get_module_lessons`` / ``get_course_lessons`` serialize real ORM step content and need this;
+    ``get_course_modules`` passes ``strip_steps=False`` because it never joinedloads
+    ``Lesson.steps`` in the first place (see the comment near its lesson query) and instead
+    renders steps from a separate lightweight, column-only query that already hardcodes
+    ``content_text=None`` — stripping here would only trigger a wasted lazy-load SELECT of the
+    heavy step columns (content_text/video_url/attachments) that gets thrown away unread.
+
+    ``checkpoint_lesson_ids`` / ``visible_checkpoint_ids`` / ``open_checkpoint_ids`` let a caller
+    that already computed these this request (e.g. ``get_course_modules``) pass them straight in
+    and skip the repeat queries; each falls back to computing itself when omitted. Note
+    ``open_checkpoint_ids`` is only ever consulted when ``strip_steps`` is true, so a caller
+    passing ``strip_steps=False`` need not compute it at all.
+
+    Cheap for ordinary courses: one small query over the definition table, and the per-student
+    queries only run when this payload actually contains a checkpoint quiz lesson.
+    """
+    if getattr(current_user, "role", None) != "student" and target_user_id is None:
+        return lessons
+    user_id = target_user_id or current_user.id
+    from src.checkpoints import service as checkpoint_service
+
+    payload_ids = {int(l.id) for l in lessons}
+    all_lesson_ids = (
+        checkpoint_service.checkpoint_quiz_lesson_ids(db)
+        if checkpoint_lesson_ids is None else checkpoint_lesson_ids
+    )
+    all_ids = all_lesson_ids & payload_ids
+    if not all_ids:
+        return lessons
+    if visible_checkpoint_ids is None:
+        _, visible = checkpoint_service.checkpoint_visibility(db, user_id, all_lesson_ids=all_lesson_ids)
+    else:
+        visible = visible_checkpoint_ids
+    hidden = all_ids - visible
+    if hidden:
+        lessons[:] = [l for l in lessons if int(l.id) not in hidden]
+    if not strip_steps:
+        return lessons
+    open_ids = (
+        checkpoint_service.open_checkpoint_lesson_ids_for_student(db, user_id)
+        if open_checkpoint_ids is None else open_checkpoint_ids
+    )
+    for lesson in lessons:
+        lid = int(lesson.id)
+        if lid in all_ids and lid not in open_ids:
+            _strip_lesson_steps(lesson)
+    return lessons
+
+
+def _strip_lesson_steps(lesson) -> None:
+    """Remove step payload from a lesson the student may see but not enter."""
+    steps = getattr(lesson, "steps", None)
+    if steps is None and isinstance(lesson, dict):
+        steps = lesson.get("steps")
+    if not steps:
+        return
+    for step in steps:
+        if isinstance(step, dict):
+            step["content_text"] = None
+            step["video_url"] = None
+            step["attachments"] = None
+        else:
+            step.content_text = None
+            step.video_url = None
+            step.attachments = None
+
 # =============================================================================
 # COURSE MANAGEMENT
 # =============================================================================
@@ -530,6 +614,11 @@ def get_course_modules(
             raise HTTPException(status_code=403, detail="Only teachers, admins, and head curators can view other students' progress")
         target_user_id = student_id
 
+    # Checkpoint visibility only ever applies to a concrete student: the student themself, or the
+    # student staff explicitly asked about via ?student_id=. Staff browsing without a target see
+    # every lesson unfiltered, same as any other lesson type.
+    checkpoint_target_user_id = target_user_id if (current_user.role == "student" or student_id) else None
+
     # Weekly release: modules unlocked by week based on group start_date
     unlocked_module_ids: Optional[set] = None
     if course.release_schedule == "weekly" and (current_user.role == "student" or student_id):
@@ -699,9 +788,56 @@ def get_course_modules(
                         if is_completed_db or all_steps_done:
                             unlocked_by_redirect_ids.add(les.next_lesson_id)
 
+    # Checkpoint quiz lesson ids, fetched once for the whole request (not per module) so an
+    # ordinary course without any checkpoints pays exactly one small extra query. Hoisted
+    # unconditionally — not just when include_lessons — so the "Checkpoints" module can also be
+    # hidden from an include_lessons=False response (see the visibility check right below).
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_lesson_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db)
+
+    # Units the target student may not start yet because a checkpoint of theirs is pending
+    # (Task 1: blocked-unit rule). Only computed when there is a concrete target student and this
+    # course actually has checkpoint quizzes at all, so an ordinary viewer — or a course with no
+    # checkpoints — pays nothing.
+    checkpoint_blocked_ids: set = set()
+    if checkpoint_lesson_ids and checkpoint_target_user_id is not None:
+        checkpoint_blocked_ids = checkpoint_service.blocked_unit_lesson_ids_for_student(
+            db, checkpoint_target_user_id
+        )
+
+    # Resolve, once per request, whether the viewer may see ANY checkpoint lesson in this course at
+    # all. Without this, a student outside every checkpoints-enabled group still saw the
+    # "Checkpoints" module's title/id/total_lessons when asking for modules without lessons (the
+    # include_lessons branch below only ever hid an *empty* module, never ran for
+    # include_lessons=False at all). Only touches the DB when this course actually has a
+    # non-empty "Checkpoints" module to begin with, so an ordinary course — or one on a system
+    # where checkpoints don't exist yet — pays nothing beyond the query above.
+    checkpoint_visible_ids: Optional[set] = None
+    checkpoint_open_ids: Optional[set] = None
+    viewer_may_see_any_checkpoint = True
+    checkpoints_module = None
+    if checkpoint_lesson_ids:
+        checkpoints_module = next(
+            (m for m in modules if m.title == "Checkpoints" and lesson_count_map.get(m.id, 0) > 0),
+            None,
+        )
+    if checkpoints_module is not None and checkpoint_target_user_id is not None:
+        checkpoint_lessons_in_course = {l.id for l in checkpoints_module.lessons} & checkpoint_lesson_ids
+        if checkpoint_lessons_in_course:
+            _, checkpoint_visible_ids = checkpoint_service.checkpoint_visibility(
+                db, checkpoint_target_user_id, all_lesson_ids=checkpoint_lesson_ids
+            )
+            viewer_may_see_any_checkpoint = bool(checkpoint_lessons_in_course & checkpoint_visible_ids)
+
     # Enrich with lesson counts
     modules_data = []
     for module in modules:
+        # A "Checkpoints" module this viewer may not see any lesson of does not exist for them —
+        # the feature must be fully invisible outside the pilot, not just empty — regardless of
+        # whether the caller asked for lessons at all (Finding 2 fix).
+        if module is checkpoints_module and not viewer_may_see_any_checkpoint:
+            continue
+
         # Create module data without lessons first
         module_dict = {
             "id": module.id,
@@ -718,7 +854,22 @@ def get_course_modules(
         if include_lessons:
             # Use already loaded lessons from joinedload
             lessons = sorted(module.lessons, key=lambda x: x.order_index)
-            
+
+            if checkpoint_lesson_ids & {l.id for l in lessons}:
+                # strip_steps=False: this endpoint never serializes real step content for
+                # checkpoint lessons (see the docstring) — the steps rendered below always come
+                # from the lightweight, hardcoded-content_text=None query further down, so
+                # stripping here would only trigger a wasted lazy-load of the ORM `.steps`
+                # relationship (Finding 1). checkpoint_lesson_ids/visible_checkpoint_ids reuse the
+                # sets this request already computed above instead of re-querying them here
+                # (Finding 3).
+                lessons = _checkpoint_filter_lesson_payload(
+                    db, current_user, list(lessons), target_user_id=checkpoint_target_user_id,
+                    strip_steps=False,
+                    checkpoint_lesson_ids=checkpoint_lesson_ids,
+                    visible_checkpoint_ids=checkpoint_visible_ids,
+                )
+
             lessons_data = []
             for lesson_idx, lesson in enumerate(lessons):
                 # Get steps for this lesson from our lightweight map
@@ -824,18 +975,48 @@ def get_course_modules(
                 else:
                     # Teachers and admins can access all lessons
                     lesson_dict["is_accessible"] = True
-                
+
+                # Blocked-unit rule (Task 1): a unit bound to a still-pending checkpoint is
+                # locked regardless of what the sequential logic above decided. Must come last so
+                # it wins over every unlock path (initially-unlocked, redirect, assignment,
+                # manual unlock). Never applies to the checkpoint quiz lessons themselves — those
+                # get their own accessibility override further down.
+                if lesson.id in checkpoint_blocked_ids:
+                    lesson_dict["is_accessible"] = False
+
                 lessons_data.append(lesson_dict)
             
             # Add lessons to module data
             module_dict["lessons"] = lessons_data
-            
+
+            # Checkpoint lessons don't follow the sequential-access rule above: accessibility is
+            # "is this checkpoint open for the target student", and total_lessons must reflect
+            # whatever visibility left in lessons_data (possibly fewer than the raw module count).
+            if checkpoint_lesson_ids & {l["id"] for l in lessons_data}:
+                if checkpoint_target_user_id is not None:
+                    # Cached on first use so a request with more than one checkpoint-bearing
+                    # module still only pays this query once (Finding 3).
+                    if checkpoint_open_ids is None:
+                        checkpoint_open_ids = checkpoint_service.open_checkpoint_lesson_ids_for_student(
+                            db, checkpoint_target_user_id
+                        )
+                    for entry in lessons_data:
+                        if entry["id"] in checkpoint_lesson_ids:
+                            entry["is_accessible"] = entry["id"] in checkpoint_open_ids
+                module_dict["total_lessons"] = len(lessons_data)
+
             # Check if all lessons in module are completed
             if lessons_data and all(l["is_completed"] for l in lessons_data):
                 module_dict["is_completed"] = True
             else:
                 module_dict["is_completed"] = False
-        
+
+            # A "Checkpoints" module that lost every lesson to the visibility filter above (no
+            # checkpoints-enabled group) does not exist for this student — the feature must be
+            # fully invisible outside the pilot, not just empty.
+            if not lessons_data and module.title == "Checkpoints":
+                continue
+
         modules_data.append(module_dict)
 
     if current_user.role == "student" and getattr(current_user, "is_trial", False):
@@ -1032,6 +1213,8 @@ def get_module_lessons(
         allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
         _trial_filter_lesson_payload(lessons_data, allowed_ids)
 
+    _checkpoint_filter_lesson_payload(db, current_user, lessons_data)
+
     return lessons_data
 
 @router.get("/{course_id}/lessons", response_model=List[LessonSchema])
@@ -1083,6 +1266,8 @@ def get_course_lessons(
         grant = get_active_trial_grant(db, current_user.id, course_id)
         allowed_ids = {int(x) for x in (grant.lesson_ids or [])} if grant else set()
         _trial_filter_lesson_payload(lessons_data, allowed_ids)
+
+    _checkpoint_filter_lesson_payload(db, current_user, lessons_data)
 
     return lessons_data
 
@@ -1166,6 +1351,11 @@ def get_lesson(
     # Check course access
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
+    assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     # Efficiently count steps without loading them
@@ -1210,6 +1400,30 @@ def check_lesson_access(
     # Teachers and admins can access any lesson
     if current_user.role != "student":
         return {"accessible": True}
+
+    # A checkpoint quiz lesson is reachable only while that checkpoint is open for this student;
+    # when locked, explain which required unit(s) are still outstanding rather than a bare denial.
+    from src.checkpoints import service as checkpoint_service
+    checkpoint_ids = checkpoint_service.checkpoint_quiz_lesson_ids(db)
+    if lesson_id in checkpoint_ids:
+        if lesson_id in checkpoint_service.open_checkpoint_lesson_ids_for_student(db, current_user.id):
+            return {"accessible": True}
+        from src.checkpoints.models import CheckpointDefinition
+        definition = db.query(CheckpointDefinition).filter(
+            CheckpointDefinition.quiz_lesson_id == lesson_id
+        ).first()
+        reason = "This checkpoint is not open yet."
+        if definition is not None:
+            units = checkpoint_service.unit_progress(db, current_user.id, definition)
+            reason = checkpoint_service.locked_reason(units) or reason
+        return {"accessible": False, "reason": reason}
+
+    # Blocked-unit rule (Task 1): a unit bound to a still-pending checkpoint is locked until that
+    # checkpoint is done, regardless of any other unlock path below.
+    if lesson_id in checkpoint_service.blocked_unit_lesson_ids_for_student(db, current_user.id):
+        definition = checkpoint_service.blocking_checkpoint_for_student(db, current_user.id)
+        name = definition.title if definition is not None else "your checkpoint"
+        return {"accessible": False, "reason": f"Finish {name} before starting this unit"}
 
     if getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
@@ -1565,6 +1779,11 @@ def get_lesson_steps(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this lesson")
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
+    assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     if include_content:
@@ -1691,6 +1910,11 @@ def get_step(
     
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied to this step")
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
+    assert_student_may_view_checkpoint_lesson(db, current_user, step.lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, step.lesson_id)
     _trial_hard_gate(db, current_user, step.lesson_id)
 
     return StepSchema.from_orm(step)
@@ -1998,6 +2222,11 @@ def get_lesson_materials(
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not check_course_access(module.course_id, current_user, db):
         raise HTTPException(status_code=403, detail="Access denied")
+    from src.checkpoints.service import (
+        assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
+    )
+    assert_student_may_view_checkpoint_lesson(db, current_user, lesson_id)
+    assert_student_not_blocked_by_checkpoint(db, current_user, lesson_id)
     _trial_hard_gate(db, current_user, lesson_id)
 
     materials = db.query(LessonMaterial).filter(

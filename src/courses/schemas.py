@@ -182,6 +182,7 @@ class BaseLessonSchema(BaseModel):
     created_at: datetime
     next_lesson_id: Optional[int] = None
     is_initially_unlocked: Optional[bool] = False
+    kind: str = "unit"
     steps: Optional[List[StepSchema]] = None
     is_completed: Optional[bool] = False
 

@@ -189,6 +189,8 @@ def calculate_student_module_progress(
         )
 
         for lesson in lessons:
+            if lesson.kind == "checkpoint":
+                continue
             # Only required (non-optional) steps count toward completion
             lesson_total = db.query(Step).filter(
                 Step.lesson_id == lesson.id,
@@ -308,6 +310,8 @@ def calculate_module_progress_for_students(
     step_id_to_lesson_id: Dict[int, int] = {}
     for module in modules:
         for lesson in lessons_by_module.get(module.id, []):
+            if lesson.kind == "checkpoint":
+                continue
             steps = steps_by_lesson.get(lesson.id, [])
             required_step_ids = [s.id for s in steps if not s.is_optional]
             if not required_step_ids:
@@ -437,10 +441,12 @@ def get_user_lesson_progress_summary(
         lessons = db.query(Lesson).filter(Lesson.module_id == module.id).order_by(Lesson.order_index).all()
 
         for lesson in lessons:
+            is_checkpoint = lesson.kind == "checkpoint"
             all_steps = db.query(Step).filter(Step.lesson_id == lesson.id).all()
             required_steps = [s for s in all_steps if not s.is_optional]
             lesson_total = len(required_steps) if required_steps else len(all_steps)
-            total_steps += lesson_total
+            if not is_checkpoint:
+                total_steps += lesson_total
 
             step_ids = [s.id for s in (required_steps if required_steps else all_steps)]
             progress_records = db.query(StepProgress).filter(
@@ -457,7 +463,8 @@ def get_user_lesson_progress_summary(
             )
 
             display_completed_steps = lesson_total if is_complete and lesson_total > 0 else progress_records
-            completed_steps += display_completed_steps if is_complete else progress_records
+            if not is_checkpoint:
+                completed_steps += display_completed_steps if is_complete else progress_records
 
             if is_complete:
                 completion_percentage = 100.0
@@ -475,13 +482,15 @@ def get_user_lesson_progress_summary(
                 "completed_steps": display_completed_steps,
                 "completion_percentage": completion_percentage,
                 "is_complete": is_complete,
+                "kind": lesson.kind,
             })
 
+    unit_lessons_summary = [lesson for lesson in lessons_summary if lesson["kind"] != "checkpoint"]
     overall_percentage = round((completed_steps / total_steps * 100), 1) if total_steps > 0 else 0
-    completed_lesson_count = sum(1 for lesson in lessons_summary if lesson["is_complete"])
+    completed_lesson_count = sum(1 for lesson in unit_lessons_summary if lesson["is_complete"])
 
-    if total_steps == 0 and lessons_summary:
-        overall_percentage = round((completed_lesson_count / len(lessons_summary) * 100), 1)
+    if total_steps == 0 and unit_lessons_summary:
+        overall_percentage = round((completed_lesson_count / len(unit_lessons_summary) * 100), 1)
 
     return {
         "user": {
@@ -558,6 +567,7 @@ def get_group_lesson_progress_summary(
                 "completed_students": completed_students,
                 "completion_percentage": completion_percentage,
                 "is_complete": student_count > 0 and completed_students == student_count,
+                "kind": lesson.kind,
             })
 
     return {

@@ -66,6 +66,12 @@ class Group(Base):
     # platform-test assignments (opt-out is per group; weekly sets are global on IELTS).
     platform_tests_opt_out = Column(Boolean, nullable=False, default=False, server_default="false")
 
+    # SAT Checkpoints (docs/superpowers/plans/2026-09-03-sat-checkpoints.md): hidden unless enabled.
+    # Checkpoints numbered below `checkpoints_start_number` never auto-open (admin may still open them),
+    # which lets a group start mid-course without a pile-up of instantly-due checkpoints.
+    checkpoints_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    checkpoints_start_number = Column(Integer, nullable=False, default=1, server_default="1")
+
     teacher = relationship("UserInDB", foreign_keys=[teacher_id], post_update=True)
     curator = relationship("UserInDB", foreign_keys=[curator_id], post_update=True)
     students = relationship("GroupStudent", back_populates="group", cascade="all, delete-orphan")
@@ -230,6 +236,10 @@ class Lesson(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     next_lesson_id = Column(Integer, ForeignKey("lessons.id"), nullable=True)
     is_initially_unlocked = Column(Boolean, default=False)
+    # "unit" = ordinary course unit; "checkpoint" = a block checkpoint assessment. Checkpoints are
+    # lessons so they reuse the quiz player and the course navigation, but they are NOT units: they
+    # never count toward course-progress percentages (see progress/services/lesson_completion.py).
+    kind = Column(String(16), nullable=False, default="unit", server_default="unit")
 
     module = relationship("Module", back_populates="lessons")
     materials = relationship("LessonMaterial", back_populates="lesson", cascade="all, delete-orphan")

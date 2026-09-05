@@ -133,9 +133,13 @@ def check_course_access(course_id: int, user: UserInDB, db: Session) -> bool:
             CourseGroupAccess.course_id == course_id,
             CourseGroupAccess.is_active == True
         ).first()
-        
-        return group_access is not None
-    
+
+        if group_access is not None:
+            return True
+        # SAT Checkpoints: the hidden quiz course is reachable only through an opened checkpoint.
+        from src.checkpoints.service import student_has_checkpoint_access_to_course
+        return student_has_checkpoint_access_to_course(db, user.id, course_id)
+
     elif user.role == "curator":
         # Curators can access courses if their groups have access to the course
         from src.schemas.models import GroupStudent, Group, CourseGroupAccess
