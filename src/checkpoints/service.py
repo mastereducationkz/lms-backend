@@ -648,26 +648,6 @@ def student_has_checkpoint_access_to_course(db: Session, student_id: int, course
     ).first() is not None
 
 
-# ---------------------------------------------------------------- blocked-unit rule
-#
-# The units of block N are blocked until the checkpoint of block N-1 is *cleared* — not merely
-# "not pending". The earlier statuses-only rule (block whatever's required units are incomplete
-# while some row of theirs sits available/reopened) only ever caught a checkpoint that had
-# actually opened, which requires ALL of its required units to be done first. A student who simply
-# never does one required unit (e.g. skips the Math unit of a block) never opens that checkpoint,
-# so nothing was ever "pending" and every later block's units ran open unchecked. The ordinal rule
-# below closes that hole: block N is blocked by definition whenever ANY earlier block in the same
-# course is not cleared, whether or not that earlier checkpoint ever opened at all.
-
-# A row clears its checkpoint only once it is `completed` (on time or late). Since 2026-09-05
-# the deadline is soft — an overdue checkpoint can still be submitted, flagged late — so a lapsed
-# deadline no longer opens the gate on its own: the student is never stranded (they can submit
-# any time), and the next block waits for the submission. Every other status — no row at all,
-# `locked`, `available`, `reopened`, `overdue` — holds the next block back. A checkpoint skipped
-# by the group's start number is treated as cleared (see is_skipped).
-CLEARING_STATUSES = (STATUS_COMPLETED,)
-
-
 def is_skipped(group: Group, definition: CheckpointDefinition, row: Optional[StudentCheckpoint]) -> bool:
     """A checkpoint numbered below the group's checkpoints_start_number that never got a row was
     passed over on purpose (the group joined mid-course): it never auto-opens and never gates
@@ -679,85 +659,57 @@ def skipped_reason(group: Group) -> str:
     return f"Not required for this group — it starts from Checkpoint {group.checkpoints_start_number or 1}"
 
 
-def _checkpoint_chain_for_student(
-    db: Session, user_id: int
-) -> Dict[int, List[Tuple[CheckpointDefinition, bool]]]:
-    """Per course, that course's ACTIVE checkpoint definitions in `number` order, each paired
-    with whether this student has cleared it. Only touches courses reached through a group that
-    is `checkpoints_enabled` AND `is_active` for this student (the pilot scoping) — a student
-    outside that, and any staff member (no such group membership), gets `{}` via the cheapest
-    path: `enabled_groups_for_student` alone. A gap in one course's chain never affects another —
-    each course's chain is built and walked independently.
-    """
+# ---------------------------------------------------------------- blocked-unit rule
+#
+# A checkpoint that has OPENED for the student — every required unit of its block is done and the
+# row is available / reopened / overdue — pauses the course: the required units of every later
+# block in that course are locked until it is submitted (a late submission counts). A checkpoint
+# that never opened (its units are still incomplete) locks nothing: students take units in any
+# order, tracked completion lags the real work, and homework is set on units ahead of the
+# tracker — walling those students off behind a checkpoint they could not even take was the
+# 2026-09-05 pilot's first incident (18 refused lesson loads in six hours). The trade-off is known
+# and accepted: a student who leaves one unit of a block unfinished never opens that block's
+# checkpoint; the matrix shows the gap and staff can open it by hand. A completed checkpoint, a
+# skipped one (below the group's start number) and a never-opened one all hold nothing back.
+PENDING_STATUSES = SUBMITTABLE_STATUSES
+
+
+def _pending_checkpoints_for_student(db: Session, user_id: int) -> Dict[int, List[CheckpointDefinition]]:
+    """Per course, this student's pending (opened, not yet submitted) checkpoint definitions in
+    number order. Scoped like everything here to rows in checkpoints-enabled, active groups and
+    to active definitions; a student outside the pilot, and any staff member, gets {}."""
     groups = enabled_groups_for_student(db, user_id)
     if not groups:
         return {}
-    # Per course, the lowest checkpoints_start_number among the enabled groups that reach it: a
-    # definition numbered below that was skipped on purpose for a mid-course group (is_skipped).
-    start_by_course: Dict[int, int] = {}
-    for group in groups:
-        start = group.checkpoints_start_number or 1
-        for cid in get_group_course_ids(db, group.id):
-            start_by_course[cid] = min(start_by_course.get(cid, start), start)
-    course_ids = set(start_by_course)
-    if not course_ids:
-        return {}
-    definitions = (
-        db.query(CheckpointDefinition)
-        .filter(
-            CheckpointDefinition.course_id.in_(course_ids),
-            CheckpointDefinition.is_active == True,  # noqa: E712
-        )
-        .order_by(CheckpointDefinition.course_id, CheckpointDefinition.number)
-        .all()
-    )
-    if not definitions:
-        return {}
-
-    def_ids = [d.id for d in definitions]
-    # The student's own rows for these definitions, but only the ones that still come from a
-    # checkpoints-enabled, active group (existing Group join) — matches the scoping everywhere
-    # else in this module.
-    cleared_by_def_id: Dict[int, bool] = {}
-    for checkpoint_id, status in (
-        db.query(StudentCheckpoint.checkpoint_id, StudentCheckpoint.status)
+    pending_ids = {
+        row[0] for row in db.query(StudentCheckpoint.checkpoint_id)
         .join(Group, Group.id == StudentCheckpoint.group_id)
         .filter(
             StudentCheckpoint.student_id == user_id,
-            StudentCheckpoint.checkpoint_id.in_(def_ids),
+            StudentCheckpoint.status.in_(PENDING_STATUSES),
             Group.checkpoints_enabled == True,  # noqa: E712
             Group.is_active == True,  # noqa: E712
-        )
+        ).all()
+    }
+    if not pending_ids:
+        return {}
+    definitions = (
+        db.query(CheckpointDefinition)
+        .filter(CheckpointDefinition.id.in_(pending_ids), CheckpointDefinition.is_active == True)  # noqa: E712
+        .order_by(CheckpointDefinition.course_id, CheckpointDefinition.number)
         .all()
-    ):
-        cleared_by_def_id[checkpoint_id] = cleared_by_def_id.get(checkpoint_id, False) or (
-            status in CLEARING_STATUSES
-        )
-
-    by_course: Dict[int, List[Tuple[CheckpointDefinition, bool]]] = {}
+    )
+    by_course: Dict[int, List[CheckpointDefinition]] = {}
     for definition in definitions:
-        if definition.id in cleared_by_def_id:
-            cleared = cleared_by_def_id[definition.id]
-        else:
-            # No row at all. Below the group's start number the checkpoint was skipped on purpose
-            # (see is_skipped), so it must not hold later blocks back; at or above it, the
-            # checkpoint simply has not been cleared yet.
-            cleared = definition.number < start_by_course.get(definition.course_id, 1)
-        by_course.setdefault(definition.course_id, []).append((definition, cleared))
+        by_course.setdefault(definition.course_id, []).append(definition)
     return by_course
 
 
 def blocking_checkpoint_for_student(db: Session, user_id: int) -> Optional[CheckpointDefinition]:
-    """The FIRST not-cleared checkpoint definition — the one the student actually has to finish to
-    release every block behind it. `None` once every checkpoint in every enabled course is
-    cleared (or the student has none)."""
-    by_course = _checkpoint_chain_for_student(db, user_id)
-    candidates: List[CheckpointDefinition] = []
-    for chain in by_course.values():
-        for definition, cleared in chain:
-            if not cleared:
-                candidates.append(definition)
-                break
+    """The first pending checkpoint — the one the student has to submit to unpause the course.
+    None when nothing is pending."""
+    by_course = _pending_checkpoints_for_student(db, user_id)
+    candidates = [chain[0] for chain in by_course.values() if chain]
     if not candidates:
         return None
     candidates.sort(key=lambda d: (d.course_id, d.number))
@@ -765,23 +717,22 @@ def blocking_checkpoint_for_student(db: Session, user_id: int) -> Optional[Check
 
 
 def blocked_unit_lesson_ids_for_student(db: Session, user_id: int) -> Set[int]:
-    """Units the student may not start yet under the ordinal gate: block N's required units are
-    blocked whenever some earlier block in that course is not cleared (see CLEARING_STATUSES).
-    Block 1 of a course is never blocked — nothing precedes it. Units bound to no checkpoint are
-    never blocked, and an already-completed unit stays open so past material can be reviewed.
-    Empty for every student outside a checkpoints-enabled group — the feature must not touch
-    anyone else.
-    """
-    by_course = _checkpoint_chain_for_student(db, user_id)
+    """Required units of every block after the student's first pending checkpoint in each
+    course, minus units already completed (past material stays open for review). Empty when
+    nothing is pending. Units bound to no checkpoint are never blocked."""
+    by_course = _pending_checkpoints_for_student(db, user_id)
     if not by_course:
         return set()
     blocked_ids: Set[int] = set()
-    for chain in by_course.values():
-        every_earlier_cleared = True
-        for definition, cleared in chain:
-            if not every_earlier_cleared:
-                blocked_ids.update(u.lesson_id for u in definition.required_units)
-            every_earlier_cleared = every_earlier_cleared and cleared
+    for course_id, pending in by_course.items():
+        first = pending[0]
+        later = db.query(CheckpointDefinition).filter(
+            CheckpointDefinition.course_id == course_id,
+            CheckpointDefinition.is_active == True,  # noqa: E712
+            CheckpointDefinition.number > first.number,
+        ).all()
+        for definition in later:
+            blocked_ids.update(u.lesson_id for u in definition.required_units)
     if not blocked_ids:
         return set()
     return blocked_ids - completed_lesson_ids(db, user_id, blocked_ids)

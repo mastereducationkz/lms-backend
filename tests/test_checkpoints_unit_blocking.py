@@ -53,34 +53,31 @@ def _world(db, enabled=True, n_blocks=2):
     return admin, course, v, m, defs, group, student
 
 
-def test_block_one_never_blocked_but_block_two_is_with_no_checkpoint_progress(db):
-    """No StudentCheckpoint row exists at all yet (checkpoint 1 was never even opened). Block 1's
-    own units are never blocked (nothing precedes them); block 2's are, because checkpoint 1 is
-    not cleared."""
+def test_nothing_is_blocked_until_a_checkpoint_opens(db):
+    """No row exists yet (checkpoint 1 never opened): the whole course stays open. Students take
+    units in any order and the tracker lags real work — the gate starts only once a block is
+    actually finished and its checkpoint is on the table."""
     from src.checkpoints import service
     _, course, v, m, defs, group, student = _world(db)
-    blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
-    assert blocked.isdisjoint({v[0].id, v[1].id, m[0].id})
-    assert {v[2].id, v[3].id, m[1].id} <= blocked
+    assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()
+    assert service.blocking_checkpoint_for_student(db, student.id) is None
 
 
-def test_skipped_required_unit_never_opens_checkpoint_but_still_blocks_next_block(db):
-    """The reported bug: a student who completes the verbal units of a block but skips its math
-    unit never opens that block's checkpoint (auto-open needs ALL required units), so nothing is
-    ever 'pending' under the old status-based rule and the next block's units ran open unchecked.
-    Under the ordinal rule, checkpoint 1 is simply not cleared, so block 2 stays blocked."""
+def test_a_never_opened_checkpoint_blocks_nothing(db):
+    """The accepted trade-off: a student who leaves the math unit of block 1 unfinished never
+    opens checkpoint 1, and is NOT walled off from block 2 for it. The matrix shows the gap
+    (· under the chip) and staff can open the checkpoint by hand, which then gates as usual."""
     from src.checkpoints import service
-    _, course, v, m, defs, group, student = _world(db)
+    admin, course, v, m, defs, group, student = _world(db)
     complete_lesson_explicit(db, student, course, v[0])
     complete_lesson_explicit(db, student, course, v[1])
-    # m[0] (the math unit) is deliberately never done.
     service.sync_student_checkpoints(db, student.id)
     assert service.get_row(db, student.id, group.id, defs[0].id) is None  # checkpoint 1 never opened
+    assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()
+    assert service.blocking_checkpoint_for_student(db, student.id) is None
 
-    blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
-    assert {v[2].id, v[3].id, m[1].id} <= blocked
-    definition = service.blocking_checkpoint_for_student(db, student.id)
-    assert definition is not None and definition.id == defs[0].id
+    service.open_for_students(db, group=group, definition=defs[0], student_ids=[student.id], actor_id=admin.id)
+    assert {v[2].id, v[3].id, m[1].id} <= service.blocked_unit_lesson_ids_for_student(db, student.id)
 
 
 def test_open_checkpoint_blocks_later_bound_units_only(db):
@@ -167,23 +164,25 @@ def test_uncleared_checkpoint_one_blocks_both_later_blocks(db):
     assert {v[4].id, v[5].id, m[2].id} <= blocked   # block 3
 
 
-def test_clearing_checkpoint_one_opens_block_two_but_block_three_stays_blocked(db):
-    """Clearing checkpoint 1 advances the gate by exactly one block: block 2 opens, block 3 (gated
-    on checkpoint 2, which is still not cleared) does not. blocking_checkpoint_for_student advances
-    to checkpoint 2 accordingly."""
+def test_submitting_checkpoint_one_unpauses_the_course_until_checkpoint_two_opens(db):
+    """Submitting checkpoint 1 releases everything; the gate returns only when the student
+    finishes block 2 and checkpoint 2 opens, and then it holds block 3."""
     from src.checkpoints import service
     _, course, v, m, defs, group, student = _world(db, n_blocks=3)
     for lesson in (v[0], v[1], m[0]):
         complete_lesson_explicit(db, student, course, lesson)
     service.sync_student_checkpoints(db, student.id)
     complete_checkpoint(db, student, defs[0])
+    assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()
+    assert service.blocking_checkpoint_for_student(db, student.id) is None
 
+    for lesson in (v[2], v[3], m[1]):
+        complete_lesson_explicit(db, student, course, lesson)
+    service.sync_student_checkpoints(db, student.id)
+    assert service.get_row(db, student.id, group.id, defs[1].id).status == "available"
     blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
-    assert blocked.isdisjoint({v[2].id, v[3].id, m[1].id})   # block 2 now open
-    assert {v[4].id, v[5].id, m[2].id} <= blocked            # block 3 still blocked
-
-    definition = service.blocking_checkpoint_for_student(db, student.id)
-    assert definition is not None and definition.id == defs[1].id
+    assert {v[4].id, v[5].id, m[2].id} <= blocked            # block 3 waits for checkpoint 2
+    assert service.blocking_checkpoint_for_student(db, student.id).id == defs[1].id
 
 
 def test_listing_and_check_access_agree(db):
@@ -218,20 +217,22 @@ def test_blocked_unit_reads_are_refused(db):
 
 def test_start_number_skips_earlier_blocks_in_the_gate(db):
     """A group that joins mid-course sets checkpoints_start_number so the earlier checkpoints
-    never auto-open. Those skipped checkpoints must not hold later blocks back either — otherwise
-    every unit from block 2 onward stays locked behind a Checkpoint 1 that can never open, which
-    is exactly the pilot (mid-course group) scenario."""
+    never auto-open; skipped checkpoints never hold anything back, and neither does checkpoint
+    3 until the student actually finishes block 3 and it opens."""
     from src.checkpoints import service
     _, course, v, m, defs, group, student = _world(db, n_blocks=4)
     group.checkpoints_start_number = 3
     db.flush()
+    assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()
+    for lesson in (v[4], v[5], m[2]):                        # block 3 done -> checkpoint 3 opens
+        complete_lesson_explicit(db, student, course, lesson)
+    service.sync_student_checkpoints(db, student.id)
+    assert service.get_row(db, student.id, group.id, defs[2].id).status == "available"
+    assert service.get_row(db, student.id, group.id, defs[0].id) is None   # 1 and 2 skipped
     blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
-    # blocks 1-3 are open: 1 and 2 are skipped for this group, 3 is the first gated block
-    assert blocked.isdisjoint({v[0].id, v[1].id, m[0].id, v[2].id, v[3].id, m[1].id, v[4].id, v[5].id, m[2].id})
-    # block 4 is still held back by checkpoint 3, which is not cleared
-    assert {v[6].id, v[7].id, m[3].id} <= blocked
-    definition = service.blocking_checkpoint_for_student(db, student.id)
-    assert definition is not None and definition.id == defs[2].id
+    assert blocked.isdisjoint({v[0].id, v[1].id, m[0].id, v[2].id, v[3].id, m[1].id})
+    assert {v[6].id, v[7].id, m[3].id} <= blocked            # block 4 waits for checkpoint 3
+    assert service.blocking_checkpoint_for_student(db, student.id).id == defs[2].id
 
 
 def test_admin_opened_checkpoint_below_start_number_still_gates(db):
@@ -249,9 +250,7 @@ def test_admin_opened_checkpoint_below_start_number_still_gates(db):
     assert service.blocking_checkpoint_for_student(db, student.id).id == defs[1].id
 
     complete_checkpoint(db, student, defs[1])
-    blocked = service.blocked_unit_lesson_ids_for_student(db, student.id)
-    assert blocked.isdisjoint({v[4].id, v[5].id, m[2].id})
-    assert {v[6].id, v[7].id, m[3].id} <= blocked          # block 4 still behind checkpoint 3
+    assert service.blocked_unit_lesson_ids_for_student(db, student.id) == set()   # nothing pending
 
 
 def test_skipped_checkpoints_are_flagged_for_student_and_matrix(db):
