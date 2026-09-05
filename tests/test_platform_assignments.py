@@ -15,6 +15,8 @@ from sqlalchemy.orm import sessionmaker
 import src.schemas.models  # noqa: F401 - register models
 from src.assignments.models import Assignment, AssignmentSubmission
 from src.auth.models import UserInDB
+from src.events.models import Event, EventGroup
+from src.integrations.models import PlatformTestEvent
 from src.courses.models import Group, GroupStudent
 from src.integrations import platform_assignments as pa
 from src.integrations.ingest import ingest_batch
@@ -37,7 +39,7 @@ def _array_as_json(type_, compiler, **kw):
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite:///:memory:")
-    for model in (UserInDB, Group, GroupStudent, Assignment, AssignmentSubmission,
+    for model in (Event, EventGroup, PlatformTestEvent, UserInDB, Group, GroupStudent, Assignment, AssignmentSubmission,
                   PlatformEvent, PlatformResult, PlatformWeeklySet, PlatformTestAssignment):
         model.__table__.create(bind=engine)
     session = sessionmaker(bind=engine)()
@@ -50,6 +52,7 @@ def db():
 @pytest.fixture(autouse=True)
 def _flag_on(monkeypatch):
     monkeypatch.setenv("PLATFORM_ASSIGNMENTS_ENABLED", "true")
+    monkeypatch.setenv("PLATFORM_TEST_HOMEWORK", "true")
 
 
 NOW = datetime(2026, 9, 3, 10, 0)  # UTC, inside set 13's window
@@ -345,3 +348,16 @@ def test_existing_assignment_of_a_set_that_lost_its_window_is_deactivated(db):
     db.commit()
     assert pa.sync_weekly_set(db, ws, now=NOW) == {"created": 0, "updated": 0, "deactivated": 1}
     assert db.query(Assignment).one().is_active is False
+
+
+# --- lead decision 2026-09-05: weekly tests are calendar events, homework only behind a flag ----
+
+def test_without_the_homework_flag_nothing_is_created_and_existing_rows_are_deactivated(db, monkeypatch):
+    _group(db, "A")
+    ws = _set(db)
+    assert pa.sync_weekly_set(db, ws, now=NOW)["created"] == 1
+    monkeypatch.delenv("PLATFORM_TEST_HOMEWORK")
+    assert pa.sync_weekly_set(db, ws, now=NOW) == {"created": 0, "updated": 0, "deactivated": 1}
+    assert db.query(Assignment).one().is_active is False
+    _group(db, "B")
+    assert pa.sync_weekly_set(db, ws, now=NOW)["created"] == 0

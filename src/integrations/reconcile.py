@@ -230,11 +230,13 @@ def prune_events(db: Session, *, days: int = RETENTION_DAYS, now: Optional[datet
 def sync_platform_assignments(db: Session) -> dict:
     """E1: (re)create platform_test assignments for current sets — catches groups created after
     the publish event. No-op unless PLATFORM_ASSIGNMENTS_ENABLED."""
-    from src.integrations import platform_assignments
+    from src.integrations import platform_assignments, platform_calendar
 
     if not platform_assignments.enabled():
-        return {"sets": 0, "created": 0, "updated": 0, "deactivated": 0}
-    return platform_assignments.sync_all_active(db)
+        return {"sets": 0, "created": 0, "updated": 0, "deactivated": 0, "calendar": {}}
+    out = platform_assignments.sync_all_active(db)
+    out["calendar"] = platform_calendar.sync_all_active(db)
+    return out
 
 
 def run_nightly(db: Session) -> dict:

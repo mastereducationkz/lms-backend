@@ -125,4 +125,8 @@ def sync_platform_tests(
     _require_enabled()
     if _role(user) != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-    return platform_assignments.sync_all_active(db, include_past=include_past)
+    from src.integrations import platform_calendar
+
+    out = platform_assignments.sync_all_active(db, include_past=include_past)
+    out["calendar"] = platform_calendar.sync_all_active(db)
+    return out

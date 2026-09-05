@@ -16,6 +16,8 @@ from sqlalchemy.pool import StaticPool
 import src.schemas.models  # noqa: F401 - register models
 from src.assignments.models import Assignment, AssignmentSubmission
 from src.auth.models import UserInDB
+from src.events.models import Event, EventGroup
+from src.integrations.models import PlatformTestEvent
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
 from src.integrations import platform_assignments as pa
@@ -45,7 +47,7 @@ MODULES = [{"module": "listening", "test_id": 41, "test_title": "L 41"},
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for model in (UserInDB, Group, GroupStudent, Assignment, AssignmentSubmission,
+    for model in (Event, EventGroup, PlatformTestEvent, UserInDB, Group, GroupStudent, Assignment, AssignmentSubmission,
                   PlatformEvent, PlatformResult, PlatformWeeklySet, PlatformTestAssignment):
         model.__table__.create(bind=engine)
     session = sessionmaker(bind=engine)()
@@ -58,6 +60,7 @@ def db():
 @pytest.fixture(autouse=True)
 def _flag_on(monkeypatch):
     monkeypatch.setenv("PLATFORM_ASSIGNMENTS_ENABLED", "true")
+    monkeypatch.setenv("PLATFORM_TEST_HOMEWORK", "true")
     monkeypatch.setattr(pa, "_utcnow", lambda: NOW)
     # platform_progress keeps its own _utcnow, and that is the one the HTTP routes reach for
     # when they derive days_left. Leaving it on the wall clock made this module a time bomb:

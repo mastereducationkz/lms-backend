@@ -33,6 +33,13 @@ def enabled() -> bool:
     return os.getenv("PLATFORM_ASSIGNMENTS_ENABLED", "").strip().lower() in _TRUTHY
 
 
+def homework_enabled() -> bool:
+    """Lead decision 2026-09-05: weekly tests are calendar events, not homework. Homework rows are
+    only created while PLATFORM_TEST_HOMEWORK is on (off by default); with it off every existing
+    platform_test assignment is deactivated by the next sync (rows kept, reversible)."""
+    return os.getenv("PLATFORM_TEST_HOMEWORK", "").strip().lower() in _TRUTHY
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -160,7 +167,7 @@ def sync_weekly_set(db: Session, ws: PlatformWeeklySet, *, now: Optional[datetim
     if not enabled():
         return out
     now = now or _utcnow()
-    assignable = bool(ws.is_active) and has_window(ws)
+    assignable = bool(ws.is_active) and has_window(ws) and homework_enabled()
     targets = {g.id: g for g in target_groups(db, track_of(ws))} if assignable else {}
     may_create = assignable and (include_past or not is_past(ws, now))
     links = _links_for_set(db, ws)
@@ -210,12 +217,17 @@ def sync_all_active(db: Session, platform: str = "ielts", *, now: Optional[datet
 
 
 def set_group_opt_out(db: Session, group, opt_out: bool, *, now: Optional[datetime] = None) -> dict:
-    """Flip a group's opt-out and re-sync: opting out deactivates its open platform tests,
-    opting back in re-creates/re-activates them for the current sets."""
+    """Flip a group's opt-out and re-sync: opting out detaches the group from the current
+    weekly-test calendar events (and deactivates any homework rows), opting back in reattaches."""
+    from src.integrations import platform_calendar
+
     group.platform_tests_opt_out = bool(opt_out)
     db.commit()
     program = (group.program_type or "ielts").lower()
-    return sync_all_active(db, "sat" if program in ("sat", "nuet") else program, now=now)
+    platform = "sat" if program in ("sat", "nuet") else program
+    out = sync_all_active(db, platform, now=now)
+    out["calendar"] = platform_calendar.sync_all_active(db, platform, now=now)
+    return out
 
 
 def main() -> None:  # pragma: no cover - operator CLI
