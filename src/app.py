@@ -265,10 +265,14 @@ def not_found_handler(request, exc):
 
 @app.exception_handler(403)
 def forbidden_handler(request, exc):
-    return JSONResponse(
-        status_code=403,
-        content={"error": "Forbidden", "message": "You don't have permission to access this resource", "status_code": 403}
-    )
+    # Keep the generic envelope, but pass the handler's own reason through as `detail`: the
+    # checkpoint gates (and other guards) say *why* access is denied, and the web client reads
+    # `response.data.detail` for its error toasts.
+    content = {"error": "Forbidden", "message": "You don't have permission to access this resource", "status_code": 403}
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str) and detail:
+        content["detail"] = detail
+    return JSONResponse(status_code=403, content=content)
 
 @app.exception_handler(401)
 def unauthorized_handler(request, exc):
