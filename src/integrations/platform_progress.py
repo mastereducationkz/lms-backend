@@ -13,12 +13,12 @@ inside [date_from, date_to].
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from src.integrations.models import PlatformResult, PlatformTestAssignment
+from src.integrations.models import PlatformResult, PlatformTestAssignment, PlatformWeeklySet
 
 DONE_STATUSES = {"submitted", "expired", "completed", "scored"}
 AUTO_FEEDBACK = "Completed on the platform"
@@ -147,23 +147,77 @@ def group_matrix(db: Session, assignment, now: Optional[datetime] = None) -> lis
     return rows
 
 
-def weekly_tests_for_student(db: Session, user_id: int, now: Optional[datetime] = None) -> list[dict]:
-    """The student's active platform tests: current ones first (nearest due first), then past ones
-    (most recent first) — the dashboard shows the first item."""
-    from src.assignments.models import Assignment
-    from src.courses.models import GroupStudent
+PAST_WINDOW_DAYS = 28  # past sets the countdown card still lists (most recent first)
+
+
+def _base_from_set(ws: PlatformWeeklySet, content: dict, now: datetime) -> dict:
+    """Same shape as ``_base`` for a set that has no homework row (lead decision 2026-09-05)."""
+    from src.integrations import platform_assignments as pa
+
+    return {
+        "assignment_id": None,
+        "group_id": None,
+        "title": pa.build_title(ws),
+        "platform": ws.platform,
+        "track": content.get("track") or ws.platform,
+        "weekly_set_id": ws.weekly_set_id,
+        "set_title": ws.title,
+        "set_path": content.get("set_path"),
+        "date_from": content.get("date_from"),
+        "date_to": content.get("date_to"),
+        "due_date": _iso(ws.date_to),
+        "days_left": (ws.date_to - now).days if ws.date_to else None,
+        "is_active": bool(ws.is_active),
+    }
+
+
+def set_progress(db: Session, ws: PlatformWeeklySet, user_id: int, now: Optional[datetime] = None) -> dict:
+    from src.integrations import platform_assignments as pa
 
     now = now or _utcnow()
-    group_ids = [gid for (gid,) in db.query(GroupStudent.group_id).filter(GroupStudent.student_id == user_id).all()]
-    if not group_ids:
-        return []
-    rows = (
-        db.query(Assignment)
-        .join(PlatformTestAssignment, PlatformTestAssignment.assignment_id == Assignment.id)
-        .filter(Assignment.group_id.in_(group_ids), Assignment.is_active.is_(True))
+    content = pa.build_content(ws)
+    states = module_states(db, content, user_id, now)
+    return {**_base_from_set(ws, content, now), "status": summarize(states), "modules": states}
+
+
+def _target_tracks(db: Session, user_id: int) -> set[str]:
+    """Tracks whose weekly tests the student gets: the programs of their active, non-special,
+    not-opted-out groups (the same rule that attaches calendar events)."""
+    from src.courses.models import Group, GroupStudent
+
+    groups = (
+        db.query(Group)
+        .join(GroupStudent, GroupStudent.group_id == Group.id)
+        .filter(GroupStudent.student_id == user_id)
         .all()
     )
-    items = [student_progress(db, a, user_id, now) for a in rows]
+    return {
+        (g.program_type or "").lower()
+        for g in groups
+        if g.is_active is not False and not g.is_special and not g.platform_tests_opt_out and g.program_type
+    }
+
+
+def weekly_tests_for_student(db: Session, user_id: int, now: Optional[datetime] = None) -> list[dict]:
+    """The student's weekly tests, from the published sets of their tracks: current ones first
+    (nearest deadline first), then the last weeks' past ones (most recent first) — the dashboard
+    shows the first item. Sets without a window never appear."""
+    from src.integrations import platform_assignments as pa
+
+    now = now or _utcnow()
+    tracks = _target_tracks(db, user_id)
+    if not tracks:
+        return []
+    sets = (
+        db.query(PlatformWeeklySet)
+        .filter(
+            PlatformWeeklySet.is_active.is_(True),
+            PlatformWeeklySet.date_to.isnot(None),
+            PlatformWeeklySet.date_to >= now - timedelta(days=PAST_WINDOW_DAYS),
+        )
+        .all()
+    )
+    items = [set_progress(db, ws, user_id, now) for ws in sets if pa.track_of(ws) in tracks]
     current = [i for i in items if i["days_left"] is None or i["days_left"] >= 0]
     past = [i for i in items if i["days_left"] is not None and i["days_left"] < 0]
     current.sort(key=lambda i: (i["days_left"] is None, i["days_left"] if i["days_left"] is not None else 0))
