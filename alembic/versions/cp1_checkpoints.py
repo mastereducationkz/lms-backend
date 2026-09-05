@@ -1,7 +1,7 @@
 """SAT Checkpoints: definitions, required units, per-student rows, per-group flags.
 
 Revision ID: cp1_checkpoints
-Revises: p21_platform_diagnostics
+Revises: p22_weekly_set_path
 Create Date: 2026-09-03
 """
 from alembic import op
@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "cp1_checkpoints"
-down_revision = "p21_platform_diagnostics"
+down_revision = "p22_weekly_set_path"
 branch_labels = None
 depends_on = None
 
