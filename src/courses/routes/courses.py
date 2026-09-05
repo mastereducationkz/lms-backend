@@ -152,6 +152,15 @@ def _strip_lesson_steps(lesson) -> None:
             step.video_url = None
             step.attachments = None
 
+# Who may change a course's modules, lessons and steps: admins and head roles for any course, a
+# teacher for the course they own. Head roles were added on 2026-09-05 so they can author the SAT
+# checkpoint quizzes; course-level operations (edit/delete the course itself) stay admin/owner.
+COURSE_CONTENT_EDITOR_ROLES = ("admin", "head_teacher", "head_curator")
+
+
+def _is_course_editor(user, course) -> bool:
+    return user.role in COURSE_CONTENT_EDITOR_ROLES or course.teacher_id == user.id
+
 # =============================================================================
 # COURSE MANAGEMENT
 # =============================================================================
@@ -1041,7 +1050,7 @@ def create_module(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     new_module = Module(
@@ -1082,7 +1091,7 @@ def update_module(
         raise HTTPException(status_code=404, detail="Module not found")
     
     # Check permissions
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     module.title = module_data.title
@@ -1120,7 +1129,7 @@ def delete_module(
         raise HTTPException(status_code=404, detail="Module not found")
     
     # Check permissions
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get all lessons in this module
@@ -1295,7 +1304,7 @@ def create_lesson(
         raise HTTPException(status_code=404, detail="Module not found")
     
     # Check permissions
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Calculate order_index if not provided or if it's 0
@@ -1664,7 +1673,7 @@ def update_lesson(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this lesson")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Update lesson fields
@@ -1710,7 +1719,7 @@ def delete_lesson(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this lesson")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # CRITICAL: Remove all references to this lesson from other lessons' next_lesson_id
@@ -1844,7 +1853,7 @@ def create_step(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this lesson")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Calculate order_index if not provided or if it's 0
@@ -1944,7 +1953,7 @@ def update_step(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this step")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Handle quiz data for quiz content type
@@ -2003,7 +2012,7 @@ def reorder_steps(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this lesson")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get the new order of step IDs
@@ -2051,7 +2060,7 @@ def split_lesson(
     if not course or course.id != course_id:
         raise HTTPException(status_code=404, detail="Course not found or mismatch")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     after_step_index = split_data.get("after_step_index")
@@ -2150,7 +2159,7 @@ def delete_step(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this step")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Delete related step progress records first
@@ -2180,7 +2189,7 @@ def fix_lesson_order(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
     
-    if current_user.role != "admin" and course.teacher_id != current_user.id:
+    if not _is_course_editor(current_user, course):
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get all modules for the course

@@ -47,19 +47,34 @@ def get_my_checkpoints(
 
 # ======================================================================= admin / staff
 
-READ_ROLES = ("admin", "head_curator", "head_teacher")
+# Who may do what (user decision 2026-09-05: every staff role works with checkpoints):
+#   admin, head_curator, head_teacher  every group, every action, definitions included
+#   teacher, curator                   their own groups only (check_group_access): matrix and
+#                                      results, open / reopen / deadlines, the two group switches
+#   student, parent                    never
+ALL_GROUP_ROLES = ("admin", "head_curator", "head_teacher")
+OWN_GROUP_ROLES = ("teacher", "curator")
+STAFF_ROLES = ALL_GROUP_ROLES + OWN_GROUP_ROLES
+DEFINITION_WRITE_ROLES = ALL_GROUP_ROLES
 
 
-def _require_admin(user: UserInDB) -> None:
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+def _require_staff(user: UserInDB) -> None:
+    if user.role not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Staff only")
 
 
-def _require_group_read(user: UserInDB, group: Group, db: Session) -> None:
-    if user.role in READ_ROLES:
+def _require_definition_write(user: UserInDB) -> None:
+    if user.role not in DEFINITION_WRITE_ROLES:
+        raise HTTPException(status_code=403, detail="Admins, head curators and head teachers only")
+
+
+def _require_group_access(user: UserInDB, group: Group, db: Session) -> None:
+    """Read and write alike: head roles reach every group, teachers and curators their own."""
+    if user.role in ALL_GROUP_ROLES:
         return
-    if not check_group_access(group.id, user, db):
-        raise HTTPException(status_code=403, detail="No access to this group")
+    if user.role in OWN_GROUP_ROLES and check_group_access(group.id, user, db):
+        return
+    raise HTTPException(status_code=403, detail="No access to this group")
 
 
 def _group_or_404(db: Session, group_id: int) -> Group:
@@ -110,8 +125,7 @@ def _serialize_definition(db: Session, d: CheckpointDefinition) -> Dict[str, Any
 def list_definitions(course_id: Optional[int] = Query(None),
                      current_user: UserInDB = Depends(get_current_user_dependency),
                      db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
-    if current_user.role not in READ_ROLES and current_user.role != "teacher":
-        raise HTTPException(status_code=403, detail="Staff only")
+    _require_staff(current_user)
     q = db.query(CheckpointDefinition)
     if course_id is not None:
         q = q.filter(CheckpointDefinition.course_id == course_id)
@@ -122,7 +136,7 @@ def list_definitions(course_id: Optional[int] = Query(None),
 def update_definition(checkpoint_id: int, body: DefinitionUpdate,
                       current_user: UserInDB = Depends(get_current_user_dependency),
                       db: Session = Depends(get_db)) -> Dict[str, Any]:
-    _require_admin(current_user)
+    _require_definition_write(current_user)
     d = _definition_or_404(db, checkpoint_id)
 
     # Validate against the post-update values BEFORE touching the row, so a rejected request
@@ -167,11 +181,15 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
     d.total_questions = total_questions
     d.quiz_lesson_id = quiz_lesson_id
     if body.required_units is not None:
-        kinds = sorted(u.kind for u in body.required_units)
-        if kinds != ["math", "verbal", "verbal"]:
-            raise HTTPException(status_code=400, detail="A checkpoint requires exactly 2 verbal units and 1 math unit")
+        # A checkpoint covers 2 verbal lessons and 1 math lesson, but a course lesson may hold two
+        # LMS units (the IT mapping: checkpoints 2, 3 and 4), so 3 or 4 units are allowed.
+        kinds = [u.kind for u in body.required_units]
+        if not (3 <= len(kinds) <= 4) or kinds.count("verbal") < 2 or kinds.count("math") < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="A checkpoint covers 3 or 4 units: at least 2 verbal and 1 math")
         ids = [u.lesson_id for u in body.required_units]
-        if len(set(ids)) != 3:
+        if len(set(ids)) != len(ids):
             raise HTTPException(status_code=400, detail="Required units must be distinct")
         found = {r[0] for r in db.query(Lesson.id).filter(Lesson.id.in_(ids)).all()}
         if found != set(ids):
@@ -193,8 +211,7 @@ def update_definition(checkpoint_id: int, body: DefinitionUpdate,
 @checkpoints_admin_router.get("/definitions/{checkpoint_id}/quiz-check")
 def quiz_check(checkpoint_id: int, current_user: UserInDB = Depends(get_current_user_dependency),
                db: Session = Depends(get_db)) -> Dict[str, Any]:
-    if current_user.role not in READ_ROLES and current_user.role != "teacher":
-        raise HTTPException(status_code=403, detail="Staff only")
+    _require_staff(current_user)
     d = _definition_or_404(db, checkpoint_id)
     questions = _quiz_questions(db, d)
     by = {"easy": 0, "medium": 0, "hard": 0, "unset": 0}
@@ -228,11 +245,12 @@ def _serialize_group(db: Session, g: Group, student_count: Optional[int] = None)
 def list_groups(program_type: Optional[str] = Query("sat"),
                 current_user: UserInDB = Depends(get_current_user_dependency),
                 db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    _require_staff(current_user)
     q = db.query(Group).options(joinedload(Group.teacher)).filter(Group.is_active == True)  # noqa: E712
     if program_type:
         q = q.filter(Group.program_type == program_type)
     groups = q.order_by(Group.name).all()
-    if current_user.role not in READ_ROLES:
+    if current_user.role not in ALL_GROUP_ROLES:
         groups = [g for g in groups if check_group_access(g.id, current_user, db)]
     # One grouped COUNT instead of one per group (the list is every active SAT group).
     counts = dict(db.query(GroupStudent.group_id, func.count(GroupStudent.student_id)).filter(
@@ -245,8 +263,8 @@ def list_groups(program_type: Optional[str] = Query("sat"),
 def update_group_settings(group_id: int, body: GroupSettingsUpdate,
                           current_user: UserInDB = Depends(get_current_user_dependency),
                           db: Session = Depends(get_db)) -> Dict[str, Any]:
-    _require_admin(current_user)
     group = _group_or_404(db, group_id)
+    _require_group_access(current_user, group, db)
     if body.start_number is not None:
         group.checkpoints_start_number = body.start_number
     if body.enabled is not None:
@@ -264,7 +282,7 @@ def update_group_settings(group_id: int, body: GroupSettingsUpdate,
 def group_matrix(group_id: int, current_user: UserInDB = Depends(get_current_user_dependency),
                  db: Session = Depends(get_db)) -> Dict[str, Any]:
     group = _group_or_404(db, group_id)
-    _require_group_read(current_user, group, db)
+    _require_group_access(current_user, group, db)
     definitions = service.definitions_for_group(db, group, only_active=False)
     students = (db.query(UserInDB).join(GroupStudent, GroupStudent.student_id == UserInDB.id)
                 .filter(GroupStudent.group_id == group.id).order_by(UserInDB.name).all())
@@ -311,8 +329,8 @@ def _rows_payload(rows) -> Dict[str, Any]:
 def open_checkpoint(group_id: int, checkpoint_id: int, body: OpenRequest,
                     current_user: UserInDB = Depends(get_current_user_dependency),
                     db: Session = Depends(get_db)) -> Dict[str, Any]:
-    _require_admin(current_user)
     group = _group_or_404(db, group_id)
+    _require_group_access(current_user, group, db)
     d = _definition_or_404(db, checkpoint_id)
     rows = service.open_for_students(db, group=group, definition=d, student_ids=body.student_ids,
                                      deadline=body.deadline, actor_id=current_user.id)
@@ -323,8 +341,8 @@ def open_checkpoint(group_id: int, checkpoint_id: int, body: OpenRequest,
 def reopen_checkpoint(group_id: int, checkpoint_id: int, body: OpenRequest,
                       current_user: UserInDB = Depends(get_current_user_dependency),
                       db: Session = Depends(get_db)) -> Dict[str, Any]:
-    _require_admin(current_user)
     group = _group_or_404(db, group_id)
+    _require_group_access(current_user, group, db)
     d = _definition_or_404(db, checkpoint_id)
     rows = service.reopen_for_students(db, group=group, definition=d, student_ids=body.student_ids,
                                        deadline=body.deadline, actor_id=current_user.id)
@@ -335,10 +353,10 @@ def reopen_checkpoint(group_id: int, checkpoint_id: int, body: OpenRequest,
 def update_deadline(row_id: int, body: DeadlineUpdate,
                     current_user: UserInDB = Depends(get_current_user_dependency),
                     db: Session = Depends(get_db)) -> Dict[str, Any]:
-    _require_admin(current_user)
     row = db.get(StudentCheckpoint, row_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Student checkpoint not found")
+    _require_group_access(current_user, _group_or_404(db, row.group_id), db)
     service.set_deadline(db, row, body.deadline, current_user.id)
     return service.serialize_row(row)
 
@@ -348,7 +366,7 @@ def checkpoint_results(group_id: int, checkpoint_id: int,
                        current_user: UserInDB = Depends(get_current_user_dependency),
                        db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     group = _group_or_404(db, group_id)
-    _require_group_read(current_user, group, db)
+    _require_group_access(current_user, group, db)
     d = _definition_or_404(db, checkpoint_id)
     students = (db.query(UserInDB).join(GroupStudent, GroupStudent.student_id == UserInDB.id)
                 .filter(GroupStudent.group_id == group.id).order_by(UserInDB.name).all())
