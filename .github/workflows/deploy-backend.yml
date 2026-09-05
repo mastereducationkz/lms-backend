@@ -7,7 +7,10 @@ on:
 
 concurrency:
   group: deploy-backend
-  cancel-in-progress: true
+  # Never cancel a running deploy: a merge fires Backend CI twice (branch + main) and the second
+  # workflow_run used to cancel the first mid-deploy, leaving the container created but stopped
+  # (prod down ~3 min on 2026-09-05). Queue instead.
+  cancel-in-progress: false
 
 jobs:
   deploy:
