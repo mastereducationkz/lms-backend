@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -149,18 +149,80 @@ def test_matrix_two_students_two_definitions_batched(db):
     assert b_cell2["locked_reason"].startswith("Locked — waiting for")
 
 
-def test_non_admin_cannot_write_but_group_teacher_can_read(db):
+def test_group_teacher_and_curator_manage_their_own_group_only(db):
+    """Every staff role works with checkpoints (2026-09-05): teachers and curators read and act on
+    the groups they own, head roles on every group; outsiders and students get nothing."""
     from src.checkpoints.routes import checkpoints as r
     admin, course, v, m, _, d1, group, s1, s2 = _world(db)
-    teacher = make_user(db, role="teacher"); group.teacher_id = teacher.id; db.flush()
-    with pytest.raises(HTTPException) as e:
-        r.update_group_settings(group.id, GroupSettingsUpdate(enabled=True), current_user=teacher, db=db)
-    assert e.value.status_code == 403
-    assert r.group_matrix(group.id, current_user=teacher, db=db)["group"]["id"] == group.id
+    teacher = make_user(db, role="teacher"); group.teacher_id = teacher.id
+    curator = make_user(db, role="curator"); group.curator_id = curator.id
+    db.flush()
+    assert r.update_group_settings(group.id, GroupSettingsUpdate(enabled=True), current_user=teacher, db=db)["checkpoints_enabled"]
+    assert r.group_matrix(group.id, current_user=curator, db=db)["group"]["id"] == group.id
+    opened = r.open_checkpoint(group.id, d1.id, OpenRequest(student_ids=[s1.id]), current_user=curator, db=db)
+    assert opened["changed"] == 1
+    row_id = opened["rows"][0]["id"]
+    new_deadline = datetime.now(timezone.utc) + timedelta(days=5)
+    assert r.update_deadline(row_id, DeadlineUpdate(deadline=new_deadline), current_user=teacher, db=db)["deadline"]
+    assert r.reopen_checkpoint(group.id, d1.id, OpenRequest(student_ids=[s1.id]), current_user=teacher, db=db)["changed"] == 1
+    assert len(r.checkpoint_results(group.id, d1.id, current_user=curator, db=db)) == 2
+    assert [g["id"] for g in r.list_groups(program_type="sat", current_user=curator, db=db)] == [group.id]
+
+    for role in ("head_curator", "head_teacher"):
+        head = make_user(db, role=role)
+        assert r.group_matrix(group.id, current_user=head, db=db)["group"]["id"] == group.id
+        assert r.update_group_settings(group.id, GroupSettingsUpdate(start_number=2), current_user=head, db=db)["checkpoints_start_number"] == 2
+
     outsider = make_user(db, role="teacher")
-    with pytest.raises(HTTPException) as e:
-        r.group_matrix(group.id, current_user=outsider, db=db)
-    assert e.value.status_code == 403
+    for call in (lambda: r.group_matrix(group.id, current_user=outsider, db=db),
+                 lambda: r.update_group_settings(group.id, GroupSettingsUpdate(enabled=False), current_user=outsider, db=db),
+                 lambda: r.open_checkpoint(group.id, d1.id, OpenRequest(), current_user=outsider, db=db),
+                 lambda: r.update_deadline(row_id, DeadlineUpdate(deadline=new_deadline), current_user=outsider, db=db),
+                 lambda: r.checkpoint_results(group.id, d1.id, current_user=outsider, db=db),
+                 lambda: r.group_matrix(group.id, current_user=s1, db=db),
+                 lambda: r.list_definitions(course_id=None, current_user=s1, db=db)):
+        with pytest.raises(HTTPException) as e:
+            call()
+        assert e.value.status_code == 403
+
+
+def test_definitions_are_written_by_admins_and_head_roles_only(db):
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, group, s1, s2 = _world(db)
+    teacher = make_user(db, role="teacher"); group.teacher_id = teacher.id
+    curator = make_user(db, role="curator"); group.curator_id = curator.id
+    db.flush()
+    for who in (teacher, curator):
+        assert r.list_definitions(course_id=course.id, current_user=who, db=db)[0]["id"] == d1.id
+        assert "by_difficulty" in r.quiz_check(d1.id, current_user=who, db=db)
+        with pytest.raises(HTTPException) as e:
+            r.update_definition(d1.id, DefinitionUpdate(title="x"), current_user=who, db=db)
+        assert e.value.status_code == 403
+    for role in ("head_curator", "head_teacher"):
+        assert r.update_definition(d1.id, DefinitionUpdate(title=f"by {role}"), current_user=make_user(db, role=role), db=db)["title"] == f"by {role}"
+
+
+def test_required_units_allow_a_double_unit_lesson(db):
+    """The IT mapping binds some checkpoints to 4 units (a course lesson holding two LMS units):
+    3 or 4 units, at least 2 verbal and 1 math, all distinct."""
+    from src.checkpoints.routes import checkpoints as r
+    admin, course, v, m, _, d1, _, _, _ = _world(db)
+    ok = r.update_definition(d1.id, DefinitionUpdate(required_units=[
+        RequiredUnitInput(lesson_id=v[0].id, kind="verbal"), RequiredUnitInput(lesson_id=v[1].id, kind="verbal"),
+        RequiredUnitInput(lesson_id=m[0].id, kind="math"), RequiredUnitInput(lesson_id=m[1].id, kind="math")]),
+        current_user=admin, db=db)
+    assert [u["kind"] for u in ok["required_units"]] == ["verbal", "verbal", "math", "math"]
+    for units in (
+        [RequiredUnitInput(lesson_id=v[0].id, kind="verbal"), RequiredUnitInput(lesson_id=m[0].id, kind="math")],       # 2
+        [RequiredUnitInput(lesson_id=v[0].id, kind="verbal"), RequiredUnitInput(lesson_id=v[1].id, kind="verbal"),
+         RequiredUnitInput(lesson_id=v[2].id, kind="verbal")],                                                        # no math
+        [RequiredUnitInput(lesson_id=v[0].id, kind="verbal"), RequiredUnitInput(lesson_id=v[1].id, kind="verbal"),
+         RequiredUnitInput(lesson_id=v[2].id, kind="verbal"), RequiredUnitInput(lesson_id=m[0].id, kind="math"),
+         RequiredUnitInput(lesson_id=m[1].id, kind="math")],                                                          # 5
+    ):
+        with pytest.raises(HTTPException) as e:
+            r.update_definition(d1.id, DefinitionUpdate(required_units=units), current_user=admin, db=db)
+        assert e.value.status_code == 400
 
 
 def test_quiz_lesson_cannot_be_shared_by_two_definitions(db):
