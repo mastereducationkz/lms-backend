@@ -22,6 +22,7 @@ from src.services.attendance_service import (
 from src.services.cache_service import cached
 
 import logging
+from src.events.display import MULTI_GROUP_TYPES, display_groups, display_title
 
 logger = logging.getLogger(__name__)
 
@@ -251,14 +252,14 @@ def get_my_events(
         event_data = EventSchema.from_orm(event)
         event_data.creator_name = event.creator.name if event.creator else "Unknown"
         group_names = [eg.group.name for eg in event.event_groups if eg.group]
-        event_data.groups = group_names
+        if current_user.role == "student" and getattr(event, "event_type", None) in MULTI_GROUP_TYPES:
+            event_data.groups = display_groups(event, set(user_group_ids))   # only the viewer's own groups
+        else:
+            event_data.groups = group_names
         event_data.participant_count = count_map.get(event.id, 0)
         
-        # Ensure title includes group name for events
-        if group_names:
-            main_group = group_names[0]
-            if not event.title.startswith(main_group):
-                event_data.title = f"{main_group}: {event.title}"
+        # Group-scoped events carry their group in the title; multi-group weekly tests do not.
+        event_data.title = display_title(event, group_names)
                 
         result.append(event_data)
         
@@ -654,16 +655,16 @@ def get_calendar_events(
         else:
             group_names = [eg.group.name for eg in event.event_groups if eg.group]
             event_data.group_ids = [eg.group_id for eg in event.event_groups]
-        event_data.groups = group_names
+        if current_user.role == "student" and getattr(event, "event_type", None) in MULTI_GROUP_TYPES:
+            event_data.groups = display_groups(event, set(user_group_ids))   # only the viewer's own groups
+        else:
+            event_data.groups = group_names
         
         # Add participant count
         event_data.participant_count = count_map.get(event.id, 0)
         
-        # Ensure title includes group name for events (non-class events from recurring)
-        if group_names:
-            main_group = group_names[0]
-            if not event.title.startswith(main_group):
-                event_data.title = f"{main_group}: {event.title}"
+        # Group-scoped events carry their group in the title; multi-group weekly tests do not.
+        event_data.title = display_title(event, group_names)
         
         result.append(event_data)
     
@@ -836,14 +837,14 @@ def get_upcoming_events(
         event_data = EventSchema.from_orm(event)
         event_data.creator_name = event.creator.name if event.creator else "Unknown"
         group_names = [eg.group.name for eg in event.event_groups if eg.group]
-        event_data.groups = group_names
+        if current_user.role == "student" and getattr(event, "event_type", None) in MULTI_GROUP_TYPES:
+            event_data.groups = display_groups(event, set(user_group_ids))   # only the viewer's own groups
+        else:
+            event_data.groups = group_names
         event_data.participant_count = count_map.get(event.id, 0)
         
-        # Ensure title includes group name for events
-        if group_names:
-            main_group = group_names[0]
-            if not event.title.startswith(main_group):
-                event_data.title = f"{main_group}: {event.title}"
+        # Group-scoped events carry their group in the title; multi-group weekly tests do not.
+        event_data.title = display_title(event, group_names)
         
         result.append(event_data)
         
