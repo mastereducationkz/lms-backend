@@ -9,7 +9,8 @@
 and suggests a start number: the block most of the group is working on (median highest completed
 block + 1), so that enabling the group opens at most the checkpoint they just finished rather than
 every checkpoint of the blocks they did weeks ago. It also lists what would open immediately at
-that start number.
+that start number. "Highest" is the highest block, not the highest contiguous run — a single gap
+(one unit of an early block never marked complete) must not drag a group back to the start.
 
 `enable` sets the start number, switches the group on and runs the same sync the console runs, so
 every student whose blocks are already complete gets their checkpoints (deadlines a day apart in
@@ -46,15 +47,9 @@ def group_report(db: Session, course_id: int, group_id: int) -> Dict[str, Any]:
     for s in students:
         done = completed_lesson_ids(db, s.id, required_all)
         complete = [d.number for d in definitions if d.required_units and {u.lesson_id for u in d.required_units} <= done]
-        highest = 0
-        for n in sorted(complete):
-            if n == highest + 1:
-                highest = n
-            else:
-                break
-        rows.append({"student_id": s.id, "name": s.name, "highest_contiguous_block": highest,
+        rows.append({"student_id": s.id, "name": s.name, "highest_block": max(complete) if complete else 0,
                      "complete_blocks": complete})
-    highs = [r["highest_contiguous_block"] for r in rows]
+    highs = [r["highest_block"] for r in rows]
     suggested = (int(statistics.median(highs)) + 1) if highs else 1
     suggested = max(1, min(suggested, max((d.number for d in definitions), default=1)))
     for r in rows:
@@ -124,7 +119,7 @@ def main() -> None:  # pragma: no cover - operator CLI
                 print(f"\n=== {rep['group_id']} {rep['name']} — enabled={rep['enabled']} start={rep['start_number']} "
                       f"— suggested start {rep['suggested_start']} ({rep['opens_immediately']} checkpoint(s) would open now)")
                 for s in rep["students"]:
-                    print(f"  {s['name']:40s} blocks done {s['complete_blocks']}  contiguous {s['highest_contiguous_block']}  "
+                    print(f"  {s['name']:40s} blocks done {s['complete_blocks']}  highest {s['highest_block']}  "
                           f"opens now {s['would_open_now']}")
         elif args.cmd == "activate":
             for row in activate(db, args.course_id, dry_run=args.dry_run):
