@@ -52,9 +52,14 @@ def test_checkpoint_denials_keep_their_reason_through_the_403_envelope(db):
     student = make_user(db)
     enroll(db, student, group, course, admin)
     db.flush()
+    from tests.checkpoint_fixtures import complete_lesson_explicit
+    from src.checkpoints import service
+    for lesson in (v[0], v[1], m[0]):                               # block 1 done -> checkpoint 1 opens
+        complete_lesson_explicit(db, student, course, lesson)
+    service.sync_student_checkpoints(db, student.id, commit=False)
     c = _client(db, student)
 
-    r = c.get(f"/courses/lessons/{v[2].id}")                       # block-2 unit, checkpoint 1 not cleared
+    r = c.get(f"/courses/lessons/{v[2].id}")                       # block-2 unit, checkpoint 1 pending
     assert r.status_code == 403
     body = r.json()
     assert body["error"] == "Forbidden" and body["status_code"] == 403   # envelope untouched
@@ -63,8 +68,8 @@ def test_checkpoint_denials_keep_their_reason_through_the_403_envelope(db):
     r = c.get(f"/courses/lessons/{quiz_lessons[1].id}")             # a checkpoint that is not open
     assert r.status_code == 403 and r.json()["detail"] == "This checkpoint is not open for you"
 
-    r = c.post("/progress/quiz-attempt", json={
-        "step_id": quiz_steps[0].id, "course_id": course.id, "lesson_id": quiz_lessons[0].id,
+    r = c.post("/progress/quiz-attempt", json={                   # checkpoint 2 is still locked
+        "step_id": quiz_steps[1].id, "course_id": course.id, "lesson_id": quiz_lessons[1].id,
         "total_questions": 45, "is_draft": True, "answers": "{}",
     })
     assert r.status_code == 403 and r.json()["detail"].startswith("Checkpoint is locked")
