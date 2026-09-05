@@ -90,6 +90,25 @@ def get_row(db: Session, student_id: int, group_id: int, checkpoint_id: int) -> 
     ).first()
 
 
+def unit_options(db: Session, course_id: int) -> List[Dict[str, Any]]:
+    """Every unit of the course a checkpoint may require, with the kind its module implies
+    ('Verbal' -> verbal, 'Math' -> math). Checkpoint lessons and the 'Unit 0' onboarding are
+    left out; modules of any other name are not checkpoint material."""
+    rows = db.query(Lesson.id, Lesson.title, Module.title).join(
+        Module, Module.id == Lesson.module_id
+    ).filter(
+        Module.course_id == course_id, Lesson.kind != "checkpoint",
+    ).order_by(Module.order_index, Lesson.order_index, Lesson.id).all()
+    out = []
+    for lesson_id, title, module_title in rows:
+        low = (module_title or "").lower()
+        kind = "verbal" if "verbal" in low else "math" if "math" in low else None
+        if kind is None or (title or "").strip().lower().startswith("unit 0"):
+            continue
+        out.append({"lesson_id": lesson_id, "title": title, "module": module_title, "kind": kind})
+    return out
+
+
 def unit_progress(db: Session, student_id: int, definition: CheckpointDefinition) -> List[Dict[str, Any]]:
     """Per required unit: completed or not (ТЗ §13 'which required units are done')."""
     units = list(definition.required_units)
@@ -121,14 +140,18 @@ class StudentCheckpointContext:
     checkpoints or groups the student has.
     """
 
-    __slots__ = ("definitions_by_group", "rows", "completed", "titles", "quiz_course_by_lesson")
+    __slots__ = ("definitions_by_group", "rows", "completed", "titles", "quiz_course_by_lesson",
+                 "completed_elsewhere")
 
-    def __init__(self, definitions_by_group, rows, completed, titles, quiz_course_by_lesson):
+    def __init__(self, definitions_by_group, rows, completed, titles, quiz_course_by_lesson,
+                 completed_elsewhere=None):
         self.definitions_by_group = definitions_by_group
         self.rows = rows
         self.completed = completed
         self.titles = titles
         self.quiz_course_by_lesson = quiz_course_by_lesson
+        # checkpoint_id -> a completed row of this student in ANY group (transfer carry-over)
+        self.completed_elsewhere = completed_elsewhere or {}
 
 
 def student_checkpoint_context(db: Session, student_id: int,
@@ -156,12 +179,17 @@ def student_checkpoint_context(db: Session, student_id: int,
         definitions_by_group[gid] = sorted(seen.values(), key=lambda d: d.number)
 
     rows: Dict[tuple, StudentCheckpoint] = {}
+    completed_elsewhere: Dict[int, StudentCheckpoint] = {}
     if group_ids:
+        # One query over every row of the student, not just the enabled groups': the rows of a
+        # previous group are what a transfer carries over (see _carry_over).
         for r in db.query(StudentCheckpoint).filter(
             StudentCheckpoint.student_id == student_id,
-            StudentCheckpoint.group_id.in_(group_ids),
-        ).all():
-            rows[(r.group_id, r.checkpoint_id)] = r
+        ).order_by(StudentCheckpoint.submitted_at.desc().nullslast(), StudentCheckpoint.id.desc()).all():
+            if r.group_id in course_ids_by_group:
+                rows[(r.group_id, r.checkpoint_id)] = r
+            if r.status == STATUS_COMPLETED:
+                completed_elsewhere.setdefault(r.checkpoint_id, r)
 
     required_ids = list(dict.fromkeys(
         u.lesson_id for ds in definitions_by_group.values() for d in ds for u in d.required_units))
@@ -176,7 +204,8 @@ def student_checkpoint_context(db: Session, student_id: int,
         Module, Module.id == Lesson.module_id).filter(
         Lesson.id.in_(quiz_lesson_ids)).all()) if quiz_lesson_ids else {}
 
-    return StudentCheckpointContext(definitions_by_group, rows, completed, titles, quiz_course_by_lesson)
+    return StudentCheckpointContext(definitions_by_group, rows, completed, titles, quiz_course_by_lesson,
+                                    completed_elsewhere)
 
 
 # ---------------------------------------------------------------- auto-open
@@ -197,6 +226,42 @@ def _open_row(row: Optional[StudentCheckpoint], *, student_id: int, group_id: in
     return row
 
 
+def _completed_elsewhere(db: Session, student_id: int, definition_ids: List[int]) -> Dict[int, StudentCheckpoint]:
+    """This student's completed rows for these definitions in ANY group. A student who moves to
+    another group keeps the checkpoints they already passed instead of retaking them."""
+    if not definition_ids:
+        return {}
+    out: Dict[int, StudentCheckpoint] = {}
+    for r in db.query(StudentCheckpoint).filter(
+        StudentCheckpoint.student_id == student_id,
+        StudentCheckpoint.checkpoint_id.in_(definition_ids),
+        StudentCheckpoint.status == STATUS_COMPLETED,
+    ).order_by(StudentCheckpoint.submitted_at.desc().nullslast(), StudentCheckpoint.id.desc()).all():
+        out.setdefault(r.checkpoint_id, r)
+    return out
+
+
+def _carry_over(row: Optional[StudentCheckpoint], previous: StudentCheckpoint, *, student_id: int, group_id: int,
+                definition: CheckpointDefinition, now: datetime) -> StudentCheckpoint:
+    """Copy a checkpoint passed in another group onto this group's row (opened_by 'transfer')."""
+    if row is None:
+        row = StudentCheckpoint(student_id=student_id, group_id=group_id,
+                                checkpoint_id=definition.id, checkpoint_number=definition.number)
+    row.checkpoint_number = definition.number
+    row.required_unit_ids = [u.lesson_id for u in definition.required_units]
+    row.status = STATUS_COMPLETED
+    row.opened_at = previous.opened_at or now
+    row.deadline = previous.deadline
+    row.submitted_at = previous.submitted_at or now
+    row.quiz_attempt_id = previous.quiz_attempt_id
+    row.correct_answers = previous.correct_answers
+    row.total_questions = previous.total_questions
+    row.percentage = previous.percentage
+    row.opened_by = "transfer"
+    row.updated_by = None
+    return row
+
+
 def _open_eligible_checkpoints(db: Session, student_id: int, now: datetime, keys: List[tuple], *,
                                groups: Optional[List[Group]] = None,
                                ctx: Optional[StudentCheckpointContext] = None) -> List[StudentCheckpoint]:
@@ -206,6 +271,7 @@ def _open_eligible_checkpoints(db: Session, student_id: int, now: datetime, keys
     for group in groups:
         definitions = (ctx.definitions_by_group.get(group.id, []) if ctx is not None
                        else definitions_for_group(db, group))
+        eligible: List[Tuple[CheckpointDefinition, Optional[StudentCheckpoint]]] = []
         for definition in definitions:
             if definition.number < (group.checkpoints_start_number or 1):
                 continue
@@ -218,13 +284,32 @@ def _open_eligible_checkpoints(db: Session, student_id: int, now: datetime, keys
                 continue
             done = ctx.completed if ctx is not None else completed_lesson_ids(db, student_id, required)
             if set(required) <= done:
+                eligible.append((definition, row))
+        if not eligible:
+            continue
+        eligible.sort(key=lambda pair: pair[0].number)
+        carried = (ctx.completed_elsewhere if ctx is not None
+                   else _completed_elsewhere(db, student_id, [d.id for d, _ in eligible]))
+        stagger = 0
+        for definition, row in eligible:
+            previous = carried.get(definition.id)
+            if previous is not None and previous.group_id != group.id:
+                # Passed in a previous group: carry the result over, nothing to retake.
+                row = _carry_over(row, previous, student_id=student_id, group_id=group.id,
+                                  definition=definition, now=now)
+            else:
+                # Several checkpoints opening in the same moment — a student who joins mid-course,
+                # or a group switched on late — get their deadlines a day apart in checkpoint order
+                # instead of all falling due at once.
                 row = _open_row(row, student_id=student_id, group_id=group.id, definition=definition,
-                                now=now, opened_by="auto", deadline=None, actor_id=None)
-                db.add(row)
+                                now=now, opened_by="auto",
+                                deadline=now + timedelta(hours=DEADLINE_HOURS * (stagger + 1)), actor_id=None)
+                stagger += 1
                 opened.append(row)
-                keys.append((group.id, definition.id))
-                if ctx is not None:
-                    ctx.rows[(group.id, definition.id)] = row
+            db.add(row)
+            keys.append((group.id, definition.id))
+            if ctx is not None:
+                ctx.rows[(group.id, definition.id)] = row
     return opened
 
 
@@ -253,7 +338,7 @@ def sync_student_checkpoints(db: Session, student_id: int, *, now: Optional[date
     keys: List[tuple] = []
     try:
         opened = _open_eligible_checkpoints(db, student_id, now, keys, groups=groups, ctx=ctx)
-        if opened:
+        if keys:                      # opened rows, or results carried over from another group
             db.flush()
             if commit:
                 db.commit()
