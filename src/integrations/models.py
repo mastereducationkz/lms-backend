@@ -164,3 +164,21 @@ class PlatformTestAssignment(Base):
         UniqueConstraint("platform", "weekly_set_id", "group_id", name="uq_platform_test_assignments_set_group"),
         Index("ix_platform_test_assignments_group", "group_id"),
     )
+
+
+class PlatformTestEvent(Base):
+    """Links the auto-managed ``weekly_test`` calendar Event of a weekly set to the set
+    (lead decision 2026-09-05: calendar events instead of platform_test homework)."""
+
+    __tablename__ = "platform_test_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, unique=True)
+    platform = Column(String(16), nullable=False)
+    weekly_set_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=_utcnow)
+    updated_at = Column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("platform", "weekly_set_id", name="uq_platform_test_events_set"),
+    )

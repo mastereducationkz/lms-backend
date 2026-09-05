@@ -116,7 +116,7 @@ _MUTATION_INVALIDATION_RULES: dict[str, tuple[str, ...]] = {
     "trials": ("courses:*", "progress:*", "dashboard:*", "admin:*"),
     # Platform events (IELTS/SAT pushes) feed student progress + dashboard views and, since
     # Phase 2, create/deactivate platform_test assignments.
-    "integrations": ("progress:*", "dashboard:*", "assignments:*"),
+    "integrations": ("progress:*", "dashboard:*", "assignments:*", "events:*"),
     # Student targets (E5) feed the dashboard tile.
     "targets": ("dashboard:*",),
 }

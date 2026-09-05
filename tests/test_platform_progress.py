@@ -14,6 +14,8 @@ from sqlalchemy.orm import sessionmaker
 import src.schemas.models  # noqa: F401 - register models
 from src.assignments.models import Assignment, AssignmentSubmission
 from src.auth.models import UserInDB
+from src.events.models import Event, EventGroup
+from src.integrations.models import PlatformTestEvent
 from src.courses.models import Group, GroupStudent
 from src.integrations import platform_assignments as pa
 from src.integrations import platform_progress as pp
@@ -37,7 +39,7 @@ def _array_as_json(type_, compiler, **kw):
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite:///:memory:")
-    for model in (UserInDB, Group, GroupStudent, Assignment, AssignmentSubmission,
+    for model in (Event, EventGroup, PlatformTestEvent, UserInDB, Group, GroupStudent, Assignment, AssignmentSubmission,
                   PlatformEvent, PlatformResult, PlatformWeeklySet, PlatformTestAssignment):
         model.__table__.create(bind=engine)
     session = sessionmaker(bind=engine)()
@@ -50,6 +52,7 @@ def db():
 @pytest.fixture(autouse=True)
 def _flag_on(monkeypatch):
     monkeypatch.setenv("PLATFORM_ASSIGNMENTS_ENABLED", "true")
+    monkeypatch.setenv("PLATFORM_TEST_HOMEWORK", "true")
     monkeypatch.setattr(pa, "_utcnow", lambda: NOW)
     monkeypatch.setattr(pp, "_utcnow", lambda: NOW)
 

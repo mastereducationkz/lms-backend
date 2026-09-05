@@ -63,13 +63,15 @@ def apply_event(db: Session, event: PlatformEvent) -> None:
 # --- weekly sets ---------------------------------------------------------------------
 
 def _sync_assignments(db: Session, ws) -> None:
-    """E1: keep the per-group platform_test assignments in step with the set (flag-gated)."""
+    """E1: keep the set's calendar event (and, while PLATFORM_TEST_HOMEWORK is on, its homework
+    rows) in step with the set (flag-gated)."""
     if ws is None:
         return
-    from src.integrations import platform_assignments
+    from src.integrations import platform_assignments, platform_calendar
 
     if platform_assignments.enabled():
         platform_assignments.sync_weekly_set(db, ws)
+        platform_calendar.sync_weekly_set_event(db, ws)
 
 
 def _upsert_weekly_set(db: Session, platform: str, data: dict, *, create: bool = True):
