@@ -47,6 +47,12 @@ from src.curator.models import (
     CuratorTaskTemplate, CuratorTaskInstance, CuratorOnboarding,
     CuratorOnboardingEvent, CuratorOnboardingNote,
 )
+# Imported as a module rather than by name, for the same reason as ``email_log`` above:
+# access_blocks is a plausible direct first import (its own tests import it that way), and
+# that import reaches back into this file before ``StudentAccessBlock`` exists — binding
+# the name here would turn that into a circular-import error. Importing the module is
+# enough: defining the class is what registers the table on Base.metadata.
+from src.curator import access_blocks as _access_blocks  # noqa: F401
 from src.lesson_requests.models import LessonRequest
 from src.parents.models import ParentStudent
 from src.exams.models import ExamResult, BluebookResult, StudentTestimonial
