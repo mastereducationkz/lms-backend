@@ -15,6 +15,7 @@ from src.schemas.models import (
 from pydantic import BaseModel
 from src.routes.auth import get_current_user_dependency
 from src.curator.freeze_mirror import freeze_index
+from src.curator.access_blocks import access_block_index
 from src.services.attendance_service import (
     AttendanceService,
     attendance_status_to_ui,
@@ -848,6 +849,9 @@ async def get_weekly_lessons_with_hw_status(
     # index is scoped, so this grid asks only about *this* group: a student who froze SAT
     # keeps a full, ordinary IELTS row here.
     freezes = freeze_index(db, student_ids)
+    # Same shape as the freeze mirror, for the other reason a student was not expected: the
+    # CRM turned their login off (they did not renew). One query for the roster.
+    blocks = access_block_index(db, student_ids)
     students_list = sorted(students, key=lambda s: s.name or "")
     
     # 7. Get Attendance — from Attendance (single source of truth)
@@ -1202,6 +1206,12 @@ async def get_weekly_lessons_with_hw_status(
                 student.id, group_id, event.start_datetime.date()
             )
 
+            # A lesson while the login was off is not theirs either. Not a freeze — the grid
+            # labels it «Нет доступа» — but it leaves the denominators the same way.
+            blocked_lesson = (not frozen_lesson) and blocks.is_blocked_on(
+                student.id, event.start_datetime.date()
+            )
+
             # Homework - now by GLOBAL lesson_number; one status per assignment
             lesson_num = event_to_lesson_number.get(event.id, idx + 1)
             hw_statuses = []
@@ -1256,6 +1266,9 @@ async def get_weekly_lessons_with_hw_status(
                 # attendance_status value, so older clients degrade to the previous
                 # rendering instead of showing an unknown status.
                 "frozen": frozen_lesson,
+                # True = inside a CRM access block (student did not renew; login was off).
+                # Additive like `frozen`, so older clients keep their previous rendering.
+                "blocked": blocked_lesson,
             }
             
         student_rows.append({

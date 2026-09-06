@@ -49,3 +49,61 @@ def test_index_loads_rows_for_the_page_in_one_query(db):  # noqa: F811
     assert index.is_blocked_on(102, date.today()) is False
     assert index.is_blocked_on(102, date.today() - timedelta(days=25)) is True
     assert index.is_blocked_on(103, date.today()) is False
+
+
+# --- the grid --------------------------------------------------------------------------------
+import asyncio
+from datetime import datetime
+
+from src.gamification.routes.leaderboard import router as leaderboard_router
+from src.schemas.models import Event, EventGroup, Group, GroupStudent, UserInDB
+
+
+def _endpoint(path):
+    for r in leaderboard_router.routes:
+        if getattr(r, "path", None) == path:
+            return r.endpoint
+    raise RuntimeError(f"route {path} not found")
+
+
+def _maybe_run(result):
+    return asyncio.run(result) if asyncio.iscoroutine(result) else result
+
+
+def _user(db, email, role):
+    u = UserInDB(email=email, name=email.split("@")[0], hashed_password="x", role=role, is_active=True)
+    db.add(u)
+    db.flush()
+    return u
+
+
+def test_a_lesson_inside_a_block_is_flagged_and_one_before_it_is_not(db):  # noqa: F811
+    admin = _user(db, "blk_admin@test.local", "admin")
+    teacher = _user(db, "blk_teacher@test.local", "teacher")
+    group = Group(name="Blocked grid", program_type="general_english", teacher_id=teacher.id)
+    db.add(group)
+    db.flush()
+    student = _user(db, "blk_student@test.local", "student")
+    db.add(GroupStudent(group_id=group.id, student_id=student.id, created_at=datetime(2026, 7, 1)))
+    db.flush()
+    for day in (14, 16):  # both in the week of 2026-07-13 (Mon) .. 2026-07-19
+        start = datetime(2026, 7, day, 10, 0, 0)
+        ev = Event(title=f"c{day}", event_type="class", start_datetime=start,
+                   end_datetime=start + timedelta(hours=1), created_by=teacher.id,
+                   is_active=True, is_recurring=False)
+        db.add(ev)
+        db.flush()
+        db.add(EventGroup(event_id=ev.id, group_id=group.id))
+    # Blocked from the 15th: the 14th is theirs, the 16th is not.
+    db.add(StudentAccessBlock(user_id=student.id, blocked_from=date(2026, 7, 15), kind="not_renewed"))
+    db.flush()
+
+    res = _maybe_run(_endpoint("/curator/weekly-lessons/{group_id}")(
+        group.id, week_number=1, current_user=admin, db=db))
+    lessons = res["students"][0]["lessons"]
+    by_event = {cell["event_id"]: cell for cell in lessons.values()}
+    events = {e.title: e for e in db.query(Event).filter(Event.title.in_(["c14", "c16"])).all()}
+    assert by_event[events["c14"].id]["blocked"] is False
+    assert by_event[events["c16"].id]["blocked"] is True
+    # A blocked cell is still not a freeze — the two are rendered differently.
+    assert by_event[events["c16"].id]["frozen"] is False
