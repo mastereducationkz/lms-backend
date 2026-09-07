@@ -16,6 +16,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from src.exams.marketing import BASIS_SCORE, BASIS_TESTIMONIAL
 from src.exams.schemas import BluebookGridOut, ExamResultRow
 from src.services.excel_export_service import sanitize_spreadsheet_value
 
@@ -34,6 +35,18 @@ def _text_cell(ws, row: int, col: int, value):
     if isinstance(value, str):
         cell.number_format = "@"
     return cell
+
+
+def _marketing_label(row: ExamResultRow) -> str:
+    """Why the row may be used in marketing: 'балл > 1400', 'отзыв', both joined by
+    ', ', or '' when it may not. Spelled out per basis because a bare score carries no
+    consent record - 'отзыв' is the only ground that permits using name or photo."""
+    parts = []
+    if BASIS_SCORE in row.marketing_basis:
+        parts.append(f"балл > {row.marketing_threshold}")
+    if BASIS_TESTIMONIAL in row.marketing_basis:
+        parts.append("отзыв")
+    return ", ".join(parts)
 
 
 def build_exam_results_workbook(rows: List[ExamResultRow], *, exam_type: str) -> BytesIO:
@@ -55,7 +68,7 @@ def build_exam_results_workbook(rows: List[ExamResultRow], *, exam_type: str) ->
         headers += ["Listening", "Reading", "Writing", "Speaking", "Overall"]
     else:
         headers += ["Total"]
-    headers += ["Status", "Source", "Proof"]
+    headers += ["Status", "Source", "Proof", "Маркетинг"]
 
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
@@ -98,6 +111,7 @@ def build_exam_results_workbook(rows: List[ExamResultRow], *, exam_type: str) ->
         _text_cell(ws, idx, col, r.source if r else "—"); col += 1
         # Whether evidence exists - never the storage key, which is PII.
         _text_cell(ws, idx, col, "yes" if (r and r.has_proof) else "no"); col += 1
+        _text_cell(ws, idx, col, _marketing_label(row)); col += 1
 
     ws.freeze_panes = "B2"
     ws.column_dimensions["A"].width = 28

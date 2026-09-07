@@ -221,6 +221,14 @@ class ExamResultRow(BaseModel):
     triage_status: Optional[Literal["pending", "due", "overdue", "completed", "unscheduled"]] = None
     result: Optional[ExamResultOut] = None
     attempts: List[ExamResultOut] = []
+    # Marketing eligibility, derived per row (see src.exams.marketing). ``basis`` says
+    # WHY, because the two grounds differ in what they permit: a bare ``score`` carries
+    # no consent record, a ``testimonial`` is one.
+    marketing_eligible: bool = False
+    marketing_basis: List[Literal["score", "testimonial"]] = []
+    # The total a current attempt must exceed for this exam type; None when scores
+    # never qualify on their own (IELTS, NUET).
+    marketing_threshold: Optional[int] = None
 
 
 class BluebookResultInput(BaseModel):
