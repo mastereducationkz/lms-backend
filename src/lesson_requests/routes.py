@@ -18,6 +18,8 @@ from src.schemas.models import (
 from src.routes.auth import get_current_user_dependency
 from src.services.event_service import EventService
 from src.lesson_requests.services import (
+    CANCEL_ONLY,
+    CANCEL_RESOLUTIONS,
     create_lesson_request_record,
     get_group_ids_in_head_teacher_scope,
     user_can_resolve_request,
@@ -76,6 +78,10 @@ async def create_lesson_request(
     new_request = create_lesson_request_record(db, current_user, data, skip_limits=self_approve)
 
     if self_approve:
+        # Nobody else decides here, so the teacher's proposal is the decision; a cancel with
+        # none named keeps today's behaviour.
+        if new_request.request_type == "cancel" and not new_request.cancel_resolution:
+            new_request.cancel_resolution = CANCEL_ONLY
         apply_approved_request(db, new_request, current_user.id)
         new_request.status = "approved"
         new_request.resolved_by = current_user.id
@@ -293,7 +299,14 @@ async def approve_lesson_request(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
-    """Approve a lesson request – applies the substitution, reschedule, or cancel."""
+    """Approve a lesson request – applies the substitution, reschedule, or cancel.
+
+    A cancel is resolved one of two ways — «только отменить» (``cancel_only``) or «отменить и
+    добавить урок в конец курса» (``add_replacement``). The approver's choice wins; omitted,
+    the teacher's proposal applies; with neither, ``cancel_only`` — exactly the behaviour
+    before the choice existed, so an older client keeps working. Other request types ignore
+    the field.
+    """
     lr = db.query(LessonRequest).filter(LessonRequest.id == request_id).first()
     if not lr:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -301,6 +314,19 @@ async def approve_lesson_request(
         raise HTTPException(status_code=400, detail="Request already resolved")
     if not user_can_resolve_request(db, current_user, lr.group_id):
         raise HTTPException(status_code=403, detail="Not authorized to approve this request")
+
+    if lr.request_type == "cancel":
+        resolution = data.cancel_resolution or lr.cancel_resolution or CANCEL_ONLY
+        if resolution not in CANCEL_RESOLUTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Недопустимое решение по отмене: {resolution!r}. "
+                    f"Ожидается одно из: {', '.join(CANCEL_RESOLUTIONS)}."
+                ),
+            )
+        # On the row before applying: apply_cancel reads the decision from there.
+        lr.cancel_resolution = resolution
 
     apply_approved_request(db, lr, current_user.id)
 

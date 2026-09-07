@@ -27,10 +27,18 @@ class LessonRequest(Base):
     resolved_at = Column(DateTime, nullable=True)
     resolved_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
+    # Cancel requests only. "cancel_only" | "add_replacement" (see
+    # ``src.lesson_requests.services.CANCEL_RESOLUTIONS``). While the request is pending this
+    # is the teacher's optional proposal; once approved it is the approver's decision.
+    cancel_resolution = Column(String(32), nullable=True)
+    # The lesson appended to the end of the course when the decision was "add_replacement".
+    replacement_event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True)
+
     requester = relationship("UserInDB", foreign_keys=[requester_id])
     substitute_teacher = relationship("UserInDB", foreign_keys=[substitute_teacher_id])
     confirmed_teacher = relationship("UserInDB", foreign_keys=[confirmed_teacher_id])
     resolver = relationship("UserInDB", foreign_keys=[resolved_by])
     lesson_schedule = relationship("LessonSchedule", foreign_keys=[lesson_schedule_id])
     event = relationship("Event", foreign_keys=[event_id])
+    replacement_event = relationship("Event", foreign_keys=[replacement_event_id])
     group = relationship("Group", foreign_keys=[group_id])

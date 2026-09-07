@@ -1,6 +1,9 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
+
+#: How an approved cancel was (or is proposed to be) resolved.
+CancelResolution = Literal["cancel_only", "add_replacement"]
 
 
 class LessonRequestSchema(BaseModel):
@@ -56,6 +59,16 @@ class LessonRequestSchema(BaseModel):
     #: Whether the lesson is still active (a cancel request that took effect sets this False).
     lesson_is_active: Optional[bool] = None
 
+    # ── cancel requests: how the cancellation was resolved ───────────────────────────────
+    #
+    #: "cancel_only" | "add_replacement". A pending request carries the teacher's proposal
+    #: (may be empty); an approved one carries the approver's decision.
+    cancel_resolution: Optional[str] = None
+    #: The lesson appended to the end of the course under "add_replacement".
+    replacement_event_id: Optional[int] = None
+    replacement_lesson_title: Optional[str] = None
+    replacement_datetime: Optional[datetime] = None
+
     class Config:
         from_attributes = True
         # Datetimes are stored as naive UTC; emit them with a trailing 'Z' so
@@ -75,10 +88,16 @@ class CreateLessonRequestSchema(BaseModel):
     substitute_teacher_id: Optional[int] = None
     new_datetime: Optional[datetime] = None
     reason: Optional[str] = None
+    #: Cancel only — the teacher's proposal for the approver. A self-approving teacher's
+    #: cancel uses it directly (defaulting to "cancel_only").
+    cancel_resolution: Optional[CancelResolution] = None
 
 
 class ResolveLessonRequestSchema(BaseModel):
     admin_comment: Optional[str] = None
+    #: Cancel only. Omitted → the teacher's proposal, else "cancel_only" (today's behaviour),
+    #: so an older client that never sends it keeps working. Ignored on other request types.
+    cancel_resolution: Optional[CancelResolution] = None
 
 
 class TeacherRequestStatsSchema(BaseModel):
