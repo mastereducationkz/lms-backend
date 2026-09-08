@@ -14,6 +14,13 @@ curator gets a new row with the next ``cycle_no``.
 **The thresholds.** "Overdue" is a business rule, not a UI opinion, so the numbers live in
 :data:`ONBOARDING_THRESHOLDS` and are served to the frontends over the API rather than being
 re-typed into a component.
+
+**What "finished" means here.** A group is finished for onboarding the moment its last
+lesson ends — *not* when ``groups.is_over`` finally flips. The two differ by the completion
+grace window (:mod:`src.services.group_completion_service`), which deliberately keeps a
+finished group open to teachers, curators and admins until the following Wednesday. Reading
+``is_over`` alone made that window mean "the relationship restarted": see
+:func:`_finished_group_ids`.
 """
 from __future__ import annotations
 
@@ -58,6 +65,10 @@ END_TRANSFERRED_OUT = "transferred_out"
 END_CURATOR_DEACTIVATED = "curator_deactivated"
 END_LEGACY_CANCELLED = "legacy_cancelled"
 END_MANUAL = "manual"
+#: The cycle should never have been opened — see :mod:`src.curator.onboarding_repair`. Its own
+#: reason rather than ``relationship_ended`` because the relationship did not end: it never
+#: restarted, and a report counting how many students a curator lost must not include these.
+END_OPENED_IN_ERROR = "opened_in_error"
 
 # --- thresholds ---------------------------------------------------------------------------
 #
@@ -75,6 +86,20 @@ LMS_INACTIVITY_DAYS = 7
 PRODUCT_ENDING_SOON_DAYS = 15
 #: A student studying at least this many distinct active products is flagged as multi-product.
 MULTI_PRODUCT_MIN = 2
+
+#: How far apart two timestamps must be before their order can be believed across tables.
+#:
+#: Not a business rule — a clock-skew tolerance, and the reason it has to exist:
+#: ``group_students.created_at`` defaults to a timezone-**aware** ``datetime.now(timezone.utc)``
+#: written into a **naive** ``DateTime`` column, so the driver renders it in the writing
+#: session's timezone and Postgres stores local wall-clock. ``curator_onboarding.ended_at`` is
+#: set explicitly from :func:`_utcnow`, which is naive UTC. The two columns are therefore in
+#: different clocks — 8 hours apart on a UTC+8 developer machine, 0 on the UTC production
+#: server — and a bare ``<=`` between them answers the wrong question wherever the app is not
+#: running in UTC. 24h is the smallest round margin wider than the largest real offset (±14h).
+#: Anything closer together than this is reported as "cannot tell", which
+#: :func:`already_onboarded_into_group` treats as "do not veto".
+_MEMBERSHIP_CLOCK_SKEW = timedelta(hours=24)
 
 ONBOARDING_THRESHOLDS: dict[str, int] = {
     "new_overdue_days": NEW_OVERDUE_DAYS,
@@ -170,6 +195,96 @@ def record_event(
 # --- cycle management ---------------------------------------------------------------------
 
 
+def already_onboarded_into_group(
+    db: Session,
+    curator_id: int,
+    student_id: int,
+    group_id: Optional[int],
+) -> bool:
+    """Has this curator already carried this student through onboarding *into this group*?
+
+    The veto on re-opening a cycle, and deliberately the narrowest one that still stops the
+    failure it exists for. It distinguishes the two ways a relationship can "reappear":
+
+    *A student left and came back.* Their roster row was deleted and a new one written, so
+    the membership is **newer** than the closed cycle. That is a genuine return and gets a
+    genuine card.
+
+    *Nothing about the student changed.* The roster row sat still and only the group's
+    completion state wobbled — the grace window opened, a lesson was dragged into the future,
+    a make-up lesson was appended. That is a blip, and a blip is not a new relationship.
+
+    ``True`` therefore requires **all** of: the **most recent closed cycle** for the pair is
+    on the **same group**, it reached :data:`STATUS_DONE`, and the student's current
+    membership of that group **predates the cycle's close** by more than
+    :data:`_MEMBERSHIP_CLOCK_SKEW` (the two timestamps come from different clocks — see that
+    constant; a membership written close to the cutoff is reported as "cannot tell" and is
+    not vetoed).
+
+    Narrow on every axis, on purpose:
+
+    * **Only the most recent cycle.** What matters is what happened last between these two
+      people, not that they once shared a group in 2024.
+    * **Only the same group.** Finishing a course and starting a *different* one with the
+      same curator is a real new onboarding and still gets a card — the common case, and it
+      must not be swallowed.
+    * **Only ``done``.** A ``cancelled`` cycle means the onboarding never finished, so a
+      second attempt is exactly right and is allowed through.
+    * **Only when the roster says they never left.** This is what keeps a «перекурс» — a
+      student genuinely re-enrolling in the same group under the same curator — working: the
+      new membership row postdates the close, so no veto.
+    * **No membership row at all → no veto.** Callers may open a cycle for a pair the roster
+      does not describe (the CRM does, through ``/reconcile-student``). Absence is not
+      evidence of a blip, and this must never veto on a guess.
+    * **Nothing time-based.** A window would need a number nobody has agreed, and would go
+      stale silently once chosen.
+
+    Measured against production on 2026-09-08: of the 71 cycles the grace window re-opened,
+    **all 71** had a membership older than the close — not one was a genuine return — and 61
+    of them had a previous ``done`` cycle on the same group, so this would have refused those
+    61, including **all 32** that were still open. The other 10 had a ``cancelled`` previous
+    cycle and are stopped by :func:`_finished_group_ids` instead. Neither guard is redundant:
+    this one also covers the older flap where a lesson dragged into the future re-opens a
+    group that has genuinely finished, which the completion rule cannot see.
+    """
+    if group_id is None:
+        # No group means no "same group" to compare against; never veto on a guess.
+        return False
+    previous = (
+        db.query(CuratorOnboarding)
+        .filter(
+            CuratorOnboarding.curator_id == curator_id,
+            CuratorOnboarding.student_id == student_id,
+            CuratorOnboarding.ended_at.isnot(None),
+        )
+        .order_by(CuratorOnboarding.cycle_no.desc(), CuratorOnboarding.id.desc())
+        .first()
+    )
+    if previous is None:
+        return False
+    if previous.group_id != group_id or previous.status != STATUS_DONE:
+        return False
+
+    joined = (
+        db.query(GroupStudent.created_at)
+        .filter(
+            GroupStudent.group_id == group_id,
+            GroupStudent.student_id == student_id,
+        )
+        .order_by(GroupStudent.created_at.desc().nullslast())
+        .first()
+    )
+    if joined is None:
+        return False
+    joined_at = _as_naive_utc(joined[0])
+    ended_at = _as_naive_utc(previous.ended_at)
+    if joined_at is None or ended_at is None:
+        # A membership with no timestamp cannot be placed either side of the close. External
+        # CRM inserts do produce these; treat the unknown as "may be a genuine return".
+        return False
+    return joined_at <= ended_at - _MEMBERSHIP_CLOCK_SKEW
+
+
 def open_cycle(
     db: Session,
     curator_id: int,
@@ -184,10 +299,22 @@ def open_cycle(
     IntegrityError and finds the winner's row. Callers must be able to tolerate a
     ``SAVEPOINT`` here, which every caller in this repo can (they all run inside a session,
     not a raw connection).
+
+    Returns ``None`` without writing when :func:`already_onboarded_into_group` vetoes the
+    group — a relationship blip on a group this curator has already onboarded this student
+    into is not a new relationship.
     """
     actor = actor or OnboardingActor.system()
     existing = active_cycle(db, curator_id, student_id)
     if existing is not None:
+        return None
+    if already_onboarded_into_group(db, curator_id, student_id, group_id):
+        logger.info(
+            "onboarding cycle refused: %s/%s were already onboarded into group %s",
+            curator_id,
+            student_id,
+            group_id,
+        )
         return None
 
     next_no = (
@@ -286,13 +413,50 @@ def active_cycle(db: Session, curator_id: int, student_id: int) -> Optional[Cura
 # --- reconciler ---------------------------------------------------------------------------
 
 
+def _finished_group_ids(db: Session, group_ids: Iterable[int]) -> set[int]:
+    """Of these groups, the ones that have taught out but are still inside the grace window.
+
+    ``groups.is_over`` is not enough on its own. The completion grace period
+    (:mod:`src.services.group_completion_service`) holds a finished group open — ``is_over``
+    stays ``False`` — until the first Wednesday 23:59:59 Asia/Almaty after its last lesson
+    ends, so that teachers do not lose the group off their list while attendance is still to
+    be taken. For onboarding that window is not "still running": the course is over and the
+    curator has nothing left to settle the student into.
+
+    Reading ``is_over`` alone is what broke on 2026-09-08. Groups whose last lesson had ended
+    days earlier had *already* had their cycles closed under the old rule; the grace window
+    made them read as live again and the reconciler opened a second cycle for every student
+    in them — 71 cards across 13 groups, every one a re-open of the same (curator, student,
+    group) that had been closed days before.
+
+    ``get_groups_close_deadlines`` returns a non-null deadline exactly for "finished, waiting
+    for the cutoff", which is the set this returns. It is batched (two queries for any number
+    of groups), so this stays off the N+1 path the reconciler used to be.
+    """
+    ids = sorted({int(g) for g in group_ids})
+    if not ids:
+        return set()
+    # Imported here, not at module scope: the rule belongs to the completion service and this
+    # module must never grow a second copy of it — the CRM already mirrors that one file
+    # byte-for-byte and a third implementation would be the thing that drifts.
+    from src.services.group_completion_service import get_groups_close_deadlines
+
+    return {
+        int(group_id)
+        for group_id, deadline in get_groups_close_deadlines(db, ids).items()
+        if deadline is not None
+    }
+
+
 def compute_active_pairs(db: Session) -> dict[tuple[int, int], int]:
     """``{(curator_id, student_id): group_id}`` for live curator↔student relationships.
 
-    Live means: an active, not-over group that has a curator, containing an active student.
-    ``is_over`` is honoured because a completed group is no longer anyone's responsibility —
-    the original query checked only ``is_active``, so curators kept cards for cohorts that
-    had finished months ago.
+    Live means: an active group that has a curator and has not finished teaching, containing
+    an active student. Completion is honoured because a finished group is no longer anyone's
+    responsibility — the original query checked only ``is_active``, so curators kept cards for
+    cohorts that had finished months ago — and it is read through
+    :func:`_finished_group_ids` rather than off ``is_over``, so a group sitting in its grace
+    window counts as finished here even though the flag still says otherwise.
 
     When a student is in several groups owned by the same curator the most recently joined
     one wins as the card's *display* group; the relationship itself is the same either way.
@@ -314,9 +478,16 @@ def compute_active_pairs(db: Session) -> dict[tuple[int, int], int]:
         )
         .all()
     )
+    # Dropped per row, before the "most recently joined wins" reduction below. Filtering the
+    # reduced dict instead would lose the whole pair whenever a student's *display* group is
+    # the finished one while another group under the same curator is still running.
+    finished = _finished_group_ids(db, (group_id for _, _, group_id, _ in rows))
+
     pairs: dict[tuple[int, int], int] = {}
     seen_created: dict[tuple[int, int], datetime] = {}
     for curator_id, student_id, group_id, created_at in rows:
+        if int(group_id) in finished:
+            continue
         key = (int(curator_id), int(student_id))
         ts = _as_naive_utc(created_at) or datetime.min
         if key not in pairs or ts > seen_created[key]:
@@ -698,17 +869,22 @@ def status_counts(
 
 
 def curator_student_ids(db: Session, curator_ids: Sequence[int]) -> set[int]:
-    """Students visible to these curators: everyone in their active, non-completed groups.
+    """Students visible to these curators: everyone in their active, unfinished groups.
 
     This is the authorization primitive for the whole curator workspace — the CRM asks this
     question before it will show a student card, and the answer must not depend on whether an
     onboarding row happens to exist.
+
+    "Unfinished" is :func:`_finished_group_ids`, the same reading :func:`compute_active_pairs`
+    uses, so the two cannot disagree about whether a relationship exists. They are documented
+    as answering one question and a card for a student the workspace will not show — or a
+    student shown with no card the reconciler believes in — is the shape of that disagreement.
     """
     ids = [int(c) for c in curator_ids]
     if not ids:
         return set()
     rows = (
-        db.query(GroupStudent.student_id)
+        db.query(GroupStudent.student_id, GroupStudent.group_id)
         .join(Group, Group.id == GroupStudent.group_id)
         .filter(
             Group.curator_id.in_(ids),
@@ -718,7 +894,8 @@ def curator_student_ids(db: Session, curator_ids: Sequence[int]) -> set[int]:
         .distinct()
         .all()
     )
-    return {int(r[0]) for r in rows}
+    finished = _finished_group_ids(db, (group_id for _, group_id in rows))
+    return {int(student_id) for student_id, group_id in rows if int(group_id) not in finished}
 
 
 def serialize_card(
