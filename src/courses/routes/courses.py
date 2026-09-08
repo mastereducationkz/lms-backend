@@ -31,6 +31,7 @@ from src.services.azure_openai_service import AzureOpenAIService
 from src.services import storage_service
 from src.services import video_ingest
 from src.services.cache_service import cached
+from src.utils import lesson_access_errors as lesson_errors
 from src.utils.duration_calculator import update_course_duration
 from src.trials.services import trial_lesson_access, get_active_trial as get_active_trial_grant
 
@@ -46,7 +47,7 @@ def _trial_hard_gate(db, current_user, lesson_id: int):
     if current_user.role == "student" and getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
         if not allowed:
-            raise HTTPException(status_code=403, detail=reason or "Not included in your trial")
+            raise lesson_errors.trial_locked(reason)
 
 
 def _trial_filter_lesson_payload(lessons, allowed_ids):
@@ -1350,16 +1351,16 @@ def get_lesson(
         noload(Lesson.steps)
     ).filter(Lesson.id == lesson_id).first()
     if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
+        raise lesson_errors.lesson_not_found()
     
     # Get course_id through module
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+        raise lesson_errors.lesson_not_found()
     
     # Check course access
     if not check_course_access(module.course_id, current_user, db):
-        raise HTTPException(status_code=403, detail="Access denied to this lesson")
+        raise lesson_errors.course_access_denied()
     from src.checkpoints.service import (
         assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
     )
@@ -1401,10 +1402,7 @@ def check_lesson_access(
 
     # Check basic course access
     if not check_course_access(course_id, current_user, db):
-        return {
-            "accessible": False,
-            "reason": "You do not have access to this course"
-        }
+        return lesson_errors.course_access_denied().as_payload()
     
     # Teachers and admins can access any lesson
     if current_user.role != "student":
@@ -1421,24 +1419,23 @@ def check_lesson_access(
         definition = db.query(CheckpointDefinition).filter(
             CheckpointDefinition.quiz_lesson_id == lesson_id
         ).first()
-        reason = "This checkpoint is not open yet."
+        missing = []
         if definition is not None:
             units = checkpoint_service.unit_progress(db, current_user.id, definition)
-            reason = checkpoint_service.locked_reason(units) or reason
-        return {"accessible": False, "reason": reason}
+            missing = [u["title"] for u in units if not u["completed"]]
+        return lesson_errors.checkpoint_not_open(definition, missing).as_payload()
 
     # Blocked-unit rule (Task 1): a unit bound to a still-pending checkpoint is locked until that
     # checkpoint is done, regardless of any other unlock path below.
     if lesson_id in checkpoint_service.blocked_unit_lesson_ids_for_student(db, current_user.id):
         definition = checkpoint_service.blocking_checkpoint_for_student(db, current_user.id)
-        name = definition.title if definition is not None else "your checkpoint"
-        return {"accessible": False, "reason": f"Finish {name} before starting this unit"}
+        return lesson_errors.checkpoint_locked(definition).as_payload()
 
     if getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
         if allowed:
             return {"accessible": True}
-        return {"accessible": False, "reason": reason}
+        return lesson_errors.trial_locked(reason).as_payload()
 
     student_group_ids_list = [r[0] for r in db.query(GroupStudent.group_id).filter(
         GroupStudent.student_id == current_user.id
@@ -1497,19 +1494,15 @@ def check_lesson_access(
         if current_program_week is not None:
             module_week = module.week_number if getattr(module, "week_number", None) is not None else (module.order_index + 1)
             if module_week > current_program_week:
-                return {
-                    "accessible": False,
-                    "reason": f"This module opens in week {module_week}. Current week: {current_program_week}."
-                }
+                return lesson_errors.module_not_released(
+                    module_week, current_program_week
+                ).as_payload()
 
     cap_blocked, cap_reason = lesson_blocked_by_special_cap(
         current_user.id, course_id, lesson_id, db
     )
     if cap_blocked:
-        return {
-            "accessible": False,
-            "reason": cap_reason or "Lesson not available for your group",
-        }
+        return lesson_errors.group_cap(cap_reason).as_payload()
 
     # First, find ALL lessons that redirect to this one
     redirect_sources = db.query(Lesson).filter(Lesson.next_lesson_id == lesson_id).all()
@@ -1609,19 +1602,13 @@ def check_lesson_access(
             all_prev_steps_completed = all(s.id in completed_step_ids for s in required_prev_steps)
             if not all_prev_steps_completed:
                 logger.debug(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} ({prev_lesson.title}) not completed")
-                return {
-                    "accessible": False,
-                    "reason": f"Please complete the previous lesson: {prev_lesson.title} (Module {module.id}, Index {current_lesson_idx})"
-                }
+                return lesson_errors.previous_lesson_incomplete(prev_lesson.title).as_payload()
         
         # CRITICAL FIX: If previous lesson has a next_lesson_id that points elsewhere,
         # DO NOT unlock this lesson linearly.
         if prev_lesson.next_lesson_id and prev_lesson.next_lesson_id != lesson_id:
             logger.debug(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} redirects to {prev_lesson.next_lesson_id}, not {lesson_id}")
-            return {
-                "accessible": False,
-                "reason": "This lesson is not in the sequential path."
-            }
+            return lesson_errors.not_in_sequence().as_payload()
         
         return {"accessible": True}
     
@@ -1638,10 +1625,7 @@ def check_lesson_access(
                 check = required if required else prev_lesson_steps
                 all_steps_completed = all(s.id in completed_step_ids for s in check)
                 if not all_steps_completed:
-                    return {
-                        "accessible": False,
-                        "reason": f"Please complete all lessons in module: {prev_module.title}"
-                    }
+                    return lesson_errors.previous_module_incomplete(prev_module.title).as_payload()
         
         return {"accessible": True}
     
@@ -1779,15 +1763,15 @@ def get_lesson_steps(
     """Get all steps for a lesson"""
     lesson = db.query(Lesson).filter(Lesson.id == lesson_id).first()
     if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
+        raise lesson_errors.lesson_not_found()
     
     # Get course through module and check access
     module = db.query(Module).filter(Module.id == lesson.module_id).first()
     if not module:
-        raise HTTPException(status_code=404, detail="Module not found for this lesson")
+        raise lesson_errors.lesson_not_found()
     
     if not check_course_access(module.course_id, current_user, db):
-        raise HTTPException(status_code=403, detail="Access denied to this lesson")
+        raise lesson_errors.course_access_denied()
     from src.checkpoints.service import (
         assert_student_may_view_checkpoint_lesson, assert_student_not_blocked_by_checkpoint,
     )
