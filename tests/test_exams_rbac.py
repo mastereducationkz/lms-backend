@@ -132,7 +132,7 @@ def _ids(rows):
 def _list(user, db, **kw):
     params = dict(exam_type="sat", group_id=None, date_field="planned",
                   date_from=None, date_to=None, exact_date=None,
-                  status=None, search=None, limit=200, offset=0,
+                  status=None, search=None, marketing_only=False, limit=200, offset=0,
                   current_user=user, db=db)
     params.update(kw)
     return list_exam_results(**params)
@@ -224,6 +224,7 @@ def test_staff_with_no_groups_exports_an_empty_workbook_not_everything(db, world
     resp = export_exam_results(
         exam_type="sat", group_id=None, date_field="planned",
         date_from=None, date_to=None, exact_date=None, status=None, search=None,
+        marketing_only=False,
         current_user=lonely, db=db,
     )
     assert resp.body[:2] == b"PK"
@@ -256,6 +257,7 @@ def test_export_cannot_reach_rows_the_grid_hides(db, world):
         export_exam_results(
             exam_type="sat", group_id=world["g_b"].id, date_field="planned",
             date_from=None, date_to=None, exact_date=None, status=None, search=None,
+            marketing_only=False,
             current_user=world["t_a"], db=db,
         )
     assert exc.value.status_code == 403
@@ -267,6 +269,7 @@ def test_export_is_denied_for_non_staff(db, world):
         export_exam_results(
             exam_type="sat", group_id=None, date_field="planned",
             date_from=None, date_to=None, exact_date=None, status=None, search=None,
+            marketing_only=False,
             current_user=student, db=db,
         )
     assert exc.value.status_code == 403
@@ -276,6 +279,7 @@ def test_export_produces_a_workbook_for_an_authorized_user(db, world):
     resp = export_exam_results(
         exam_type="sat", group_id=None, date_field="planned",
         date_from=None, date_to=None, exact_date=None, status=None, search=None,
+        marketing_only=False,
         current_user=world["c_a"], db=db,
     )
     # XLSX files are ZIP archives; check the magic bytes rather than trusting status.

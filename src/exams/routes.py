@@ -34,7 +34,13 @@ from src.auth.models import UserInDB
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
 from src.exams.bluebook_pdf import BluebookReportError, names_are_similar, parse_report_pdf
-from src.exams.models import BluebookResult, ExamResult
+from src.exams.marketing import (
+    BASIS_SCORE,
+    eligible_student_ids as marketing_eligible_student_ids,
+    marketing_basis,
+    marketing_threshold,
+)
+from src.exams.models import BluebookResult, ExamResult, StudentTestimonial
 from src.exams.schemas import (
     ExamResultCreate,
     ExamResultOut,
@@ -205,11 +211,19 @@ def _collect_result_rows(
     search: Optional[str],
     limit: int,
     offset: int,
+    marketing_only: bool = False,
 ) -> List[ExamResultRow]:
     """Shared row builder for the grid and its export.
 
     The export calls this with the same arguments the screen used, so the two can never
     diverge on either filtering or authorization.
+
+    ``marketing_only`` narrows to students with a non-empty marketing basis, and does so
+    BEFORE limit/offset - unlike the planned-date filters, which sieve the fetched page.
+    It has to: eligible students are a small minority scattered through the alphabet, so
+    paging first would show "the eligible students among the first ``limit``" and hand
+    the export, which pages with a different limit, a different set again - with neither
+    the screen nor the sheet saying anything had been cut.
     """
     student_ids = _scoped_student_ids(db, user, group_id=group_id)
     if student_ids is not None and not student_ids:
@@ -225,6 +239,13 @@ def _collect_result_rows(
     if search:
         like = f"%{search.strip()}%"
         student_query = student_query.filter(UserInDB.name.ilike(like))
+    if marketing_only:
+        # Judged over the whole row scope, with the same rule the per-row basis uses, so
+        # limit/offset page ELIGIBLE students.
+        eligible_ids = marketing_eligible_student_ids(db, exam_type, student_ids)
+        if not eligible_ids:
+            return []
+        student_query = student_query.filter(UserInDB.id.in_(sorted(eligible_ids)))
 
     students = student_query.order_by(UserInDB.name).offset(offset).limit(limit).all()
     if not students:
@@ -233,6 +254,26 @@ def _collect_result_rows(
     ids = [s.id for s in students]
     contacts = exam_services.resolve_student_contacts(db, ids)
     planned = exam_services.resolve_planned_dates(db, ids, exam_type)
+
+    # One testimonial per student (unique constraint), loaded in one query for the page.
+    # Only its is_marketing_ready flag feeds the row; the material itself stays behind
+    # the testimonials endpoints and their narrower role gate.
+    testimonials = {
+        t.student_id: t
+        for t in db.query(StudentTestimonial)
+        .filter(StudentTestimonial.student_id.in_(ids))
+        .all()
+    }
+    threshold = marketing_threshold(exam_type)
+
+    # The current attempt as the rest of the app defines it: newest non-superseded,
+    # NON-REJECTED. Deliberately a separate query from the grid's, because the grid's
+    # ``result`` is a DISPLAY row - it keeps rejected attempts (so a curator can see the
+    # rejection) and is narrowed further by the status / actual-date filters. Judging
+    # marketing eligibility on that row would make a rejected or out-of-window re-sit
+    # mask the student's real outcome in both directions: a rejected 1150 hiding a
+    # verified 1500, or a March 1450 qualifying a student whose current attempt is 1300.
+    current_attempts = exam_services.latest_results_by_student(db, ids, exam_type)
 
     result_query = db.query(ExamResult).filter(
         ExamResult.student_id.in_(ids),
@@ -281,6 +322,20 @@ def _collect_result_rows(
         if contact is None:
             continue
 
+        # Derived from the student's CURRENT attempt - not from ``result``, which is the
+        # display row and may be a rejected or filtered-to-a-window attempt - and the
+        # testimonial, so the two grounds (score without consent vs a consented
+        # testimonial) stay separable.
+        current_attempt = current_attempts.get(s.id)
+        basis = marketing_basis(exam_type, current_attempt, testimonials.get(s.id))
+        # Redundant after the pre-paging narrowing above (both read the same rule off the
+        # same current attempt), kept so the row-level verdict stays the authority.
+        if marketing_only and not basis:
+            continue
+        # Name the qualifying sitting, so a sheet or tooltip can say WHICH attempt cleared
+        # the threshold; it may not be the one this row displays.
+        qualifying = current_attempt if BASIS_SCORE in basis else None
+
         group_id_value, group_name = group_names.get(s.id, (None, None))
         student_attempts = attempts_by_student.get(s.id, [])
 
@@ -314,6 +369,11 @@ def _collect_result_rows(
                 ExamResultOut.model_validate(exam_services._with_proof_flag(a))
                 for a in reversed(student_attempts)
             ],
+            marketing_eligible=bool(basis),
+            marketing_basis=basis,
+            marketing_threshold=threshold,
+            marketing_score=qualifying.total_score if qualifying else None,
+            marketing_test_date=qualifying.test_date if qualifying else None,
         ))
     return rows
 
@@ -369,18 +429,32 @@ def list_exam_results(
     ),
     status: Optional[str] = Query(None, pattern="^(reported|verified|rejected)$"),
     search: Optional[str] = None,
+    marketing_only: bool = Query(
+        False,
+        description="Only rows the sales team may use: the current attempt is above the "
+                    "exam's marketing threshold (SAT > 1400) OR an approved, consented "
+                    "testimonial exists. Applied before limit/offset, so a page holds "
+                    "``limit`` eligible students rather than the eligible ones among the "
+                    "first ``limit`` students.",
+    ),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
-    """Authorized, row-scoped exam-results grid with contact details."""
+    """Authorized, row-scoped exam-results grid with contact details.
+
+    Same role gate for ``marketing_only``: the score is already visible to every reader,
+    and the testimonial basis only says that a consented testimonial exists - the
+    material itself stays behind the testimonials endpoints.
+    """
     _require(current_user, _READ_ROLES)
     return _collect_result_rows(
         db, current_user,
         exam_type=exam_type, group_id=group_id, date_field=date_field,
         date_from=date_from, date_to=date_to, exact_date=exact_date,
         status=status, search=search, limit=limit, offset=offset,
+        marketing_only=marketing_only,
     )
 
 
@@ -394,6 +468,10 @@ def export_exam_results(
     exact_date: Optional[date] = None,
     status: Optional[str] = Query(None, pattern="^(reported|verified|rejected)$"),
     search: Optional[str] = None,
+    marketing_only: bool = Query(
+        False,
+        description="Same meaning as on GET /results: only marketing-eligible rows.",
+    ),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db),
 ):
@@ -409,6 +487,7 @@ def export_exam_results(
         exam_type=exam_type, group_id=group_id, date_field=date_field,
         date_from=date_from, date_to=date_to, exact_date=exact_date,
         status=status, search=search, limit=5000, offset=0,
+        marketing_only=marketing_only,
     )
     buffer = build_exam_results_workbook(rows, exam_type=exam_type)
     filename = f"exam-results_{exam_type}_{date.today().isoformat()}.xlsx"
