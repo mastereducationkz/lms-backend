@@ -59,7 +59,7 @@ def test_enabled_group_lists_all_with_status_and_auto_opens(db):
     assert out["enabled"] is True
     assert [(i["number"], i["status"]) for i in out["items"]] == [(1, "available"), (2, "locked")]
     assert out["items"][0]["deadline"] is not None and out["items"][0]["quiz"] is not None
-    assert out["items"][1]["locked_reason"].startswith("Locked — waiting for")
+    assert out["items"][1]["locked_reason"].startswith("Waiting for")
 
 
 def test_staff_forbidden(db):

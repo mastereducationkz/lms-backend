@@ -127,7 +127,7 @@ def locked_reason(units: List[Dict[str, Any]]) -> Optional[str]:
     missing = [u["title"] or f"lesson {u['lesson_id']}" for u in units if not u["completed"]]
     if not missing:
         return None
-    return "Locked — waiting for " + ", ".join(missing)
+    return "Waiting for " + ", ".join(missing)
 
 
 # ---------------------------------------------------------------- batched context

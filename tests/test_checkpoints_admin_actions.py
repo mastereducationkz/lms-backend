@@ -138,7 +138,7 @@ def test_serialize_for_student_locked_and_open(db):
     complete_lesson_explicit(db, s1, course, db.get(type(quiz_lesson), v[0].lesson_id))
     item = service.serialize_for_student(db, s1.id, group, d1, None)
     assert item["status"] == "locked" and item["number"] == 1 and item["total_questions"] == 45
-    assert item["locked_reason"].startswith("Locked — waiting for")
+    assert item["locked_reason"].startswith("Waiting for")
     assert item["quiz"] is None and len(item["covers"]) == 3
     row = service.open_for_students(db, group=group, definition=d1, student_ids=[s1.id], actor_id=admin.id)[0]
     item = service.serialize_for_student(db, s1.id, group, d1, row)

@@ -90,7 +90,7 @@ def test_unit_progress_and_locked_reason(db):
     units = service.unit_progress(db, s.id, d1)
     assert [(u["lesson_id"], u["kind"], u["completed"]) for u in units] == [
         (v[0].id, "verbal", True), (v[1].id, "verbal", False), (m[0].id, "math", False)]
-    assert service.locked_reason(units) == "Locked — waiting for Unit 2: Verbal, Unit 1: Math"
+    assert service.locked_reason(units) == "Waiting for Unit 2: Verbal, Unit 1: Math"
     for l in (v[1], m[0]):
         complete_lesson_explicit(db, s, course, l)
     assert service.locked_reason(service.unit_progress(db, s.id, d1)) is None
