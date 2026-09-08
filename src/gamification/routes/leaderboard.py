@@ -142,6 +142,13 @@ def get_curator_groups(
         )
         sched_bounds = {gid: (first, last) for gid, first, last in rows}
 
+    # A finished group is not closed the moment its last lesson starts, and stays open for
+    # everyone until the first Wednesday 23:59 Almaty after it ends. `closes_at` carries that
+    # pending date so the picker can say «Закроется …» instead of silently dropping the group.
+    from src.services.group_completion_service import get_groups_close_deadlines
+
+    close_deadlines = get_groups_close_deadlines(db, group_ids) if group_ids else {}
+
     # One course per group (first active access) and lesson counts per course
     course_by_group = {}
     if group_ids:
@@ -230,6 +237,7 @@ def get_curator_groups(
             is_active=group.is_active,
             is_special=group.is_special,
             is_over=group.is_over,
+            closes_at=close_deadlines.get(group.id),
             group_type=getattr(group, "group_type", None) or "group",
             program_type=getattr(group, "program_type", None) or "general_english",
             weekly_set_week_offset=getattr(group, "weekly_set_week_offset", 0) or 0,

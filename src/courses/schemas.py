@@ -23,6 +23,12 @@ class GroupSchema(BaseModel):
     is_active: bool
     is_special: bool = False
     is_over: bool = False
+    # When the grace period after the last lesson expires — the first Wednesday 23:59:59
+    # Almaty strictly after it ends, as naive UTC. None while the group still has lessons to
+    # teach. Non-null with is_over=False is a group inside the window: open to everyone,
+    # closing on that date. Computed server-side (src/services/group_completion_service.py)
+    # so the browser never has to reimplement the Wednesday rule.
+    closes_at: Optional[datetime] = None
     group_type: GroupTypeLiteral = "group"
     program_type: ProgramTypeLiteral = "general_english"
     weekly_set_week_offset: int = 0
