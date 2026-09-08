@@ -34,7 +34,12 @@ from src.auth.models import UserInDB
 from src.config import get_db
 from src.courses.models import Group, GroupStudent
 from src.exams.bluebook_pdf import BluebookReportError, names_are_similar, parse_report_pdf
-from src.exams.marketing import marketing_basis, marketing_threshold
+from src.exams.marketing import (
+    BASIS_SCORE,
+    eligible_student_ids as marketing_eligible_student_ids,
+    marketing_basis,
+    marketing_threshold,
+)
 from src.exams.models import BluebookResult, ExamResult, StudentTestimonial
 from src.exams.schemas import (
     ExamResultCreate,
@@ -213,10 +218,12 @@ def _collect_result_rows(
     The export calls this with the same arguments the screen used, so the two can never
     diverge on either filtering or authorization.
 
-    ``marketing_only`` narrows to rows with a non-empty marketing basis. Like the
-    planned-date filters it is applied WITHIN the fetched page - students are paged
-    first, then filtered - so a page can come back shorter than ``limit`` without being
-    the last one.
+    ``marketing_only`` narrows to students with a non-empty marketing basis, and does so
+    BEFORE limit/offset - unlike the planned-date filters, which sieve the fetched page.
+    It has to: eligible students are a small minority scattered through the alphabet, so
+    paging first would show "the eligible students among the first ``limit``" and hand
+    the export, which pages with a different limit, a different set again - with neither
+    the screen nor the sheet saying anything had been cut.
     """
     student_ids = _scoped_student_ids(db, user, group_id=group_id)
     if student_ids is not None and not student_ids:
@@ -232,6 +239,13 @@ def _collect_result_rows(
     if search:
         like = f"%{search.strip()}%"
         student_query = student_query.filter(UserInDB.name.ilike(like))
+    if marketing_only:
+        # Judged over the whole row scope, with the same rule the per-row basis uses, so
+        # limit/offset page ELIGIBLE students.
+        eligible_ids = marketing_eligible_student_ids(db, exam_type, student_ids)
+        if not eligible_ids:
+            return []
+        student_query = student_query.filter(UserInDB.id.in_(sorted(eligible_ids)))
 
     students = student_query.order_by(UserInDB.name).offset(offset).limit(limit).all()
     if not students:
@@ -312,9 +326,15 @@ def _collect_result_rows(
         # display row and may be a rejected or filtered-to-a-window attempt - and the
         # testimonial, so the two grounds (score without consent vs a consented
         # testimonial) stay separable.
-        basis = marketing_basis(exam_type, current_attempts.get(s.id), testimonials.get(s.id))
+        current_attempt = current_attempts.get(s.id)
+        basis = marketing_basis(exam_type, current_attempt, testimonials.get(s.id))
+        # Redundant after the pre-paging narrowing above (both read the same rule off the
+        # same current attempt), kept so the row-level verdict stays the authority.
         if marketing_only and not basis:
             continue
+        # Name the qualifying sitting, so a sheet or tooltip can say WHICH attempt cleared
+        # the threshold; it may not be the one this row displays.
+        qualifying = current_attempt if BASIS_SCORE in basis else None
 
         group_id_value, group_name = group_names.get(s.id, (None, None))
         student_attempts = attempts_by_student.get(s.id, [])
@@ -352,6 +372,8 @@ def _collect_result_rows(
             marketing_eligible=bool(basis),
             marketing_basis=basis,
             marketing_threshold=threshold,
+            marketing_score=qualifying.total_score if qualifying else None,
+            marketing_test_date=qualifying.test_date if qualifying else None,
         ))
     return rows
 
@@ -411,7 +433,9 @@ def list_exam_results(
         False,
         description="Only rows the sales team may use: the current attempt is above the "
                     "exam's marketing threshold (SAT > 1400) OR an approved, consented "
-                    "testimonial exists. Applied within the fetched page.",
+                    "testimonial exists. Applied before limit/offset, so a page holds "
+                    "``limit`` eligible students rather than the eligible ones among the "
+                    "first ``limit`` students.",
     ),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),

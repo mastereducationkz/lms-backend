@@ -153,6 +153,9 @@ def test_sat_above_1400_is_eligible_on_score_alone(db, world):
     assert row.marketing_eligible is True
     assert row.marketing_basis == [BASIS_SCORE]
     assert row.marketing_threshold == 1400
+    # The qualifying sitting is named, so a sheet or tooltip can say WHICH attempt it was.
+    assert row.marketing_score == Decimal("1410")
+    assert row.marketing_test_date == date(2026, 6, 6)
 
 
 def test_exactly_1400_is_not_eligible(db, world):
@@ -188,6 +191,25 @@ def test_below_threshold_with_a_consented_testimonial_is_eligible_on_testimonial
     row = _row_for(world["curator"], db, s)
     assert row.marketing_eligible is True
     assert row.marketing_basis == [BASIS_TESTIMONIAL]
+    # Nothing qualified on score, so no attempt is named.
+    assert row.marketing_score is None
+    assert row.marketing_test_date is None
+
+
+def test_a_testimonial_alone_qualifies_a_student_with_no_result_at_all(db, world):
+    """The one eligibility shape with no ExamResult behind it: a student who gave a
+    consented quote but never reported a score. It is a real row on this screen, and the
+    row whose verdict moved from a client-side testimonial lookup to the server."""
+    s = world["student"]("quote-no-score")
+    _testimonial(db, s)
+
+    row = _row_for(world["curator"], db, s)
+    assert row.result is None
+    assert row.marketing_eligible is True
+    assert row.marketing_basis == [BASIS_TESTIMONIAL]
+
+    ids = {r.student.student_id for r in _rows(world["curator"], db, marketing_only=True)}
+    assert s.id in ids
 
 
 def test_above_threshold_with_a_testimonial_reports_both_bases(db, world):
@@ -348,6 +370,25 @@ def test_marketing_only_returns_exactly_the_eligible_rows(db, world):
     assert ids == {people["both"].id, people["score"].id, people["quote"].id}
 
 
+def test_marketing_only_pages_eligible_students_not_the_eligible_ones_on_page_one(db, world):
+    """The filter runs BEFORE limit/offset. Eligible students are a small minority
+    scattered through the alphabet, so paging first would show "the eligible students
+    among the first ``limit``" - and hand the export, which pages with a different limit,
+    a different set again, with neither screen nor sheet saying anything was cut."""
+    for tag in ("aaa1", "aaa2", "aaa3"):
+        _result(db, world["student"](tag), total=1200)
+    late = world["student"]("zzz")            # sorts last, and is the only eligible one
+    _result(db, late, total=1500)
+
+    rows = _rows(world["curator"], db, marketing_only=True, limit=2)
+    assert [r.student.student_id for r in rows] == [late.id]
+
+    # ...and the export, which uses its own larger limit, lists exactly the same student.
+    ws = _export(world["curator"], db, marketing_only=True)
+    names = {ws.cell(row=i, column=1).value for i in range(2, ws.max_row + 1)}
+    assert names == {"mk Student zzz"}
+
+
 def test_without_marketing_only_every_row_is_returned(db, world):
     people = _seed_mix(db, world)
 
@@ -385,10 +426,30 @@ def test_export_has_a_marketing_column_with_the_bases_spelled_out(db, world):
         ws.cell(row=i, column=1).value: (ws.cell(row=i, column=col).value or "")
         for i in range(2, ws.max_row + 1)
     }
-    assert by_name["mk Student both"] == "балл > 1400, отзыв"
-    assert by_name["mk Student score"] == "балл > 1400"
+    assert by_name["mk Student both"] == "балл > 1400 (1450, 2026-06-06), отзыв"
+    assert by_name["mk Student score"] == "балл > 1400 (1410, 2026-06-06)"
     assert by_name["mk Student quote"] == "отзыв"
     assert by_name["mk Student none"] == ""
+
+
+def test_the_export_names_the_attempt_the_score_basis_was_granted_on(db, world):
+    """The verdict is judged on the CURRENT attempt while the Test date and Total cells
+    beside it show the display attempt, which a status or date filter may have narrowed
+    to a different sitting. The screen explains that in a tooltip; a workbook has to say
+    it in the cell, or the row reads as a contradiction."""
+    s = world["student"]("resit")
+    _result(db, s, total=1500, test_date=date(2026, 3, 14), status="verified")
+    _result(db, s, total=1150, test_date=date(2026, 6, 6), status="rejected")
+
+    ws = _export(world["curator"], db)
+    headers = [c.value for c in ws[1]]
+    i = next(r for r in range(2, ws.max_row + 1)
+             if ws.cell(row=r, column=1).value == "mk Student resit")
+    # The row displays the rejected June re-sit...
+    assert ws.cell(row=i, column=headers.index("Total") + 1).value == 1150
+    # ...while the March 1500 is what made the student marketing-eligible, and says so.
+    assert ws.cell(row=i, column=headers.index("Маркетинг") + 1).value == \
+        "балл > 1400 (1500, 2026-03-14)"
 
 
 def test_export_honours_marketing_only(db, world):

@@ -9,6 +9,7 @@ formula in a curator's spreadsheet.
 Phone numbers and Telegram tags are written as text, not numbers, so a leading ``+``
 survives and long digit strings are not reformatted into scientific notation.
 """
+from decimal import Decimal
 from io import BytesIO
 from typing import List
 
@@ -37,13 +38,31 @@ def _text_cell(ws, row: int, col: int, value):
     return cell
 
 
+def _score_text(value: Decimal) -> str:
+    """'1450', not '1450.00' - and '8.5' stays '8.5'. Scores are Numeric(6,2)."""
+    number = Decimal(value)
+    integral = number.to_integral_value()
+    return str(int(integral)) if number == integral else str(number.normalize())
+
+
 def _marketing_label(row: ExamResultRow) -> str:
-    """Why the row may be used in marketing: 'балл > 1400', 'отзыв', both joined by
-    ', ', or '' when it may not. Spelled out per basis because a bare score carries no
-    consent record - 'отзыв' is the only ground that permits using name or photo."""
+    """Why the row may be used in marketing: 'балл > 1400 (1450, 2026-12-06)', 'отзыв',
+    both joined by ', ', or '' when it may not.
+
+    Spelled out per basis because a bare score carries no consent record - 'отзыв' is the
+    only ground that permits using a name or photo. The qualifying attempt is NAMED
+    because the verdict is judged on the student's current attempt while the Test date and
+    Total cells beside it show the display attempt, which a status or date filter may have
+    narrowed to a different sitting; without the score and date here the row could read
+    'Test date 2026-10-03 | Total 1350 | балл > 1400' and look self-contradictory. The
+    screen has a tooltip for this; a workbook has to carry the explanation in the cell.
+    """
     parts = []
     if BASIS_SCORE in row.marketing_basis:
-        parts.append(f"балл > {row.marketing_threshold}")
+        attempt = ""
+        if row.marketing_score is not None and row.marketing_test_date is not None:
+            attempt = f" ({_score_text(row.marketing_score)}, {row.marketing_test_date.isoformat()})"
+        parts.append(f"балл > {row.marketing_threshold}{attempt}")
     if BASIS_TESTIMONIAL in row.marketing_basis:
         parts.append("отзыв")
     return ", ".join(parts)
@@ -117,6 +136,8 @@ def build_exam_results_workbook(rows: List[ExamResultRow], *, exam_type: str) ->
     ws.column_dimensions["A"].width = 28
     for c in range(2, len(headers) + 1):
         ws.column_dimensions[get_column_letter(c)].width = 16
+    # «Маркетинг» is last and names the qualifying attempt, so it needs the room.
+    ws.column_dimensions[get_column_letter(len(headers))].width = 34
 
     buffer = BytesIO()
     wb.save(buffer)

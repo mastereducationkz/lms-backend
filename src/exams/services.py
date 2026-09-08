@@ -152,7 +152,7 @@ def resolve_planned_dates(db: Session, student_ids: Sequence[int], exam_type: st
 
 def latest_results_by_student(
     db: Session,
-    student_ids: Sequence[int],
+    student_ids: Optional[Sequence[int]],
     exam_type: str,
     *,
     cohort_date: Optional[date] = None,
@@ -162,20 +162,25 @@ def latest_results_by_student(
     With ``cohort_date``, returns that specific administration's result - so a grid
     filtered to "the October 3 cohort" compares like with like. Without it, returns
     the most recent non-superseded, non-rejected attempt.
+
+    ``student_ids`` of ``None`` means "every student", as opposed to an empty sequence,
+    which means nobody. Only the marketing filter uses it: it has to judge the whole
+    (possibly unrestricted) row scope before the grid pages it.
     """
-    ids = [i for i in set(student_ids) if i]
-    if not ids:
+    ids = None if student_ids is None else [i for i in set(student_ids) if i]
+    if ids is not None and not ids:
         return {}
 
     query = (
         db.query(ExamResult)
         .filter(
-            ExamResult.student_id.in_(ids),
             ExamResult.exam_type == exam_type,
             ExamResult.is_superseded == False,  # noqa: E712
             ExamResult.status != "rejected",
         )
     )
+    if ids is not None:
+        query = query.filter(ExamResult.student_id.in_(ids))
     if cohort_date is not None:
         query = query.filter(ExamResult.test_date == cohort_date)
 

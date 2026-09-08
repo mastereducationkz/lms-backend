@@ -229,6 +229,14 @@ class ExamResultRow(BaseModel):
     # The total a current attempt must exceed for this exam type; None when scores
     # never qualify on their own (IELTS, NUET).
     marketing_threshold: Optional[int] = None
+    # The attempt the ``score`` basis was granted on - the student's CURRENT attempt,
+    # which is not necessarily ``result``: the display row keeps rejected attempts and
+    # is narrowed by the status / actual-date filters. Reported so a sheet or a tooltip
+    # can name the qualifying sitting instead of only the rule it cleared, which would
+    # otherwise read as a contradiction next to a display row for a different sitting.
+    # None whenever ``score`` is not among the bases.
+    marketing_score: Optional[Decimal] = None
+    marketing_test_date: Optional[date] = None
 
 
 class BluebookResultInput(BaseModel):
