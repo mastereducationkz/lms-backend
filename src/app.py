@@ -256,12 +256,35 @@ except Exception as e:
     logging.error(f"Failed to initialize onboarding reconciler: {e}")
 
 
+def _reason_fields(exc):
+    """The machine-readable half of a `LessonAccessDenied`, for the generic envelope.
+
+    Additive only: `error`, `message` and `detail` keep the shape every existing client expects,
+    and `reason_code` is what new code branches on.
+    """
+    fields = {}
+    code = getattr(exc, "reason_code", None)
+    if isinstance(code, str) and code:
+        fields["reason_code"] = code
+    details = getattr(exc, "reason_details", None)
+    if isinstance(details, dict) and details:
+        fields["reason_details"] = details
+    return fields
+
+
 @app.exception_handler(404)
 def not_found_handler(request, exc):
-    return JSONResponse(
-        status_code=404,
-        content={"error": "Not Found", "message": "The requested resource was not found", "status_code": 404}
-    )
+    content = {"error": "Not Found", "message": "The requested resource was not found", "status_code": 404}
+    # Only a reason we wrote ourselves is forwarded. Every other 404 — a mistyped route, an
+    # internal "Module not found for this lesson" — keeps the generic body, so nothing about the
+    # server's insides reaches a student.
+    reason = _reason_fields(exc)
+    if reason:
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, str) and detail:
+            content["detail"] = detail
+        content.update(reason)
+    return JSONResponse(status_code=404, content=content)
 
 @app.exception_handler(403)
 def forbidden_handler(request, exc):
@@ -272,6 +295,7 @@ def forbidden_handler(request, exc):
     detail = getattr(exc, "detail", None)
     if isinstance(detail, str) and detail:
         content["detail"] = detail
+    content.update(_reason_fields(exc))
     return JSONResponse(status_code=403, content=content)
 
 @app.exception_handler(401)

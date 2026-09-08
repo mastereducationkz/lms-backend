@@ -31,6 +31,7 @@ from src.progress.services.lesson_completion import (
 from src.services.summary_cache import update_student_course_summary, update_summary_for_assignment
 from src.services.cache_service import cached, invalidate
 from src.utils.course_access import get_user_courses, student_has_only_special_groups
+from src.utils import lesson_access_errors as lesson_errors
 from src.utils.quiz_passing_score import resolve_quiz_passing_score_percent
 
 
@@ -1409,22 +1410,22 @@ def get_lesson_steps_progress(
 ):
     """Получить прогресс по всем шагам урока"""
     if current_user.role not in ["student", "teacher", "admin", "curator"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise lesson_errors.role_denied()
     
     # Получаем информацию об уроке с модулем одним запросом
     lesson = db.query(Lesson).options(
         joinedload(Lesson.module)
     ).filter(Lesson.id == lesson_id).first()
     if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
+        raise lesson_errors.lesson_not_found()
     
     module = lesson.module
     if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+        raise lesson_errors.lesson_not_found()
     
     # Проверяем доступ к курсу
     if not check_course_access(module.course_id, current_user, db):
-        raise HTTPException(status_code=403, detail="Access denied to this lesson")
+        raise lesson_errors.course_access_denied()
     
     # Получаем все шаги урока
     steps = db.query(Step).filter(Step.lesson_id == lesson_id).order_by(Step.order_index).all()

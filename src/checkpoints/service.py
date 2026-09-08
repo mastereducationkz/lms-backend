@@ -22,6 +22,7 @@ from src.checkpoints.models import (
 from src.courses.models import CourseGroupAccess, Group, GroupStudent, Lesson, Module, Step
 from src.progress.models import QuizAttempt
 from src.services.cache_service import invalidate
+from src.utils import lesson_access_errors as lesson_errors
 from src.utils.permissions import get_group_course_ids
 
 _log = logging.getLogger(__name__)
@@ -622,12 +623,18 @@ def student_may_view_checkpoint_lesson(db: Session, user, lesson_id: int) -> boo
     return lesson_id in open_checkpoint_lesson_ids_for_student(db, user.id)
 
 
-CHECKPOINT_LESSON_DENIED = "This checkpoint is not open for you"
-
-
 def assert_student_may_view_checkpoint_lesson(db: Session, user, lesson_id: int) -> None:
-    if not student_may_view_checkpoint_lesson(db, user, lesson_id):
-        raise HTTPException(status_code=403, detail=CHECKPOINT_LESSON_DENIED)
+    if student_may_view_checkpoint_lesson(db, user, lesson_id):
+        return
+    # Name the checkpoint and the units it is still waiting for: that list is the only thing the
+    # student can act on, and finishing it is what opens the checkpoint.
+    definition = db.query(CheckpointDefinition).filter(
+        CheckpointDefinition.quiz_lesson_id == lesson_id
+    ).first()
+    missing = []
+    if definition is not None:
+        missing = [u["title"] for u in unit_progress(db, user.id, definition) if not u["completed"]]
+    raise lesson_errors.checkpoint_not_open(definition, missing)
 
 
 def student_has_checkpoint_access_to_course(db: Session, student_id: int, course_id: int) -> bool:
@@ -744,9 +751,7 @@ def assert_student_not_blocked_by_checkpoint(db: Session, user, lesson_id: int) 
         return
     if lesson_id not in blocked_unit_lesson_ids_for_student(db, user.id):
         return
-    definition = blocking_checkpoint_for_student(db, user.id)
-    name = definition.title if definition is not None else "your checkpoint"
-    raise HTTPException(status_code=403, detail=f"Finish {name} before starting this unit")
+    raise lesson_errors.checkpoint_locked(blocking_checkpoint_for_student(db, user.id))
 
 
 # ---------------------------------------------------------------- serializers

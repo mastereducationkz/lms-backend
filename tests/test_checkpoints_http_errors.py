@@ -63,10 +63,15 @@ def test_checkpoint_denials_keep_their_reason_through_the_403_envelope(db):
     assert r.status_code == 403
     body = r.json()
     assert body["error"] == "Forbidden" and body["status_code"] == 403   # envelope untouched
-    assert body["detail"] == "Finish Checkpoint 1 before starting this unit"
+    assert body["reason_code"] == "checkpoint_locked"
+    assert body["detail"] == "Сначала пройдите «Checkpoint 1» — после неё этот юнит откроется."
+    assert body["reason_details"]["checkpoint"] == {"number": 1, "title": "Checkpoint 1"}
 
     r = c.get(f"/courses/lessons/{quiz_lessons[1].id}")             # a checkpoint that is not open
-    assert r.status_code == 403 and r.json()["detail"] == "This checkpoint is not open for you"
+    assert r.status_code == 403
+    body = r.json()
+    assert body["reason_code"] == "checkpoint_not_open"
+    assert body["detail"].startswith("Контрольная работа «Checkpoint 2» ещё не открыта.")
 
     r = c.post("/progress/quiz-attempt", json={                   # checkpoint 2 is still locked
         "step_id": quiz_steps[1].id, "course_id": course.id, "lesson_id": quiz_lessons[1].id,
