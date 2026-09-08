@@ -26,8 +26,14 @@ def test_curator_sees_only_own(db):
     assert ids == {w["s"].id}                      # not s2
 
 
-def test_backfill_baseline_hidden_but_human_completed_shown(db):
-    """Done rows with no actioner (launch backfill) are hidden; human-completed show."""
+def test_backfill_baseline_is_hidden_and_a_real_completion_closes_the_card(db):
+    """Two ways a ``done`` row leaves the board, and they are not the same thing.
+
+    The launch backfill seeded every pre-existing pair as ``done`` with no actioner; those
+    rows stay open and are filtered out because they are not achievements anyone made. A
+    genuine «Завершено» is a decision: it stamps ``completed_by`` and *closes* the cycle, so
+    the card leaves the board because the work is finished rather than because it is hidden.
+    """
     from src.curator.routes.onboarding import list_onboarding, update_onboarding, OnboardingStatusUpdate
     w = _seed(db)
     card = db.query(CuratorOnboarding).filter_by(curator_id=w["c"].id).first()
@@ -37,11 +43,16 @@ def test_backfill_baseline_hidden_but_human_completed_shown(db):
     db.flush()
     out = list_onboarding(db=db, current_user=w["c"], curator_id=None)
     assert card.student_id not in {c["student_id"] for c in out["cards"]}   # baseline hidden
-    # A genuine completion (PATCH → done) stamps completed_by, so it reappears.
-    update_onboarding(card_id=card.id, payload=OnboardingStatusUpdate(status="done"),
-                      db=db, current_user=w["c"])
-    out2 = list_onboarding(db=db, current_user=w["c"], curator_id=None)
-    assert card.student_id in {c["student_id"] for c in out2["cards"]}      # human-done shown
+    assert card.ended_at is None, "a hidden baseline row is still an open cycle"
+
+    other = db.query(CuratorOnboarding).filter_by(curator_id=w["c2"].id).first()
+    update_onboarding(card_id=other.id, payload=OnboardingStatusUpdate(status="done"),
+                      db=db, current_user=w["c2"])
+    db.refresh(other)
+    assert other.completed_by == w["c2"].id
+    assert other.ended_at is not None, "«Завершено» ends the cycle"
+    out2 = list_onboarding(db=db, current_user=w["c2"], curator_id=None)
+    assert other.student_id not in {c["student_id"] for c in out2["cards"]}
 
 
 def test_head_curator_sees_all_and_can_filter(db):

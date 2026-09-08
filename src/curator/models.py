@@ -198,8 +198,8 @@ class CuratorOnboardingEvent(Base):
     actor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     actor_name = Column(String(500), nullable=True)
     actor_role = Column(String(32), nullable=True)
-    # cycle.opened | cycle.closed | status.changed | note.added | next_action.set |
-    # group.changed | intervention
+    # cycle.opened | cycle.closed | cycle.paused | cycle.resumed | cycle.close_reversed |
+    # status.changed | note.added | next_action.set | group.changed | intervention
     action = Column(String(64), nullable=False)
     before = Column(JSON, nullable=True)
     after = Column(JSON, nullable=True)

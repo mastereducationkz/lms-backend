@@ -816,14 +816,25 @@ def push_freeze_state(
     Note what it does not do: freeze never touches LMS access. Platform access is an
     independent policy with its own rules and audit, and conflating the two would silently
     lock a paying student out of the course they can still study.
+
+    What it *does* do besides recording the state: it brings the student's onboarding cards
+    into line with it, in the same transaction. A freeze pauses them, a return resumes them,
+    and a card the reconciler had already closed because the freeze removed the membership is
+    reopened and paused — see :mod:`src.curator.onboarding_pause`, which explains why that
+    close happens first and why reversing it is the honest repair. Deriving the pause from
+    the row just written is what keeps the mirror the only source of truth for freeze.
     """
     from src.curator.freeze_mirror import upsert_freeze_state
+    from src.curator.onboarding_pause import sync_pauses_for_students
 
     results = [upsert_freeze_state(db, item.model_dump()) for item in body.items]
+    touched = {int(r["lms_student_id"]) for r in results if r.get("applied")}
+    onboarding = sync_pauses_for_students(db, touched, actor)
     db.commit()
     return {
         "applied": sum(1 for r in results if r.get("applied")),
         "skipped": sum(1 for r in results if not r.get("applied")),
+        "onboarding": onboarding,
         "results": results,
     }
 
