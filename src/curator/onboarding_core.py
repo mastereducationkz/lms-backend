@@ -9,7 +9,15 @@ Two things this module owns that nothing else may duplicate:
 
 **The cycle invariant.** At most one *open* row (``ended_at IS NULL``) per (curator,
 student). Closed rows are history and are never revived — a student returning to a previous
-curator gets a new row with the next ``cycle_no``.
+curator gets a new row with the next ``cycle_no``. A **paused** card (a frozen student, see
+:mod:`src.curator.onboarding_pause`) is still an open row and still holds that slot; it is
+merely off the board with its clocks stopped.
+
+**When a cycle ends.** Two ways, and they mean opposite things. The relationship ends and the
+card is closed by the reconciler (``relationship_ended`` / ``transferred_out``), or the
+curator finishes the job and marks «Завершено», which closes it as ``completed`` and keeps
+the status ``done``. ``done`` is not a column to park in: leaving those rows open is how 312
+finished cards came to be sitting on the board.
 
 **The thresholds.** "Overdue" is a business rule, not a UI opinion, so the numbers live in
 :data:`ONBOARDING_THRESHOLDS` and are served to the frontends over the API rather than being
@@ -65,6 +73,12 @@ END_TRANSFERRED_OUT = "transferred_out"
 END_CURATOR_DEACTIVATED = "curator_deactivated"
 END_LEGACY_CANCELLED = "legacy_cancelled"
 END_MANUAL = "manual"
+#: The curator finished the onboarding — «Завершено» closes the card. Its own reason because
+#: it is the opposite of :data:`END_RELATIONSHIP_ENDED`: nothing was lost, the work was done.
+#: A report counting how many students a curator stopped carrying must not count these, and
+#: :func:`already_onboarded_into_group` reads it to know the pair is finished rather than
+#: parted.
+END_COMPLETED = "completed"
 #: The cycle should never have been opened — see :mod:`src.curator.onboarding_repair`. Its own
 #: reason rather than ``relationship_ended`` because the relationship did not end: it never
 #: restarted, and a report counting how many students a curator lost must not include these.
@@ -221,6 +235,11 @@ def already_onboarded_into_group(
     constant; a membership written close to the cutoff is reported as "cannot tell" and is
     not vetoed).
 
+    One exception to the membership rule, for the cycle that closed *because it finished*
+    (:data:`END_COMPLETED`). There the membership is expected to still be there — the student
+    did not go anywhere — so "older than the close" says nothing, and the test becomes
+    "newer than the close, by more than the skew" before a second cycle is allowed.
+
     Narrow on every axis, on purpose:
 
     * **Only the most recent cycle.** What matters is what happened last between these two
@@ -278,6 +297,23 @@ def already_onboarded_into_group(
         return False
     joined_at = _as_naive_utc(joined[0])
     ended_at = _as_naive_utc(previous.ended_at)
+
+    if previous.end_reason == END_COMPLETED:
+        # The cycle closed because the curator finished it, not because the pair parted. The
+        # student is *expected* to still be sitting in the group the onboarding settled them
+        # into, so the age of their membership proves nothing on its own and the default has
+        # to flip: veto unless the roster row is clearly **newer** than the close, which is
+        # the only thing that can mean they left and came back.
+        #
+        # The ambiguous band leans the other way here for a reason. Failing to open a card
+        # for a student who re-enrolled within hours of being marked «Завершено» costs one
+        # card; opening one for every student a curator has just finished would put the whole
+        # «Завершено» column straight back into «Новые», which is the failure this rule and
+        # the repair command exist to end.
+        if joined_at is None or ended_at is None:
+            return True
+        return joined_at <= ended_at + _MEMBERSHIP_CLOCK_SKEW
+
     if joined_at is None or ended_at is None:
         # A membership with no timestamp cannot be placed either side of the close. External
         # CRM inserts do produce these; treat the unknown as "may be a genuine return".
@@ -373,12 +409,18 @@ def close_cycle(
     A cycle that reached ``done`` keeps that status — the onboarding genuinely finished and
     the history must say so. One still in flight becomes ``cancelled``, which is what the
     original reconciler did and what every existing report expects to see.
+
+    A pause still running is settled into ``paused_seconds`` on the way out, so a closed
+    card's totals are final and do not keep growing against a pause nobody will ever lift.
     """
     if row.ended_at is not None:
         return False
     actor = actor or OnboardingActor.system()
     before = {"status": row.status, "ended_at": None}
     now = _utcnow()
+    if row.paused_at is not None:
+        row.paused_seconds = int(paused_seconds_total(row, now))
+        row.paused_at = None
     row.ended_at = now
     row.end_reason = reason
     if row.status in ACTIVE_STATUSES:
@@ -541,7 +583,9 @@ def reconcile_onboarding(db: Session, actor: Optional[OnboardingActor] = None) -
 
     * relationship appears and no cycle is open → open one (``new``)
     * relationship persists → refresh the display group only
-    * relationship disappears → close the open cycle
+    * relationship disappears → close the open cycle **unless the student is frozen on that
+      group**, in which case the card pauses: a freeze deletes the membership, so absence is
+      the expected state and closing it would throw away the curator's work
     * relationship reappears later → a *new* cycle, never a revived historical row
 
     Only one process performs the sweep at a time (see :func:`_try_acquire_sweep_lock`);
@@ -551,7 +595,14 @@ def reconcile_onboarding(db: Session, actor: Optional[OnboardingActor] = None) -
 
     if not _try_acquire_sweep_lock(db):
         logger.info("onboarding reconcile skipped: another worker holds the sweep lock")
-        return {"created": 0, "closed": 0, "regrouped": 0, "skipped": 1}
+        return {
+            "created": 0,
+            "closed": 0,
+            "regrouped": 0,
+            "paused": 0,
+            "resumed": 0,
+            "skipped": 1,
+        }
 
     try:
         return _reconcile_locked(db, actor)
@@ -560,30 +611,63 @@ def reconcile_onboarding(db: Session, actor: Optional[OnboardingActor] = None) -
 
 
 def _reconcile_locked(db: Session, actor: OnboardingActor) -> dict[str, int]:
+    from src.curator.onboarding_pause import (
+        card_is_frozen,
+        freeze_view_for,
+        pause_cycle,
+        resume_cycle,
+    )
+
     active = compute_active_pairs(db)
 
     open_rows: dict[tuple[int, int], CuratorOnboarding] = {}
     for row in db.query(CuratorOnboarding).filter(CuratorOnboarding.ended_at.is_(None)).all():
         open_rows[(int(row.curator_id), int(row.student_id))] = row
 
-    created = closed = regrouped = 0
+    # One query for every open card's student, so the freeze question below is a dict lookup
+    # rather than a round trip per card.
+    frozen = freeze_view_for(db, (r.student_id for r in open_rows.values()))
+    created = closed = regrouped = paused = resumed = 0
 
     for key, group_id in active.items():
         row = open_rows.get(key)
         if row is None:
             if open_cycle(db, key[0], key[1], group_id, actor) is not None:
                 created += 1
-        elif row.group_id != group_id:
+            continue
+        if row.group_id != group_id:
             row.group_id = group_id  # keep the displayed group fresh
             regrouped += 1
+        # Asked *after* the regroup: a student who came back into a different group of the
+        # same curator is answered about the group they are actually in now, not the one
+        # they were frozen out of. Both directions, so a sweep can repair a pause the
+        # freeze-state delivery never arrived to apply — or to lift.
+        if card_is_frozen(frozen, row):
+            if pause_cycle(db, row, actor):
+                paused += 1
+        elif resume_cycle(db, row, actor):
+            resumed += 1
 
     for key, row in open_rows.items():
-        if key not in active:
-            if close_cycle(db, row, END_RELATIONSHIP_ENDED, actor):
-                closed += 1
+        if key in active:
+            continue
+        if card_is_frozen(frozen, row):
+            # The freeze removed the membership. Absence is what a freeze looks like from
+            # here, and it is not the end of the relationship.
+            if pause_cycle(db, row, actor):
+                paused += 1
+        elif close_cycle(db, row, END_RELATIONSHIP_ENDED, actor):
+            closed += 1
 
     db.commit()
-    return {"created": created, "closed": closed, "regrouped": regrouped, "skipped": 0}
+    return {
+        "created": created,
+        "closed": closed,
+        "regrouped": regrouped,
+        "paused": paused,
+        "resumed": resumed,
+        "skipped": 0,
+    }
 
 
 def reconcile_student(
@@ -595,8 +679,18 @@ def reconcile_student(
     """Reconcile one student's cards only — the cheap path after a group add/transfer.
 
     Same rules as the full sweep, restricted to a single student so a transfer does not have
-    to wait for (or pay for) the hourly organisation-wide pass.
+    to wait for (or pay for) the hourly organisation-wide pass — **including** the freeze
+    rule: the CRM calls this immediately after a freeze has removed the membership, so this
+    is the code path that would otherwise close a frozen student's card within milliseconds
+    of it being frozen.
     """
+    from src.curator.onboarding_pause import (
+        card_is_frozen,
+        freeze_view_for,
+        pause_cycle,
+        resume_cycle,
+    )
+
     actor = actor or OnboardingActor.system()
     all_pairs = compute_active_pairs(db)
     active = {k: v for k, v in all_pairs.items() if k[1] == int(student_id)}
@@ -610,31 +704,82 @@ def reconcile_student(
         )
         .all()
     }
+    frozen = freeze_view_for(db, [int(student_id)])
 
-    created = closed = 0
+    created = closed = paused = resumed = 0
     for key, group_id in active.items():
-        if key not in open_rows:
+        row = open_rows.get(key)
+        if row is None:
             if open_cycle(db, key[0], key[1], group_id, actor) is not None:
                 created += 1
-        elif open_rows[key].group_id != group_id:
-            open_rows[key].group_id = group_id
+            continue
+        if row.group_id != group_id:
+            row.group_id = group_id
+        if card_is_frozen(frozen, row):
+            if pause_cycle(db, row, actor):
+                paused += 1
+        elif resume_cycle(db, row, actor):
+            resumed += 1
 
     for key, row in open_rows.items():
-        if key not in active:
-            if close_cycle(db, row, END_TRANSFERRED_OUT, actor):
-                closed += 1
+        if key in active:
+            continue
+        if card_is_frozen(frozen, row):
+            if pause_cycle(db, row, actor):
+                paused += 1
+        elif close_cycle(db, row, END_TRANSFERRED_OUT, actor):
+            closed += 1
 
     if commit:
         db.commit()
-    return {"created": created, "closed": closed}
+    return {"created": created, "closed": closed, "paused": paused, "resumed": resumed}
 
 
 # --- overdue ------------------------------------------------------------------------------
 
 
+def is_paused(row: CuratorOnboarding) -> bool:
+    """Is this card's clock stopped? See :mod:`src.curator.onboarding_pause`."""
+    return row.paused_at is not None
+
+
+def paused_seconds_total(row: CuratorOnboarding, now: Optional[datetime] = None) -> float:
+    """Everything this cycle has spent paused, including a pause still running.
+
+    The one place the two halves of the pause clock are added together — the settled
+    ``paused_seconds`` and the open-ended stretch since ``paused_at``. While a card is paused
+    this grows at exactly the rate wall-clock time does, which is what makes every
+    ``elapsed - paused`` expression below stand still instead of ticking.
+    """
+    now = now or _utcnow()
+    total = float(row.paused_seconds or 0)
+    started = _as_naive_utc(row.paused_at)
+    if started is not None:
+        total += max(0.0, (now - started).total_seconds())
+    return total
+
+
+def _working_elapsed(
+    row: CuratorOnboarding, anchor: Optional[datetime], now: datetime
+) -> Optional[timedelta]:
+    """Time since ``anchor`` with the paused stretches taken out, never negative."""
+    if anchor is None:
+        return None
+    elapsed = (now - anchor) - timedelta(seconds=paused_seconds_total(row, now))
+    return max(elapsed, timedelta(0))
+
+
 def is_overdue(row: CuratorOnboarding, now: Optional[datetime] = None) -> bool:
-    """Has this card breached its threshold? ``done``/closed cards never are."""
+    """Has this card breached its threshold? ``done``/closed/paused cards never are.
+
+    Paused cards are excluded twice over, and both are deliberate: the explicit check below
+    says a frozen student is nobody's overdue work *today*, and the pause arithmetic in
+    :func:`_working_elapsed` makes sure the days they were away are not counted against the
+    curator once the card comes back either.
+    """
     if row.ended_at is not None or row.status not in ACTIVE_STATUSES:
+        return False
+    if is_paused(row):
         return False
     now = now or _utcnow()
     if row.status == STATUS_NEW:
@@ -643,17 +788,23 @@ def is_overdue(row: CuratorOnboarding, now: Optional[datetime] = None) -> bool:
     else:
         anchor = _as_naive_utc(row.status_changed_at) or _as_naive_utc(row.updated_at)
         limit = IN_PROGRESS_STALE_DAYS
-    if anchor is None:
+    elapsed = _working_elapsed(row, anchor, now)
+    if elapsed is None:
         return False
-    return (now - anchor) > timedelta(days=limit)
+    return elapsed > timedelta(days=limit)
 
 
 def onboarding_age_days(row: CuratorOnboarding, now: Optional[datetime] = None) -> int:
+    """How long this card has been somebody's work — frozen days excluded.
+
+    The same reading as :func:`is_overdue`, because a card displaying «40 дней» while the
+    board refuses to call it overdue is a contradiction a curator has to resolve by guessing.
+    """
     now = now or _utcnow()
-    created = _as_naive_utc(row.created_at)
-    if created is None:
+    elapsed = _working_elapsed(row, _as_naive_utc(row.created_at), now)
+    if elapsed is None:
         return 0
-    return max(0, (now - created).days)
+    return max(0, elapsed.days)
 
 
 # --- mutations ----------------------------------------------------------------------------
@@ -695,11 +846,45 @@ def set_status(
     actor: OnboardingActor,
     commit: bool = True,
 ) -> CuratorOnboarding:
+    """Move a card, and close the cycle when it reaches «Завершено».
+
+    ``done`` is terminal, not a column to park in. It used to leave the row open until the
+    relationship itself ended, which is how 312 finished cards came to be sitting on the
+    board months after the work was done — an in-tray nobody could ever empty. Reaching
+    ``done`` now ends the cycle through the one door, :func:`close_cycle`, which keeps the
+    status ``done`` (it never rewrites a finished cycle to ``cancelled``) and records the
+    close in the history like every other.
+
+    Two consequences worth knowing before calling this:
+
+    * the card leaves the board immediately — it is closed, and the board shows open cycles;
+    * it cannot be dragged back afterwards. :func:`get_card` still finds it by id, but this
+      function refuses to move a closed cycle, so «Завершено» is a decision rather than a
+      column. A pair that genuinely starts again gets a *new* cycle, which is the invariant
+      this module has always had.
+    """
     if status not in SETTABLE_STATUSES:
         raise ValueError(f"Недопустимый статус: {status}")
     _assert_may_edit(row, actor)
+    if (
+        status == STATUS_DONE
+        and row.status == STATUS_DONE
+        and row.end_reason == END_COMPLETED
+    ):
+        # Finishing a finished card is a no-op, not an error. The CRM PATCHes on a drag and
+        # will retry a request it never saw the answer to; refusing the second one would make
+        # a dropped response look to the curator like the move had failed.
+        return row
     if row.ended_at is not None:
         raise OnboardingPermissionError("Цикл закрыт — изменение статуса невозможно")
+    if is_paused(row):
+        # The student is frozen: the card is off the board and its clocks are stopped, so
+        # there is nothing to report progress on. Refusing keeps the pause honest — a status
+        # moved mid-pause would re-anchor the overdue clock inside a stretch of time the
+        # curator was told not to work.
+        raise OnboardingPermissionError(
+            "Карточка на паузе: студент в заморозке — изменение статуса невозможно"
+        )
 
     before = {"status": row.status}
     now = _utcnow()
@@ -724,6 +909,8 @@ def set_status(
         before=before,
         after={"status": status},
     )
+    if status == STATUS_DONE:
+        close_cycle(db, row, END_COMPLETED, actor)
     if commit:
         db.commit()
         db.refresh(row)
@@ -800,17 +987,26 @@ def board_query(
     statuses: Optional[Sequence[str]] = None,
     include_closed: bool = False,
     include_baseline: bool = False,
+    include_paused: bool = False,
 ):
-    """Base query for the board, with the launch-baseline rule applied.
+    """Base query for the board, with the launch-baseline and pause rules applied.
 
     The launch backfill seeded every pre-existing pair as ``done`` with no human actioner so
     the board would start clean. Those synthetic rows must stay hidden (they are not
     achievements anyone made) while genuinely completed cards — which always have
     ``completed_by`` — still show in Завершено.
+
+    Paused cards are hidden too, and for the same kind of reason: a frozen student is not
+    work anybody can do this week. They are *open* cycles, so they still hold the pair's one
+    slot and nothing opens a second card alongside them — they are simply not on the board.
+    ``include_paused`` exists for the reads that must see the whole open set anyway (repairs,
+    diagnostics), never for a curator's screen.
     """
     q = db.query(CuratorOnboarding)
     if not include_closed:
         q = q.filter(CuratorOnboarding.ended_at.is_(None))
+    if not include_paused:
+        q = q.filter(CuratorOnboarding.paused_at.is_(None))
     q = q.filter(CuratorOnboarding.status.in_(list(statuses or BOARD_STATUSES)))
     if not include_baseline:
         q = q.filter(
@@ -834,8 +1030,15 @@ def load_board(
     statuses: Optional[Sequence[str]] = None,
     student_ids: Optional[Sequence[int]] = None,
     include_closed: bool = False,
+    include_paused: bool = False,
 ) -> list[CuratorOnboarding]:
-    q = board_query(db, curator_ids=curator_ids, statuses=statuses, include_closed=include_closed)
+    q = board_query(
+        db,
+        curator_ids=curator_ids,
+        statuses=statuses,
+        include_closed=include_closed,
+        include_paused=include_paused,
+    )
     if student_ids is not None:
         ids = [int(s) for s in student_ids]
         if not ids:
@@ -929,6 +1132,12 @@ def serialize_card(
         "completed_by": row.completed_by,
         "ended_at": row.ended_at.isoformat() if row.ended_at else None,
         "end_reason": row.end_reason,
+        # The pause is on the wire so a card fetched by id can say why it is not on the
+        # board — a detail view that showed nothing would look like a bug to the curator
+        # who bookmarked it.
+        "is_paused": is_paused(row),
+        "paused_at": row.paused_at.isoformat() if row.paused_at else None,
+        "paused_days": int(paused_seconds_total(row, now) // 86400),
         "next_action_at": row.next_action_at.isoformat() if row.next_action_at else None,
         "next_action_note": row.next_action_note,
         "age_days": onboarding_age_days(row, now),

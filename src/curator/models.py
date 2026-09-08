@@ -97,6 +97,11 @@ class CuratorOnboarding(Base):
     continues to mean what it always did (new|in_progress|done|cancelled), so every existing
     reader keeps working; ``ended_at`` is the new axis and defaults to NULL, which is exactly
     what every pre-existing row is: still open.
+
+    A **paused** cycle (``paused_at IS NOT NULL``) is an open cycle that is temporarily off
+    the board because the student is frozen. It deliberately still occupies the pair's one
+    open slot, so nothing can open a second cycle alongside it and the curator's notes and
+    status are waiting when the student comes back.
     """
     __tablename__ = "curator_onboarding"
 
@@ -121,8 +126,17 @@ class CuratorOnboarding(Base):
     # NULL == open. Set when responsibility for this student leaves this curator.
     ended_at = Column(DateTime, nullable=True)
     # Why the cycle closed: relationship_ended | transferred_out | curator_deactivated |
-    # legacy_cancelled | manual.
+    # legacy_cancelled | manual | opened_in_error | completed.
     end_reason = Column(String(64), nullable=True)
+
+    # --- pause (see :mod:`src.curator.onboarding_pause`) ---
+    # NULL == running. Set while the student is frozen: the card is still *open* — it holds
+    # the pair's one open-cycle slot — but it is off the board and its clocks have stopped.
+    paused_at = Column(DateTime, nullable=True)
+    # Seconds this cycle has already spent paused, excluding any pause still running. Every
+    # elapsed-time rule subtracts it, so a frozen student's card comes back with the age and
+    # the overdue distance it had when they left.
+    paused_seconds = Column(Integer, nullable=False, default=0, server_default="0")
 
     # --- operational fields the CRM workspace edits ---
     # When ``status`` last moved. Drives the "in_progress overdue after N days without an
@@ -184,8 +198,8 @@ class CuratorOnboardingEvent(Base):
     actor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     actor_name = Column(String(500), nullable=True)
     actor_role = Column(String(32), nullable=True)
-    # cycle.opened | cycle.closed | status.changed | note.added | next_action.set |
-    # group.changed | intervention
+    # cycle.opened | cycle.closed | cycle.paused | cycle.resumed | cycle.close_reversed |
+    # status.changed | note.added | next_action.set | group.changed | intervention
     action = Column(String(64), nullable=False)
     before = Column(JSON, nullable=True)
     after = Column(JSON, nullable=True)

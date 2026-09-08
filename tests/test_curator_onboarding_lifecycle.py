@@ -155,12 +155,19 @@ def test_returning_student_gets_a_new_cycle_not_a_revived_row(db):
 
 
 def test_close_cycle_preserves_done_but_cancels_in_flight(db):
+    """Whatever ends a cycle, a finished one keeps saying it finished.
+
+    ``done`` is written directly here rather than through ``set_status``, which would close
+    the cycle itself: this is the *other* way a finished card ends — the 312 rows that were
+    already sitting open in «Завершено» when the relationship later lapsed, and every one the
+    reconciler closes.
+    """
     curator, s1, s2 = _user(db, "curator"), _user(db, "student"), _user(db, "student")
     g = _group(db, curator)
     done = open_cycle(db, curator.id, s1.id, g.id)
     flight = open_cycle(db, curator.id, s2.id, g.id)
     db.flush()
-    set_status(db, done, STATUS_DONE, _actor(curator), commit=False)
+    done.status = STATUS_DONE
 
     assert close_cycle(db, done, END_RELATIONSHIP_ENDED) is True
     assert close_cycle(db, flight, END_RELATIONSHIP_ENDED) is True
@@ -169,6 +176,37 @@ def test_close_cycle_preserves_done_but_cancels_in_flight(db):
     assert flight.status == STATUS_CANCELLED
     # Idempotent.
     assert close_cycle(db, done, END_RELATIONSHIP_ENDED) is False
+
+
+def test_reaching_done_closes_the_cycle_as_completed(db):
+    """«Завершено» is a decision, not a column: the card leaves the board when it is made."""
+    from src.curator.onboarding_core import END_COMPLETED
+
+    curator, student = _user(db, "curator"), _user(db, "student")
+    row = open_cycle(db, curator.id, student.id, _group(db, curator).id)
+    db.flush()
+
+    set_status(db, row, STATUS_DONE, _actor(curator), commit=False)
+    db.flush()
+
+    assert row.status == STATUS_DONE, "not cancelled — the onboarding genuinely finished"
+    assert row.ended_at is not None
+    assert row.end_reason == END_COMPLETED
+    assert row.completed_by == curator.id
+    assert row.id not in {r.id for r in load_board(db, curator_ids=[curator.id])}
+
+    actions = [e.action for e in row.events]
+    assert "status.changed" in actions and "cycle.closed" in actions
+
+    # And it cannot be dragged back: a closed cycle refuses every move.
+    with pytest.raises(OnboardingPermissionError):
+        set_status(db, row, STATUS_IN_PROGRESS, _actor(curator), commit=False)
+
+    # A repeat of the same move is a no-op, though: the CRM retries a PATCH whose answer it
+    # never saw, and a second «Завершено» must not read as a failure.
+    events_before = len(row.events)
+    assert set_status(db, row, STATUS_DONE, _actor(curator), commit=False) is row
+    assert len(row.events) == events_before, "and it writes no second history row"
 
 
 # --- reconciler ---------------------------------------------------------------------------
@@ -413,9 +451,13 @@ def test_board_hides_launch_baseline_rows(db):
     baseline = open_cycle(db, curator.id, s1.id, g.id)
     real = open_cycle(db, curator.id, s2.id, g.id)
     db.flush()
+    # Both written directly: these are the *open* ``done`` rows production accumulated before
+    # «Завершено» started closing the cycle, which is exactly the pair the baseline rule has
+    # to tell apart — a synthetic seed with no actioner, and a card a human completed.
     baseline.status = STATUS_DONE
     baseline.completed_by = None
-    set_status(db, real, STATUS_DONE, _actor(curator), commit=False)
+    real.status = STATUS_DONE
+    real.completed_by = curator.id
     db.flush()
 
     ids = {r.id for r in load_board(db, curator_ids=[curator.id])}

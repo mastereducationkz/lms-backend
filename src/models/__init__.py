@@ -53,6 +53,12 @@ from src.curator.models import (
 # the name here would turn that into a circular-import error. Importing the module is
 # enough: defining the class is what registers the table on Base.metadata.
 from src.curator import access_blocks as _access_blocks  # noqa: F401
+# Same reasoning again, and it was missing: ``student_freeze_state`` existed only in the
+# Alembic revision, so a database built by ``init_db()``'s ``create_all`` — a fresh
+# deployment, or any local checkout — had no table for the freeze mirror at all. The
+# onboarding reconciler now asks it whether a student is frozen on every sweep, so a
+# metadata that does not know about it is a startup that cannot reconcile.
+from src.curator import freeze_mirror as _freeze_mirror  # noqa: F401
 from src.lesson_requests.models import LessonRequest
 from src.parents.models import ParentStudent
 from src.exams.models import ExamResult, BluebookResult, StudentTestimonial

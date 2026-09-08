@@ -19,9 +19,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from src.curator.onboarding_core import (
+    END_COMPLETED,
     END_OPENED_IN_ERROR,
     END_RELATIONSHIP_ENDED,
     STATUS_DONE,
+    STATUS_IN_PROGRESS,
     STATUS_NEW,
     OnboardingActor,
     _finished_group_ids,
@@ -239,12 +241,16 @@ def test_grace_window_students_leave_the_visibility_scope_too(db):
 
 
 def _closed_done_cycle(db, curator, student, group, *, joined_days_ago=30):
-    """A completed onboarding that was then closed — the state before a blip re-opens it."""
+    """A completed onboarding — «Завершено» closes the cycle, which is the state a blip meets.
+
+    One call does both now: ``set_status(done)`` closes the cycle as ``completed``. The
+    explicit ``close_cycle`` that used to follow it would be a no-op.
+    """
     _enrol(db, group, student, created_at=datetime.utcnow() - timedelta(days=joined_days_ago))
     first = open_cycle(db, curator.id, student.id, group.id)
     set_status(db, first, STATUS_DONE, OnboardingActor.from_user(curator), commit=False)
-    close_cycle(db, first, END_RELATIONSHIP_ENDED)
     db.flush()
+    assert first.ended_at is not None and first.end_reason == END_COMPLETED
     return first
 
 
@@ -321,10 +327,20 @@ def test_the_guard_never_vetoes_without_a_membership_row(db):
 
 
 def test_a_membership_written_within_the_skew_margin_is_not_vetoed(db):
-    """The two timestamps come from different clocks; too close to call means do not veto."""
+    """The two timestamps come from different clocks; too close to call means do not veto.
+
+    About a cycle that reached ``done`` and was then closed *because the relationship ended* —
+    every one of the cards this guard was written for, and the shape production is full of.
+    Built without ``set_status`` because that now closes a finished cycle itself, as
+    ``completed``, where the ambiguous band deliberately leans the other way (below).
+    """
     curator, student = _user(db, "curator"), _user(db, "student")
     group = _group(db, curator, lessons_count=2, lessons=_running_lessons())
-    _closed_done_cycle(db, curator, student, group)
+    _enrol(db, group, student, created_at=datetime.utcnow() - timedelta(days=30))
+    first = open_cycle(db, curator.id, student.id, group.id)
+    first.status = STATUS_DONE
+    close_cycle(db, first, END_RELATIONSHIP_ENDED)
+    db.flush()
 
     db.query(GroupStudent).filter(
         GroupStudent.group_id == group.id, GroupStudent.student_id == student.id
@@ -334,6 +350,48 @@ def test_a_membership_written_within_the_skew_margin_is_not_vetoed(db):
     db.flush()
 
     assert already_onboarded_into_group(db, curator.id, student.id, group.id) is False
+
+
+def test_a_completed_cycle_vetoes_inside_the_skew_margin(db):
+    """The same unorderable gap, the opposite answer — and deliberately so.
+
+    A cycle closed as ``completed`` was ended by the curator finishing it, not by the student
+    leaving, so the roster row is *supposed* to still be there and its age is not evidence of
+    anything. Only a membership clearly newer than the close can mean they left and came back;
+    inside the clock-skew band we cannot tell, and the safe answer is the one that does not
+    put «Завершено» straight back into «Новые».
+    """
+    curator, student = _user(db, "curator"), _user(db, "student")
+    group = _group(db, curator, lessons_count=2, lessons=_running_lessons())
+    _closed_done_cycle(db, curator, student, group)
+
+    db.query(GroupStudent).filter(
+        GroupStudent.group_id == group.id, GroupStudent.student_id == student.id
+    ).delete()
+    _enrol(db, group, student, created_at=datetime.utcnow() - timedelta(hours=1))
+    db.flush()
+
+    assert already_onboarded_into_group(db, curator.id, student.id, group.id) is True
+    assert open_cycle(db, curator.id, student.id, group.id) is None
+
+
+def test_finishing_a_card_does_not_hand_the_reconciler_a_fresh_one(db):
+    """The whole risk of «Завершено» closing the card, pinned.
+
+    Closing frees the pair's open slot, and the student is still in the group — so the very
+    next sweep would open cycle 2 for a curator who has just finished cycle 1, and the board
+    would refill overnight. :func:`already_onboarded_into_group` is what stops it.
+    """
+    curator, student = _user(db, "curator"), _user(db, "student")
+    group = _group(db, curator, lessons_count=2, lessons=_running_lessons())
+    first = _closed_done_cycle(db, curator, student, group)
+
+    reconcile_onboarding(db)
+    reconcile_onboarding(db)
+
+    rows = _cards(db, curator.id)
+    assert [r.id for r in rows] == [first.id], "no second cycle, however often it sweeps"
+    assert rows[0].status == STATUS_DONE and rows[0].ended_at is not None
 
 
 # ── the repair command ────────────────────────────────────────────────────────────────────
@@ -413,7 +471,10 @@ def test_the_repair_skips_a_card_the_curator_has_started(db, window):
     curator, student = _user(db, "curator"), _user(db, "student")
     group = _group(db, curator, lessons_count=1, lessons=_finished_lessons())
     card = _bogus_card(db, curator, student, group)
-    set_status(db, card, STATUS_DONE, OnboardingActor.from_user(curator), commit=False)
+    # «В работе», not «Завершено»: reaching ``done`` now closes the cycle, and a closed card
+    # is skipped for that reason instead. In progress is the state this rule is really about
+    # — a curator who has picked the card up and not finished.
+    set_status(db, card, STATUS_IN_PROGRESS, OnboardingActor.from_user(curator), commit=False)
     db.flush()
 
     mine = [f for f in scan(db, since=window) if f.onboarding_id == card.id]
@@ -527,7 +588,7 @@ def test_the_repair_rechecks_before_writing(db, window):
     assert [f.verdict for f in mine] == [VERDICT_CLOSE]
 
     # A curator picks the card up between the report and the --apply.
-    set_status(db, card, STATUS_DONE, OnboardingActor.from_user(curator), commit=False)
+    set_status(db, card, STATUS_IN_PROGRESS, OnboardingActor.from_user(curator), commit=False)
     db.flush()
 
     assert apply_repair(db, mine, since=window) == []

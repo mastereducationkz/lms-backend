@@ -195,6 +195,19 @@ class FreezeIndex:
         """
         return any(is_within_freeze(row, day) for row in self._matching(user_id, group_id))
 
+    def is_frozen_now(self, user_id: int, group_id: Optional[int]) -> bool:
+        """Is this enrollment frozen *as a state*, with no date arithmetic at all?
+
+        The sibling of :meth:`is_frozen_on`, and the difference matters. That one asks about
+        a **day** — it decides whether one lesson counts — so it consults ``freeze_start`` and
+        the resume date. This one asks about **now**, which is what a badge or a board needs:
+        the CRM has decided this enrollment is suspended, and the membership is already gone
+        whatever the dates say. Asking the dated question here would leave a freeze whose
+        start is still in the future reading as running, while the student has already been
+        taken off the roster it names.
+        """
+        return any(row.is_frozen for row in self._matching(user_id, group_id))
+
     def badge_for(
         self, user_id: int, group_id: Optional[int] = None, *, for_student: bool = False
     ) -> Optional[dict[str, Any]]:
