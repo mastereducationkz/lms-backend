@@ -330,7 +330,7 @@ def render_table(findings: list[Finding]) -> str:
     """
     headers = [
         "card", "curator", "student", "group", "cycle",
-        "status", "completed", "by", "live", "reopens", "verdict",
+        "status", "completed", "by", "live in", "reopens", "verdict",
     ]
     rows = [
         [
@@ -342,7 +342,7 @@ def render_table(findings: list[Finding]) -> str:
             f.status,
             (f.completed_at or "—")[:19],
             str(f.completed_by or "—"),
-            (str(f.live_group_id) if f.pair_is_live else "no"),
+            (str(f.live_group_id) if f.pair_is_live else "—"),
             "YES" if f.reopens else "no",
             f.verdict,
         ]
@@ -434,7 +434,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         if not args.apply:
             if not args.json:
-                print("\nDRY RUN — nothing was written. Re-run with --apply to close them.")
+                closable = sum(1 for f in findings if f.is_actionable)
+                print(
+                    "\nDRY RUN — nothing was written."
+                    + (" Re-run with --apply to close them." if closable else "")
+                )
             return 0
 
         actor = None
