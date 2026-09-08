@@ -1379,6 +1379,23 @@ def get_lesson(
 
 
 
+# Every "you may not open this lesson" answer below carries a `lock` object alongside the legacy
+# `reason` string. The server is the only place that knows *which* gate fired, and it can name the
+# lesson even when the student has no access to its course at all (the client can't — the lesson
+# isn't in any module listing it can see). `reason` is left exactly as it was for existing callers.
+def _locked(lesson, kind: str, reason: str, steps: list) -> dict:
+    return {
+        "accessible": False,
+        "reason": reason,
+        "lock": {
+            "unit_title": getattr(lesson, "title", None),
+            "kind": kind,
+            "reason": reason,
+            "steps": steps,
+        },
+    }
+
+
 @router.get("/lessons/{lesson_id}/check-access")
 def check_lesson_access(
     lesson_id: int,
@@ -1401,10 +1418,10 @@ def check_lesson_access(
 
     # Check basic course access
     if not check_course_access(course_id, current_user, db):
-        return {
-            "accessible": False,
-            "reason": "You do not have access to this course"
-        }
+        return _locked(lesson, "course_access", "You do not have access to this course", [
+            "This unit belongs to a course you are not enrolled in.",
+            "Ask your curator if you think you should have access to it.",
+        ])
     
     # Teachers and admins can access any lesson
     if current_user.role != "student":
@@ -1425,20 +1442,29 @@ def check_lesson_access(
         if definition is not None:
             units = checkpoint_service.unit_progress(db, current_user.id, definition)
             reason = checkpoint_service.locked_reason(units) or reason
-        return {"accessible": False, "reason": reason}
+        return _locked(lesson, "checkpoint_quiz", reason, [
+            "Finish every unit this checkpoint covers.",
+            "It opens on its own as soon as the last one is done.",
+        ])
 
     # Blocked-unit rule (Task 1): a unit bound to a still-pending checkpoint is locked until that
     # checkpoint is done, regardless of any other unlock path below.
     if lesson_id in checkpoint_service.blocked_unit_lesson_ids_for_student(db, current_user.id):
         definition = checkpoint_service.blocking_checkpoint_for_student(db, current_user.id)
         name = definition.title if definition is not None else "your checkpoint"
-        return {"accessible": False, "reason": f"Finish {name} before starting this unit"}
+        return _locked(lesson, "checkpoint_blocked", f"Finish {name} before starting this unit", [
+            f"Take {name}. It is open for you now.",
+            f"{lesson.title} unlocks as soon as you submit it.",
+        ])
 
     if getattr(current_user, "is_trial", False):
         allowed, reason = trial_lesson_access(db, current_user.id, lesson_id)
         if allowed:
             return {"accessible": True}
-        return {"accessible": False, "reason": reason}
+        return _locked(lesson, "trial", reason, [
+            "Your trial access covers only part of the course.",
+            "Ask your curator about full access to continue.",
+        ])
 
     student_group_ids_list = [r[0] for r in db.query(GroupStudent.group_id).filter(
         GroupStudent.student_id == current_user.id
@@ -1497,19 +1523,23 @@ def check_lesson_access(
         if current_program_week is not None:
             module_week = module.week_number if getattr(module, "week_number", None) is not None else (module.order_index + 1)
             if module_week > current_program_week:
-                return {
-                    "accessible": False,
-                    "reason": f"This module opens in week {module_week}. Current week: {current_program_week}."
-                }
+                return _locked(
+                    lesson, "module_schedule",
+                    f"This module opens in week {module_week}. Current week: {current_program_week}.",
+                    [
+                        f"Your group is on week {current_program_week}; this module opens in week {module_week}.",
+                        "Nothing to do — it will open on schedule.",
+                    ],
+                )
 
     cap_blocked, cap_reason = lesson_blocked_by_special_cap(
         current_user.id, course_id, lesson_id, db
     )
     if cap_blocked:
-        return {
-            "accessible": False,
-            "reason": cap_reason or "Lesson not available for your group",
-        }
+        return _locked(
+            lesson, "group_cap", cap_reason or "Lesson not available for your group",
+            ["Your group does not cover this unit.", "Ask your curator if you think this is wrong."],
+        )
 
     # First, find ALL lessons that redirect to this one
     redirect_sources = db.query(Lesson).filter(Lesson.next_lesson_id == lesson_id).all()
@@ -1609,19 +1639,28 @@ def check_lesson_access(
             all_prev_steps_completed = all(s.id in completed_step_ids for s in required_prev_steps)
             if not all_prev_steps_completed:
                 logger.debug(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} ({prev_lesson.title}) not completed")
-                return {
-                    "accessible": False,
-                    "reason": f"Please complete the previous lesson: {prev_lesson.title} (Module {module.id}, Index {current_lesson_idx})"
-                }
+                # The old reason appended "(Module <id>, Index <n>)" — debugging noise that was
+                # being shown verbatim to students. It lives in the log line above instead.
+                return _locked(
+                    lesson, "sequential",
+                    f"Please complete the previous lesson: {prev_lesson.title}",
+                    [
+                        f"Finish {prev_lesson.title} first.",
+                        f"{lesson.title} unlocks as soon as that one is complete.",
+                    ],
+                )
         
         # CRITICAL FIX: If previous lesson has a next_lesson_id that points elsewhere,
         # DO NOT unlock this lesson linearly.
         if prev_lesson.next_lesson_id and prev_lesson.next_lesson_id != lesson_id:
             logger.debug(f"DEBUG: Blocking access. Prev lesson {prev_lesson.id} redirects to {prev_lesson.next_lesson_id}, not {lesson_id}")
-            return {
-                "accessible": False,
-                "reason": "This lesson is not in the sequential path."
-            }
+            return _locked(
+                lesson, "sequential", "This lesson is not in the sequential path.",
+                [
+                    f"Your course continues with {prev_lesson.title} rather than this unit.",
+                    "Follow the course order, or ask your curator if this looks wrong.",
+                ],
+            )
         
         return {"accessible": True}
     
@@ -1638,10 +1677,14 @@ def check_lesson_access(
                 check = required if required else prev_lesson_steps
                 all_steps_completed = all(s.id in completed_step_ids for s in check)
                 if not all_steps_completed:
-                    return {
-                        "accessible": False,
-                        "reason": f"Please complete all lessons in module: {prev_module.title}"
-                    }
+                    return _locked(
+                        lesson, "sequential",
+                        f"Please complete all lessons in module: {prev_module.title}",
+                        [
+                            f"Finish every unit in {prev_module.title} first.",
+                            f"{lesson.title} unlocks once that module is complete.",
+                        ],
+                    )
         
         return {"accessible": True}
     

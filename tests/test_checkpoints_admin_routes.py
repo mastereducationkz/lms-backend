@@ -103,7 +103,7 @@ def test_matrix_open_reopen_deadline_results(db):
     assert [d["number"] for d in mat["definitions"]] == [1]
     alice = next(s for s in mat["students"] if s["name"] == "Alice")
     cell = alice["cells"][0]
-    assert cell["status"] == "locked" and cell["locked_reason"].startswith("Locked — waiting for")
+    assert cell["status"] == "locked" and cell["locked_reason"].startswith("Waiting for")
     assert [u["completed"] for u in cell["units"]] == [True, False, False]
 
     opened = r.open_checkpoint(group.id, d1.id, OpenRequest(), current_user=admin, db=db)
@@ -140,13 +140,13 @@ def test_matrix_two_students_two_definitions_batched(db):
     assert [u["completed"] for u in a_cell1["units"]] == [True, True, True]
     assert a_cell1["locked_reason"] is None
     assert [u["completed"] for u in a_cell2["units"]] == [False, False, False]
-    assert a_cell2["locked_reason"].startswith("Locked — waiting for")
+    assert a_cell2["locked_reason"].startswith("Waiting for")
 
     b_cell1, b_cell2 = bob["cells"]
     assert [u["completed"] for u in b_cell1["units"]] == [False, False, False]
-    assert b_cell1["locked_reason"].startswith("Locked — waiting for")
+    assert b_cell1["locked_reason"].startswith("Waiting for")
     assert [u["completed"] for u in b_cell2["units"]] == [True, False, False]
-    assert b_cell2["locked_reason"].startswith("Locked — waiting for")
+    assert b_cell2["locked_reason"].startswith("Waiting for")
 
 
 def test_group_teacher_and_curator_manage_their_own_group_only(db):
