@@ -202,6 +202,12 @@ def test_reaching_done_closes_the_cycle_as_completed(db):
     with pytest.raises(OnboardingPermissionError):
         set_status(db, row, STATUS_IN_PROGRESS, _actor(curator), commit=False)
 
+    # A repeat of the same move is a no-op, though: the CRM retries a PATCH whose answer it
+    # never saw, and a second «Завершено» must not read as a failure.
+    events_before = len(row.events)
+    assert set_status(db, row, STATUS_DONE, _actor(curator), commit=False) is row
+    assert len(row.events) == events_before, "and it writes no second history row"
+
 
 # --- reconciler ---------------------------------------------------------------------------
 

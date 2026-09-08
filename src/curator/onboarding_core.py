@@ -866,6 +866,15 @@ def set_status(
     if status not in SETTABLE_STATUSES:
         raise ValueError(f"Недопустимый статус: {status}")
     _assert_may_edit(row, actor)
+    if (
+        status == STATUS_DONE
+        and row.status == STATUS_DONE
+        and row.end_reason == END_COMPLETED
+    ):
+        # Finishing a finished card is a no-op, not an error. The CRM PATCHes on a drag and
+        # will retry a request it never saw the answer to; refusing the second one would make
+        # a dropped response look to the curator like the move had failed.
+        return row
     if row.ended_at is not None:
         raise OnboardingPermissionError("Цикл закрыт — изменение статуса невозможно")
     if is_paused(row):
