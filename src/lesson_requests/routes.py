@@ -75,7 +75,13 @@ async def create_lesson_request(
     group = db.query(Group).filter(Group.id == data.group_id).first()
     self_approve = requester_self_approves(db, current_user.id, group)
 
-    new_request = create_lesson_request_record(db, current_user, data, skip_limits=self_approve)
+    # Self-approve files AND applies in one go, and applying can fail (400: no free slot for
+    # the replacement lesson). Committing the row first would leave a stray pending request
+    # in the approval queue nobody meant to file, so on that path the single commit below
+    # covers both.
+    new_request = create_lesson_request_record(
+        db, current_user, data, skip_limits=self_approve, commit=not self_approve
+    )
 
     if self_approve:
         # Nobody else decides here, so the teacher's proposal is the decision; a cancel with
@@ -307,7 +313,15 @@ async def approve_lesson_request(
     before the choice existed, so an older client keeps working. Other request types ignore
     the field.
     """
-    lr = db.query(LessonRequest).filter(LessonRequest.id == request_id).first()
+    # Locked for the length of the transaction: applying a cancel now appends a lesson or
+    # shrinks the plan, so two approvers (head teacher and admin) clicking at the same moment
+    # must not both pass the "still pending" check and both apply it.
+    lr = (
+        db.query(LessonRequest)
+        .filter(LessonRequest.id == request_id)
+        .with_for_update()
+        .first()
+    )
     if not lr:
         raise HTTPException(status_code=404, detail="Request not found")
     if lr.status != "pending":
@@ -349,7 +363,13 @@ async def reject_lesson_request(
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
     """Reject a lesson request."""
-    lr = db.query(LessonRequest).filter(LessonRequest.id == request_id).first()
+    # Same lock as approve, so a reject cannot slip past a concurrent approval's status check.
+    lr = (
+        db.query(LessonRequest)
+        .filter(LessonRequest.id == request_id)
+        .with_for_update()
+        .first()
+    )
     if not lr:
         raise HTTPException(status_code=404, detail="Request not found")
     if lr.status != "pending":

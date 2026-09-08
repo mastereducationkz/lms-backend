@@ -467,10 +467,12 @@ def append_replacement_lesson(
     """Append one class lesson after the group's last scheduled one, on its regular slot.
 
     The cancelled lesson is already inactive by the time this runs, so the anchor is the
-    latest ACTIVE lesson (or, for a group with none left, whichever is later of now and the
-    cancelled lesson). The replacement is the earliest regular slot strictly after both the
-    anchor and now — a cancelled lesson in a finished course is replaced in the future, not
-    back-dated. A slot the group already has an active event on is skipped.
+    latest ACTIVE lesson. The replacement is the earliest regular slot strictly after the
+    anchor, after now, AND after the cancelled lesson itself — a cancelled lesson in a
+    finished course is replaced in the future, not back-dated, and a cancelled LAST lesson
+    is not re-created on the very instant just cancelled (its slot is free again and would
+    otherwise be the earliest candidate, silently undoing the cancellation). A slot the
+    group already has an active event on is skipped.
 
     The lesson is the group's regular teacher's: a substitute pinned to the cancelled
     occurrence does not follow it. ``schedule_config.lessons_count`` is left alone — the
@@ -484,11 +486,12 @@ def append_replacement_lesson(
     active = _active_class_events(db, group.id)
     slots = _regular_slots(group, active, cancelled_event)
 
-    if active:
-        anchor = max(_naive_utc(e.start_datetime) for e in active)
-    else:
-        anchor = max(now_utc, _naive_utc(cancelled_event.start_datetime))
-    floor = max(anchor, now_utc)
+    cancelled_start = _naive_utc(cancelled_event.start_datetime)
+    anchor = max((_naive_utc(e.start_datetime) for e in active), default=cancelled_start)
+    # The cancelled instant belongs in the lower bound whether or not it is the anchor: the
+    # row is already deactivated, so it is neither in ``active`` nor in ``occupied`` and its
+    # slot would read as the earliest free one when the cancelled lesson was the last.
+    floor = max(anchor, now_utc, cancelled_start)
 
     occupied = {
         _naive_utc(row[0])
@@ -589,6 +592,9 @@ def apply_cancel(db: Session, lr: LessonRequest, resolver_id: int) -> None:
 
     Either way the surviving lessons are renumbered and the group's ``is_over`` is
     recomputed, all inside the caller's transaction: nothing here commits.
+
+    Applying the same cancel twice must not change the course twice, so everything past the
+    deactivation is skipped when the lesson was already inactive.
     """
     from src.services.group_completion_service import sync_groups_over_status
 
@@ -602,7 +608,10 @@ def apply_cancel(db: Session, lr: LessonRequest, resolver_id: int) -> None:
         return
 
     event = db.query(Event).filter(Event.id == event_id).first()
-    if event:
+    # Whether THIS approval is the one that took the lesson off the schedule. Deactivating an
+    # already-inactive event is a no-op, but appending a lesson or shrinking the plan is not.
+    was_active = bool(event and event.is_active)
+    if was_active:
         event.is_active = False
         db.flush()
 
@@ -643,6 +652,19 @@ def apply_cancel(db: Session, lr: LessonRequest, resolver_id: int) -> None:
         return
     if group is None:
         logger.error("cancel request %s references group %s, which does not exist", lr.id, lr.group_id)
+        return
+
+    if not was_active:
+        # The lesson was already off the schedule: a second cancel request for the same
+        # occurrence (the create-side guard only stops the SAME requester filing twice, so a
+        # substitute and the regular teacher can both file one), an approval of a request
+        # left pending while the event was deactivated another way, or two approvers racing.
+        # Marking it cancelled again is harmless; a second replacement lesson or a second
+        # decrement of the plan is not, so the resolution stops here.
+        logger.warning(
+            "cancel request %s: event %s is already inactive — leaving the group's plan alone",
+            lr.id, event_id,
+        )
         return
 
     if resolution == ADD_REPLACEMENT:

@@ -329,6 +329,94 @@ def test_replacement_for_a_finished_course_lands_after_now(db):
     assert group.is_over is False, "a future lesson keeps the course open"
 
 
+# ── 5b. the cancelled lesson's own slot is not reused ────────────────────────────────
+
+
+def test_cancelling_the_last_lesson_does_not_re_create_it(db):
+    """Cancelling the group's LAST scheduled lesson frees its slot — the row is inactive, so
+    it is neither the anchor nor «occupied» — and that slot is the earliest one after the
+    remaining lessons. A replacement placed there would put the lesson the teacher could not
+    teach straight back on the calendar, cancellation notice and all."""
+    teacher, admin = _user(db, "teacher"), _user(db, "admin")
+    group, events = _course(db, teacher)
+    target = events[5]                                     # Thursday +10: the last lesson
+    cancelled_at = target.start_datetime
+    lr = _cancel_request(db, teacher, group, target)
+
+    _approve(db, admin, lr, cancel_resolution=ADD_REPLACEMENT)
+
+    db.refresh(lr); db.refresh(target)
+    assert target.is_active is False
+    replacement = db.get(Event, lr.replacement_event_id)
+    assert replacement.start_datetime != cancelled_at, "the cancellation would be undone"
+    # The next regular slot after the cancelled one: the following Monday.
+    assert replacement.start_datetime == _slot_utc(_this_monday() + timedelta(days=14))
+    assert len(_active_class(db, group.id)) == 6
+    assert _titles(db, group) == _numbered(group, 6)
+
+
+# ── 5c. applying the same cancel twice changes the course once ──────────────────────
+
+
+def _two_requests_for_one_lesson(db, group, target):
+    """Two cancels for the same lesson: the create-side guard is per requester, so the
+    group's regular teacher and a substitute pinned to that occurrence can each file one."""
+    return (
+        _cancel_request(db, _user(db, "teacher"), group, target),
+        _cancel_request(db, _user(db, "teacher"), group, target),
+    )
+
+
+def test_a_second_cancel_only_does_not_shrink_the_plan_twice(db):
+    teacher, admin = _user(db, "teacher"), _user(db, "admin")
+    group, events = _course(db, teacher)
+    first, second = _two_requests_for_one_lesson(db, group, events[4])
+
+    _approve(db, admin, first, cancel_resolution=CANCEL_ONLY)
+    _approve(db, admin, second, cancel_resolution=CANCEL_ONLY)
+
+    db.refresh(group)
+    # One lesson left the schedule, so the plan drops by exactly one — an understated
+    # lessons_count would make the group «Завершена» early.
+    assert group.schedule_config["lessons_count"] == 5
+    assert len(_active_class(db, group.id)) == 5
+    assert _titles(db, group) == _numbered(group, 5)
+
+
+def test_a_second_add_replacement_does_not_append_a_second_lesson(db):
+    teacher, admin = _user(db, "teacher"), _user(db, "admin")
+    group, events = _course(db, teacher)
+    first, second = _two_requests_for_one_lesson(db, group, events[4])
+
+    _approve(db, admin, first, cancel_resolution=ADD_REPLACEMENT)
+    out = _approve(db, admin, second, cancel_resolution=ADD_REPLACEMENT)
+
+    db.refresh(first); db.refresh(second); db.refresh(group)
+    assert first.replacement_event_id is not None
+    assert second.replacement_event_id is None, "nothing left to cancel, nothing to replace"
+    assert out.status == "approved", "the duplicate still resolves, it just changes nothing"
+    assert len(_active_class(db, group.id)) == 6, "one make-up lesson, not two"
+    assert group.schedule_config["lessons_count"] == 6
+
+
+def test_an_approval_of_a_lesson_cancelled_elsewhere_leaves_the_plan_alone(db):
+    """A request left pending while the lesson was deactivated another way — a schedule
+    regeneration, say — must not shrink the plan for a lesson it did not remove."""
+    teacher, admin = _user(db, "teacher"), _user(db, "admin")
+    group, events = _course(db, teacher)
+    target = events[4]
+    lr = _cancel_request(db, teacher, group, target)
+    target.is_active = False
+    db.flush()
+
+    _approve(db, admin, lr, cancel_resolution=CANCEL_ONLY)
+
+    db.refresh(lr); db.refresh(group)
+    assert lr.status == "approved"
+    assert group.schedule_config["lessons_count"] == 6, "this approval removed nothing"
+    assert len(_active_class(db, group.id)) == 5
+
+
 # ── 6. validation ─────────────────────────────────────────────────────────────────────
 
 
@@ -466,3 +554,31 @@ def test_self_approved_cancel_honours_the_teachers_own_choice(db):
     db.refresh(group)
     assert group.schedule_config["lessons_count"] == 6
     assert _titles(db, group) == _numbered(group, 6)
+
+
+def test_a_self_approve_that_fails_to_apply_commits_nothing(db, monkeypatch):
+    """Filing and applying are one transaction on this path. Committing the request first and
+    applying it afterwards leaves a pending row in the head teachers' queue that nobody meant
+    to file whenever applying raises — no free slot for the replacement lesson, say — and,
+    with the duplicate guard skipped here, every retry adds another one.
+    """
+    from src.lesson_requests import helpers as lr_helpers
+
+    teacher = _user(db, "teacher")
+    _head_of_sat(db, teacher)
+    group, events = _course(db, teacher)
+
+    def _no_free_slot(*args, **kwargs):
+        raise HTTPException(status_code=400, detail="Не удалось найти свободный слот")
+
+    monkeypatch.setattr(lr_helpers, "append_replacement_lesson", _no_free_slot)
+    # Counted rather than let through: a commit is exactly what must NOT happen before the
+    # request is applied, and the test's own transaction is what keeps the rows out of the DB.
+    commits: list[str] = []
+    monkeypatch.setattr(type(db), "commit", lambda self: commits.append("commit"))
+
+    with pytest.raises(HTTPException) as excinfo:
+        _self_file_cancel(db, teacher, group, events[4], cancel_resolution=ADD_REPLACEMENT)
+
+    assert excinfo.value.status_code == 400
+    assert commits == [], "the request was committed before it was applied"

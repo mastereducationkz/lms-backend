@@ -202,10 +202,13 @@ def create_lesson_request_record(
     requester: UserInDB,
     data: CreateLessonRequestSchema,
     skip_limits: bool = False,
+    commit: bool = True,
 ) -> LessonRequest:
     """Validate and persist a new lesson request. ``skip_limits`` bypasses the
     pending-duplicate guard — used when the request is self-approved (the requester
-    heads their own subject)."""
+    heads their own subject). ``commit=False`` only flushes, so a caller that applies the
+    request in the same breath (the self-approve path) can keep filing and applying in one
+    transaction: if applying raises, no half-filed request is left behind."""
     if data.request_type not in VALID_REQUEST_TYPES:
         raise HTTPException(
             status_code=400,
@@ -308,6 +311,9 @@ def create_lesson_request_record(
         ),
     )
     db.add(new_request)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(new_request)
     return new_request
