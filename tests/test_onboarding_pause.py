@@ -278,6 +278,24 @@ def test_a_sat_freeze_leaves_the_ielts_card_working(world):  # noqa: F811
     assert sat_card.curator_id == other_curator.id
 
 
+def test_the_sweep_pauses_a_frozen_student_who_is_still_on_the_roster(world):  # noqa: F811
+    """A freeze the membership removal never followed — the mirror still decides.
+
+    A student-wide freeze removes nothing (the CRM's scope removal names no group and returns
+    early), and a scoped one can fail its removal. Either way the CRM has said the enrollment
+    is suspended, so the card comes off the board even though the roster still lists them.
+    """
+    db = world["db"]
+    card = _card(world, world["groups"]["SAT"])
+    _freeze(world, None)  # student-wide: the roster is left exactly as it is
+
+    result = reconcile_student(db, world["student"].id)
+    db.refresh(card)
+
+    assert result["paused"] == 1
+    assert is_paused(card) is True and card.ended_at is None
+
+
 def test_a_freeze_on_one_of_two_groups_of_the_same_curator_keeps_the_card_working(world):  # noqa: F811
     """One card covers the pair, not the group: while any of their groups is running, so is it.
 

@@ -640,10 +640,13 @@ def _reconcile_locked(db: Session, actor: OnboardingActor) -> dict[str, int]:
             regrouped += 1
         # Asked *after* the regroup: a student who came back into a different group of the
         # same curator is answered about the group they are actually in now, not the one
-        # they were frozen out of.
-        if is_paused(row) and not card_is_frozen(frozen, row):
-            if resume_cycle(db, row, actor):
-                resumed += 1
+        # they were frozen out of. Both directions, so a sweep can repair a pause the
+        # freeze-state delivery never arrived to apply — or to lift.
+        if card_is_frozen(frozen, row):
+            if pause_cycle(db, row, actor):
+                paused += 1
+        elif resume_cycle(db, row, actor):
+            resumed += 1
 
     for key, row in open_rows.items():
         if key in active:
@@ -712,9 +715,11 @@ def reconcile_student(
             continue
         if row.group_id != group_id:
             row.group_id = group_id
-        if is_paused(row) and not card_is_frozen(frozen, row):
-            if resume_cycle(db, row, actor):
-                resumed += 1
+        if card_is_frozen(frozen, row):
+            if pause_cycle(db, row, actor):
+                paused += 1
+        elif resume_cycle(db, row, actor):
+            resumed += 1
 
     for key, row in open_rows.items():
         if key in active:
