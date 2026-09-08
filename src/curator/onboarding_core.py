@@ -740,7 +740,7 @@ def reconcile_student(
 
 def is_paused(row: CuratorOnboarding) -> bool:
     """Is this card's clock stopped? See :mod:`src.curator.onboarding_pause`."""
-    return getattr(row, "paused_at", None) is not None
+    return row.paused_at is not None
 
 
 def paused_seconds_total(row: CuratorOnboarding, now: Optional[datetime] = None) -> float:
@@ -752,8 +752,8 @@ def paused_seconds_total(row: CuratorOnboarding, now: Optional[datetime] = None)
     ``elapsed - paused`` expression below stand still instead of ticking.
     """
     now = now or _utcnow()
-    total = float(getattr(row, "paused_seconds", 0) or 0)
-    started = _as_naive_utc(getattr(row, "paused_at", None))
+    total = float(row.paused_seconds or 0)
+    started = _as_naive_utc(row.paused_at)
     if started is not None:
         total += max(0.0, (now - started).total_seconds())
     return total
