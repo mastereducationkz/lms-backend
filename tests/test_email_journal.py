@@ -392,6 +392,9 @@ def test_curator_lesson_change_email_is_sent_only_after_the_commit(monkeypatch):
     lesson_request = SimpleNamespace(
         id=12, group_id=3, requester_id=4, request_type="cancel",
         original_datetime=None, new_datetime=None,
+        # A cancel row carries how it was resolved; nothing was appended here, so the
+        # curator email keeps saying only that the lesson is off.
+        cancel_resolution="cancel_only", replacement_event_id=None,
         confirmed_teacher_id=None, substitute_teacher_id=None, reason="ill",
     )
 
@@ -454,6 +457,9 @@ def test_curator_email_failure_does_not_break_the_approval(monkeypatch):
     lesson_request = SimpleNamespace(
         id=12, group_id=3, requester_id=4, request_type="cancel",
         original_datetime=None, new_datetime=None,
+        # A cancel row carries how it was resolved; nothing was appended here, so the
+        # curator email keeps saying only that the lesson is off.
+        cancel_resolution="cancel_only", replacement_event_id=None,
         confirmed_teacher_id=None, substitute_teacher_id=None, reason=None,
     )
     committed = []

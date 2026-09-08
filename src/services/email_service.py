@@ -1170,9 +1170,12 @@ def send_lesson_change_curator_notification(
             f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Учитель</td>"
             f"<td style='padding:8px 0;font-weight:500;'>{requester_name}</td></tr>"
         )
-    if request_type == "reschedule" and new_datetime:
+    # For a reschedule this is where the lesson moved; for a cancel resolved as «добавить урок
+    # в конец курса» it is the replacement lesson appended after the group's last one.
+    new_datetime_label = "Новая дата" if request_type == "reschedule" else "Добавленный урок"
+    if request_type in ("reschedule", "cancel") and new_datetime:
         details_rows.append(
-            f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>Новая дата</td>"
+            f"<tr><td style='padding:8px 0;color:#666;font-size:13px;'>{new_datetime_label}</td>"
             f"<td style='padding:8px 0;font-weight:500;'>{new_datetime}</td></tr>"
         )
     if request_type == "substitution" and substitute_name:
@@ -1214,8 +1217,8 @@ def send_lesson_change_curator_notification(
     ]
     if requester_name:
         text_lines.append(f"Учитель: {requester_name}")
-    if request_type == "reschedule" and new_datetime:
-        text_lines.append(f"Новая дата: {new_datetime}")
+    if request_type in ("reschedule", "cancel") and new_datetime:
+        text_lines.append(f"{new_datetime_label}: {new_datetime}")
     if request_type == "substitution" and substitute_name:
         text_lines.append(f"Замена: {substitute_name}")
     if reason:

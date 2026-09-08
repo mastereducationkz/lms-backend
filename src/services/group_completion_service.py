@@ -64,12 +64,26 @@ def get_groups_over_status_changes(db: Session, group_ids: Optional[Iterable[int
     return changes
 
 
-def sync_groups_over_status(db: Session, group_ids: Optional[Iterable[int]] = None) -> int:
+def sync_groups_over_status(
+    db: Session,
+    group_ids: Optional[Iterable[int]] = None,
+    *,
+    commit: bool = True,
+) -> int:
+    """Recompute ``is_over`` for the given groups (all groups when ``None``).
+
+    ``commit=False`` leaves the flip pending in the caller's transaction — for callers that
+    are mid-way through an atomic change (approving a cancel deactivates a lesson, may
+    append another, and must not have the group's status committed in between).
+    """
     changes = get_groups_over_status_changes(db, group_ids)
     for group, should_be_over in changes:
         group.is_over = should_be_over
 
     if changes:
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
 
     return len(changes)

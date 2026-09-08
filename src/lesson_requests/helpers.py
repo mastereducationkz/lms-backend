@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,7 @@ from src.schemas.models import (
     Group,
     LessonSchedule,
     Event,
+    EventGroup,
     LessonRequest,
     LessonRequestSchema,
     Notification,
@@ -23,9 +25,25 @@ from src.schemas.models import (
 from src.services.event_service import EventService
 from src.services.attendance_service import AttendanceService
 from src.services.email_service import send_lesson_change_curator_notification
-from src.lesson_requests.services import resolve_head_teachers_for_group
+from src.lesson_requests.services import (
+    ADD_REPLACEMENT,
+    CANCEL_ONLY,
+    resolve_head_teachers_for_group,
+)
 
 logger = logging.getLogger(__name__)
+
+#: The business runs on Asia/Almaty, a fixed UTC+5; events are stored as naive UTC. Same
+#: constant the schedule generator uses (``leaderboard.generate_schedule``).
+KZ_OFFSET = timedelta(hours=5)
+
+#: How far past the anchor ``append_replacement_lesson`` looks for a free slot before it
+#: gives up. A group meets at least weekly, so eight weeks means the schedule is broken.
+_REPLACEMENT_SEARCH_WEEKS = 8
+
+#: Everything from ": Lesson" to the end of an auto-generated title. Titles without it are
+#: custom and are never renumbered — the same rule as the CRM's ``retitle_group_lessons``.
+_LESSON_SUFFIX = re.compile(r": Lesson\b.*$")
 
 
 #: Said to a teacher when an approved request and the live schedule disagree. Staff get the
@@ -154,13 +172,17 @@ def enrich_requests(lrs: Sequence[LessonRequest], db: Session) -> list[LessonReq
 
     group_ids = {int(lr.group_id) for lr in lrs if lr.group_id}
     event_ids = {int(lr.event_id) for lr in lrs if lr.event_id}
+    # Replacement lessons (an approved cancel resolved as «добавить урок в конец курса») ride
+    # along in the same event query — one round trip, not two.
+    replacement_ids = {int(lr.replacement_event_id) for lr in lrs if lr.replacement_event_id}
 
     groups = {
         g.id: g for g in db.query(Group).filter(Group.id.in_(group_ids)).all()
     } if group_ids else {}
     events = {
-        e.id: e for e in db.query(Event).filter(Event.id.in_(event_ids)).all()
-    } if event_ids else {}
+        e.id: e
+        for e in db.query(Event).filter(Event.id.in_(event_ids | replacement_ids)).all()
+    } if (event_ids or replacement_ids) else {}
 
     # Group owners and live lesson teachers also need naming.
     for group in groups.values():
@@ -196,6 +218,9 @@ def enrich_requests(lrs: Sequence[LessonRequest], db: Session) -> list[LessonReq
     for lr in lrs:
         group = groups.get(int(lr.group_id)) if lr.group_id else None
         event = events.get(int(lr.event_id)) if lr.event_id else None
+        replacement = (
+            events.get(int(lr.replacement_event_id)) if lr.replacement_event_id else None
+        )
         resolver = users.get(int(lr.resolved_by)) if lr.resolved_by else None
 
         teacher_ids_list = _parse_teacher_ids(lr.substitute_teacher_ids)
@@ -261,6 +286,10 @@ def enrich_requests(lrs: Sequence[LessonRequest], db: Session) -> list[LessonReq
             is_applied=is_applied,
             consistency_note=consistency_note,
             lesson_is_active=event.is_active if event else None,
+            cancel_resolution=lr.cancel_resolution,
+            replacement_event_id=lr.replacement_event_id,
+            replacement_lesson_title=replacement.title if replacement else None,
+            replacement_datetime=replacement.start_datetime if replacement else None,
         ))
     return out
 
@@ -360,39 +389,294 @@ def apply_reschedule(db: Session, lr: LessonRequest, resolver_id: int) -> None:
             db.flush()
 
 
+def _naive_utc(dt: datetime) -> datetime:
+    """Events are stored as naive UTC; an in-memory value may still carry a tzinfo."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _active_class_events(db: Session, group_id: int) -> list[Event]:
+    return (
+        db.query(Event)
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .filter(
+            EventGroup.group_id == group_id,
+            Event.event_type == "class",
+            Event.is_active == True,
+        )
+        .all()
+    )
+
+
+def _regular_slots(
+    group: Group, active_events: Sequence[Event], cancelled_event: Event
+) -> list[tuple[int, time]]:
+    """The group's weekly slots as ``(weekday, time)`` in Almaty, Monday = 0.
+
+    From ``schedule_config.schedule_items`` when the group has a generated schedule. A group
+    whose lessons were placed by hand has none, so the slots are read off its active lessons
+    instead; a group with no other lessons at all inherits the cancelled lesson's own slot.
+    """
+    slots: set[tuple[int, time]] = set()
+
+    config = group.schedule_config if isinstance(group.schedule_config, dict) else {}
+    for item in config.get("schedule_items") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            weekday = int(item.get("day_of_week"))
+            at = datetime.strptime(str(item.get("time_of_day")), "%H:%M").time()
+        except (TypeError, ValueError):
+            continue
+        if 0 <= weekday <= 6:
+            slots.add((weekday, at))
+
+    if not slots:
+        for source in (active_events, [cancelled_event]):
+            for event in source:
+                local = _naive_utc(event.start_datetime) + KZ_OFFSET
+                slots.add((local.weekday(), local.time().replace(second=0, microsecond=0)))
+            if slots:
+                break
+
+    return sorted(slots)
+
+
+def _decrement_planned_lessons(group: Group) -> None:
+    """One lesson fewer in the plan, so the course can still finish.
+
+    ``is_over`` is «past >= planned and no future lesson», with planned read from
+    ``schedule_config.lessons_count``. A course planned at 48 with one lesson cancelled and
+    not replaced has 47 lessons, so it would never become «Завершена» — which also starves
+    the CRM's «Завершил» queue. JSONB change detection needs a new object, not a mutation.
+    """
+    config = group.schedule_config
+    if not isinstance(config, dict):
+        return
+    lessons_count = config.get("lessons_count")
+    if isinstance(lessons_count, bool) or not isinstance(lessons_count, int):
+        return
+    if lessons_count > 1:
+        group.schedule_config = {**config, "lessons_count": lessons_count - 1}
+
+
+def append_replacement_lesson(
+    db: Session, group: Group, cancelled_event: Event, *, created_by: int
+) -> Event:
+    """Append one class lesson after the group's last scheduled one, on its regular slot.
+
+    The cancelled lesson is already inactive by the time this runs, so the anchor is the
+    latest ACTIVE lesson. The replacement is the earliest regular slot strictly after the
+    anchor, after now, AND after the cancelled lesson itself — a cancelled lesson in a
+    finished course is replaced in the future, not back-dated, and a cancelled LAST lesson
+    is not re-created on the very instant just cancelled (its slot is free again and would
+    otherwise be the earliest candidate, silently undoing the cancellation). A slot the
+    group already has an active event on is skipped.
+
+    The lesson is the group's regular teacher's: a substitute pinned to the cancelled
+    occurrence does not follow it. ``schedule_config.lessons_count`` is left alone — the
+    plan is intact, one lesson simply moved to the end. Titled ``"{group}: Lesson"`` here;
+    :func:`renumber_lesson_titles` gives it its number.
+
+    Raises ``HTTPException(400)`` when no free slot exists within eight weeks, so the
+    approval fails loudly and the head teacher can choose «только отменить» instead.
+    """
+    now_utc = datetime.utcnow()
+    active = _active_class_events(db, group.id)
+    slots = _regular_slots(group, active, cancelled_event)
+
+    cancelled_start = _naive_utc(cancelled_event.start_datetime)
+    anchor = max((_naive_utc(e.start_datetime) for e in active), default=cancelled_start)
+    # The cancelled instant belongs in the lower bound whether or not it is the anchor: the
+    # row is already deactivated, so it is neither in ``active`` nor in ``occupied`` and its
+    # slot would read as the earliest free one when the cancelled lesson was the last.
+    floor = max(anchor, now_utc, cancelled_start)
+
+    occupied = {
+        _naive_utc(row[0])
+        for row in db.query(Event.start_datetime)
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .filter(EventGroup.group_id == group.id, Event.is_active == True)
+        .all()
+    }
+
+    start_local_date = (floor + KZ_OFFSET).date()
+    candidate: Optional[datetime] = None
+    for day_offset in range(_REPLACEMENT_SEARCH_WEEKS * 7 + 1):
+        local_date = start_local_date + timedelta(days=day_offset)
+        for weekday, at in slots:
+            if weekday != local_date.weekday():
+                continue
+            instant = datetime.combine(local_date, at) - KZ_OFFSET
+            if instant <= floor or instant in occupied:
+                continue
+            candidate = instant
+            break
+        if candidate is not None:
+            break
+
+    if candidate is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Не удалось найти свободный слот для дополнительного урока группы "
+                f"«{group.name}» в ближайшие {_REPLACEMENT_SEARCH_WEEKS} недель. "
+                "Проверьте расписание группы или выберите «только отменить»."
+            ),
+        )
+
+    duration = _naive_utc(cancelled_event.end_datetime) - _naive_utc(cancelled_event.start_datetime)
+    if duration <= timedelta(0):
+        duration = timedelta(minutes=60)
+
+    replacement = Event(
+        title=f"{group.name}: Lesson",
+        description=(
+            "Replacement for the cancelled lesson on "
+            f"{_format_dt(cancelled_event.start_datetime)}"
+        ),
+        event_type="class",
+        start_datetime=candidate,
+        end_datetime=candidate + duration,
+        location=cancelled_event.location,
+        is_online=cancelled_event.is_online,
+        meeting_url=cancelled_event.meeting_url,
+        created_by=created_by,
+        teacher_id=group.teacher_id,
+        is_active=True,
+        is_recurring=False,
+        max_participants=50,
+    )
+    db.add(replacement)
+    db.flush()
+    db.add(EventGroup(event_id=replacement.id, group_id=group.id))
+    db.flush()
+    logger.info(
+        "replacement lesson event_id=%s appended to group_id=%s at %s for cancelled event_id=%s",
+        replacement.id, group.id, candidate.isoformat(), cancelled_event.id,
+    )
+    return replacement
+
+
+def renumber_lesson_titles(db: Session, group: Group) -> None:
+    """``"{group.name}: Lesson {i}"`` over the group's active class lessons, by date.
+
+    The same numbering ``reconcile_group_schedule`` produces, restricted — like the CRM's
+    ``retitle_group_lessons`` — to titles that already carry ``": Lesson"``. A custom title
+    is somebody's decision and is left alone.
+    """
+    ordered = sorted(
+        _active_class_events(db, group.id),
+        key=lambda e: (_naive_utc(e.start_datetime), e.id),
+    )
+    for index, event in enumerate(ordered, start=1):
+        if not event.title or not _LESSON_SUFFIX.search(event.title):
+            continue
+        target = f"{group.name}: Lesson {index}"
+        if event.title != target:
+            event.title = target
+    db.flush()
+
+
 def apply_cancel(db: Session, lr: LessonRequest, resolver_id: int) -> None:
+    """Deactivate the lesson, mark it «cancelled» for every student, then resolve.
+
+    ``lr.cancel_resolution`` decides what happens to the course afterwards:
+
+    * ``cancel_only`` (the default, and the only behaviour there used to be): the lesson is
+      gone as if it never happened, and the plan shrinks by one so the group can still
+      finish — see :func:`_decrement_planned_lessons` for why that matters.
+    * ``add_replacement``: the plan is intact and one lesson is appended after the group's
+      last scheduled one — see :func:`append_replacement_lesson`.
+
+    Either way the surviving lessons are renumbered and the group's ``is_over`` is
+    recomputed, all inside the caller's transaction: nothing here commits.
+
+    Applying the same cancel twice must not change the course twice, so everything past the
+    deactivation is skipped when the lesson was already inactive.
+    """
+    from src.services.group_completion_service import sync_groups_over_status
+
     event_id = lr.event_id
     if not event_id and lr.lesson_schedule_id:
         event_id = EventService.materialize_lesson_schedule(db, lr.lesson_schedule_id, user_id=resolver_id)
         lr.event_id = event_id
         db.add(lr)
 
-    if event_id:
-        event = db.query(Event).filter(Event.id == event_id).first()
-        if event:
-            event.is_active = False
-            db.flush()
+    if not event_id:
+        return
 
-        # Mark every group student's attendance for this lesson as "cancelled"
-        # so it surfaces in Attendance / leaderboard grids and is excluded from
-        # attendance-rate scoring (a cancelled lesson must not count as absent).
-        student_ids = [
-            row[0]
-            for row in db.query(GroupStudent.student_id).filter(
-                GroupStudent.group_id == lr.group_id
-            ).all()
-        ]
-        for sid in student_ids:
-            AttendanceService.upsert_for_event(
-                db,
-                event_id=event_id,
-                user_id=sid,
-                status="cancelled",
-                score=0,
-                flush=False,
+    event = db.query(Event).filter(Event.id == event_id).first()
+    # Whether THIS approval is the one that took the lesson off the schedule. Deactivating an
+    # already-inactive event is a no-op, but appending a lesson or shrinking the plan is not.
+    was_active = bool(event and event.is_active)
+    if was_active:
+        event.is_active = False
+        db.flush()
+
+    # Mark every group student's attendance for this lesson as "cancelled"
+    # so it surfaces in Attendance / leaderboard grids and is excluded from
+    # attendance-rate scoring (a cancelled lesson must not count as absent).
+    student_ids = [
+        row[0]
+        for row in db.query(GroupStudent.student_id).filter(
+            GroupStudent.group_id == lr.group_id
+        ).all()
+    ]
+    for sid in student_ids:
+        AttendanceService.upsert_for_event(
+            db,
+            event_id=event_id,
+            user_id=sid,
+            status="cancelled",
+            score=0,
+            flush=False,
+        )
+    if student_ids:
+        db.flush()
+
+    resolution = lr.cancel_resolution or CANCEL_ONLY
+    group = db.query(Group).filter(Group.id == lr.group_id).first()
+
+    if event is None:
+        if resolution == ADD_REPLACEMENT:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Отменяемый урок не найден в расписании, поэтому добавить урок в конец "
+                    "курса нельзя. Выберите «только отменить»."
+                ),
             )
-        if student_ids:
-            db.flush()
+        logger.error("cancel request %s references event %s, which does not exist", lr.id, event_id)
+        return
+    if group is None:
+        logger.error("cancel request %s references group %s, which does not exist", lr.id, lr.group_id)
+        return
+
+    if not was_active:
+        # The lesson was already off the schedule: a second cancel request for the same
+        # occurrence (the create-side guard only stops the SAME requester filing twice, so a
+        # substitute and the regular teacher can both file one), an approval of a request
+        # left pending while the event was deactivated another way, or two approvers racing.
+        # Marking it cancelled again is harmless; a second replacement lesson or a second
+        # decrement of the plan is not, so the resolution stops here.
+        logger.warning(
+            "cancel request %s: event %s is already inactive — leaving the group's plan alone",
+            lr.id, event_id,
+        )
+        return
+
+    if resolution == ADD_REPLACEMENT:
+        replacement = append_replacement_lesson(db, group, event, created_by=resolver_id)
+        lr.replacement_event_id = replacement.id
+        db.add(lr)
+    else:
+        _decrement_planned_lessons(group)
+
+    renumber_lesson_titles(db, group)
+    db.flush()
+    sync_groups_over_status(db, [group.id], commit=False)
 
 
 def apply_approved_request(db: Session, lr: LessonRequest, resolver_id: int) -> None:
@@ -490,6 +774,12 @@ def notify_resolution(db: Session, lr: LessonRequest, approved: bool) -> None:
     group_name = group.name if group else "Unknown Group"
     requester = db.query(UserInDB).filter(UserInDB.id == lr.requester_id).first()
     pending_curator_email: dict | None = None
+    # The lesson appended under «добавить урок в конец курса», if the cancel was resolved so.
+    replacement = (
+        db.query(Event).filter(Event.id == lr.replacement_event_id).first()
+        if approved and lr.request_type == "cancel" and lr.replacement_event_id
+        else None
+    )
 
     db.add(
         Notification(
@@ -523,6 +813,11 @@ def notify_resolution(db: Session, lr: LessonRequest, approved: bool) -> None:
                 f"Your class in {group_name} on {_format_dt(lr.original_datetime)} "
                 f"has been cancelled."
             )
+            if replacement is not None:
+                msg += (
+                    " A replacement lesson has been added on "
+                    f"{_format_dt(replacement.start_datetime)}."
+                )
         else:
             msg = (
                 f"Your class in {group_name} has been rescheduled from "
@@ -557,7 +852,13 @@ def notify_resolution(db: Session, lr: LessonRequest, approved: bool) -> None:
                     group_name=group_name,
                     request_type=lr.request_type,
                     original_datetime=_format_dt(lr.original_datetime),
-                    new_datetime=_format_dt(lr.new_datetime) if lr.new_datetime else None,
+                    # For a reschedule: where the lesson moved. For a cancel with a
+                    # replacement: when the appended lesson is. The template labels each.
+                    new_datetime=(
+                        _format_dt(replacement.start_datetime)
+                        if replacement is not None
+                        else (_format_dt(lr.new_datetime) if lr.new_datetime else None)
+                    ),
                     substitute_name=sub_teacher.name if sub_teacher else None,
                     requester_name=requester.name if requester else None,
                     reason=lr.reason,

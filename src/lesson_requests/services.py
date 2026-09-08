@@ -26,6 +26,14 @@ HEAD_ROUTING: dict[str, str] = {
 
 VALID_REQUEST_TYPES = ("substitution", "reschedule", "cancel")
 
+# How an approved *cancel* is resolved. ``cancel_only`` is the historical behaviour: the
+# lesson is deactivated and disappears from payroll, the loss report and group completion as
+# if it never happened. ``add_replacement`` does the same and appends one lesson after the
+# group's last scheduled one, on the group's regular slot.
+CANCEL_ONLY = "cancel_only"
+ADD_REPLACEMENT = "add_replacement"
+CANCEL_RESOLUTIONS = (CANCEL_ONLY, ADD_REPLACEMENT)
+
 
 def get_target_program_type(group_program_type: str | None) -> str:
     normalized = (group_program_type or "general_english").lower()
@@ -194,10 +202,13 @@ def create_lesson_request_record(
     requester: UserInDB,
     data: CreateLessonRequestSchema,
     skip_limits: bool = False,
+    commit: bool = True,
 ) -> LessonRequest:
     """Validate and persist a new lesson request. ``skip_limits`` bypasses the
     pending-duplicate guard — used when the request is self-approved (the requester
-    heads their own subject)."""
+    heads their own subject). ``commit=False`` only flushes, so a caller that applies the
+    request in the same breath (the self-approve path) can keep filing and applying in one
+    transaction: if applying raises, no half-filed request is left behind."""
     if data.request_type not in VALID_REQUEST_TYPES:
         raise HTTPException(
             status_code=400,
@@ -294,8 +305,15 @@ def create_lesson_request_record(
         new_datetime=data.new_datetime,
         reason=data.reason,
         status=initial_status,
+        # The teacher's proposal; the approver decides. Meaningless on other request types.
+        cancel_resolution=(
+            data.cancel_resolution if data.request_type == "cancel" else None
+        ),
     )
     db.add(new_request)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(new_request)
     return new_request
