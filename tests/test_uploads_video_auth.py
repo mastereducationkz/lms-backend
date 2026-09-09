@@ -9,12 +9,22 @@ the client to retry with.
 from fastapi.testclient import TestClient
 
 from src.app import app
+from src.services import storage_service
 from src.services.media_tokens import mint_media_token
 
 client = TestClient(app)
 
 
-def test_video_without_token_is_not_served():
+def test_video_without_token_is_not_served(monkeypatch):
+    """A missing local file would also 404, guard or no guard, so that alone can't
+    catch a regression that deletes the ``is_video`` check in ``serve_upload``. Make
+    the storage lookup explode if it is ever reached, so this only stays green while
+    the guard short-circuits before touching storage."""
+
+    def _should_not_be_reached(path):
+        raise AssertionError("serve_upload must 404 on the is_video guard before touching storage")
+
+    monkeypatch.setattr(storage_service, "local_path", _should_not_be_reached)
     r = client.get("/uploads/videos/42/ru/master.m3u8", follow_redirects=False)
     assert r.status_code == 404
 
