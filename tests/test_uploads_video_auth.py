@@ -23,11 +23,8 @@ the very same request the ``%2e`` spellings below make.
 import pytest
 from fastapi.testclient import TestClient
 
-from src.app import app
 from src.services import storage_service
 from src.services.media_tokens import mint_media_token
-
-client = TestClient(app)
 
 # Both shapes reached the bytes with no token before the request path was
 # normalised: ``is_video`` classified them by their first segment (``.`` and
@@ -36,6 +33,25 @@ DOT_SEGMENT_BYPASSES = [
     "/uploads/%2e/videos/42/ru/master.m3u8",
     "/uploads/materials/%2e%2e/videos/42/ru/master.m3u8",
 ]
+
+
+@pytest.fixture
+def client():
+    """Build the real app's ``TestClient`` lazily, inside the test.
+
+    ``src.app`` calls ``init_db()`` at import time, which connects to Postgres.
+    Importing it at module scope — as this file used to — aborts collection of
+    the *entire* suite when no database is reachable. Skip instead, the same
+    way ``tests/test_attendance_future_lesson_guard.py`` skips its ``db``
+    fixture.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        from src.app import app
+    except OperationalError:
+        pytest.skip("No database available")
+    return TestClient(app)
 
 
 @pytest.fixture(params=["local", "s3"])
@@ -60,7 +76,7 @@ def _explode_on_storage(monkeypatch, why):
         monkeypatch.setattr(storage_service, name, _boom)
 
 
-def test_video_without_token_is_not_served(any_backend, monkeypatch):
+def test_video_without_token_is_not_served(client, any_backend, monkeypatch):
     _explode_on_storage(
         monkeypatch, "serve_upload must 404 on the is_video guard before touching storage"
     )
@@ -69,7 +85,7 @@ def test_video_without_token_is_not_served(any_backend, monkeypatch):
 
 
 @pytest.mark.parametrize("url", DOT_SEGMENT_BYPASSES)
-def test_dot_segments_do_not_smuggle_video_past_the_guard(url, any_backend, monkeypatch):
+def test_dot_segments_do_not_smuggle_video_past_the_guard(url, client, any_backend, monkeypatch):
     _explode_on_storage(
         monkeypatch, f"dot segments walked past the is_video guard: {url}"
     )
@@ -77,7 +93,7 @@ def test_dot_segments_do_not_smuggle_video_past_the_guard(url, any_backend, monk
     assert r.status_code == 404
 
 
-def test_video_with_a_valid_token_is_served(monkeypatch, tmp_path):
+def test_video_with_a_valid_token_is_served(client, monkeypatch, tmp_path):
     """The positive case. Without it, a regression that 404s *everything* — the
     guard swallowing legitimate playback — would leave every other test green."""
     playlist = tmp_path / "master.m3u8"
@@ -98,13 +114,13 @@ def test_video_with_a_valid_token_is_served(monkeypatch, tmp_path):
     assert r.text == "#EXTM3U\n#EXT-X-VERSION:3\n"
 
 
-def test_video_with_token_for_another_lesson_is_not_served():
+def test_video_with_token_for_another_lesson_is_not_served(client):
     token = mint_media_token("videos/43/ru", user_id=7)
     r = client.get(f"/uploads/v/{token}/videos/42/ru/master.m3u8", follow_redirects=False)
     assert r.status_code == 404
 
 
-def test_a_token_cannot_be_walked_out_of_its_lesson(any_backend, monkeypatch):
+def test_a_token_cannot_be_walked_out_of_its_lesson(client, any_backend, monkeypatch):
     """The signed route normalises before the prefix check, so climbing out of the
     signed directory is compared as the file it actually resolves to."""
     _explode_on_storage(monkeypatch, "traversal escaped the signed prefix")
@@ -116,7 +132,7 @@ def test_a_token_cannot_be_walked_out_of_its_lesson(any_backend, monkeypatch):
     assert r.status_code == 404
 
 
-def test_signed_route_refuses_a_non_video_key(any_backend, monkeypatch):
+def test_signed_route_refuses_a_non_video_key(client, any_backend, monkeypatch):
     """A valid token is not a general read capability over ``/uploads/``. Nothing
     mints a token outside ``videos/`` today; this is what keeps a future
     mis-scoped mint from exposing ``exam_proof/``."""
@@ -126,18 +142,18 @@ def test_signed_route_refuses_a_non_video_key(any_backend, monkeypatch):
     assert r.status_code == 404
 
 
-def test_video_with_garbage_token_is_not_served():
+def test_video_with_garbage_token_is_not_served(client):
     r = client.get("/uploads/v/nonsense/videos/42/ru/master.m3u8", follow_redirects=False)
     assert r.status_code == 404
 
 
-def test_non_video_path_is_unaffected():
+def test_non_video_path_is_unaffected(client):
     """A missing non-video file still 404s through the ordinary path, not the guard."""
     r = client.get("/uploads/materials/does-not-exist.pdf", follow_redirects=False)
     assert r.status_code in (307, 404)
 
 
-def test_non_video_file_is_still_served_without_a_token(monkeypatch, tmp_path):
+def test_non_video_file_is_still_served_without_a_token(client, monkeypatch, tmp_path):
     """Course materials, homework attachments and exam proof keep working exactly as
     before — the guard and the normalisation must not touch them."""
     doc = tmp_path / "syllabus.pdf"
