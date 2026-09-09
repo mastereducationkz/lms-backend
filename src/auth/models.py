@@ -34,6 +34,34 @@ class TeacherHourlyRate(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class GroupPayKind(Base):
+    """Whether a group is one student's course or a class — the CRM's verdict, mirrored.
+
+    The answer decides money on both sides: billing charges an individual lesson at a
+    different rate, and payroll pays one at a different rate. So the two systems must not
+    reach it separately, and until now they did — the CRM reads the group's *starting roster*
+    (one student at its first marked lesson, and never a second since), while this side could
+    only read ``groups.group_type`` and guess from the name.
+
+    That disagreed on «Indi Inayat & Tomiris SAT 2026», two named students the name calls an
+    indi, and on the groups whose registers say nothing, where the name is the only evidence
+    there is. Re-implementing the roster rule here would only move the drift.
+
+    Written only by the CRM, through the same LMS-write session as
+    :class:`TeacherHourlyRate`. A group with no row falls back to the LMS's own reading, so
+    this is additive and the payslip keeps working when the CRM is unreachable.
+    """
+
+    __tablename__ = "group_pay_kinds"
+
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True)
+    #: 'individual' or 'group'.
+    pay_kind = Column(String(16), nullable=False)
+    #: How the CRM knew — 'group_type', 'roster' or 'name'. Display and diagnosis only.
+    basis = Column(String(16), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class UserInDB(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
