@@ -13,6 +13,7 @@ from src.config import init_db
 from src.routes import register_routes
 from src.services import cache_service
 from src.services import storage_service
+from src.services.media_tokens import verify_media_token
 
 load_dotenv()
 
@@ -151,13 +152,8 @@ async def invalidate_cache_on_mutation(request: Request, call_next):
         logging.debug("Cache invalidation middleware failed: %s", exc)
     return response
 
-@app.get("/uploads/{path:path}")
-def serve_upload(path: str, request: Request):
-    """Serve uploaded files. On S3 backend: HLS videos (``videos/`` prefix) are
-    streamed through the backend so relative segment refs stay access-controlled and
-    Range requests work; everything else redirects to the resolved (public or
-    presigned) S3 URL. On local backend, stream from the uploads/ dir (dev parity;
-    FileResponse handles Range for local videos)."""
+def _serve_stored(path: str, request: Request):
+    """Shared body for the guarded and unguarded upload routes."""
     if storage_service.use_s3():
         if storage_service.is_video(path):
             result = storage_service.open_stream(path, request.headers.get("range"))
@@ -171,6 +167,29 @@ def serve_upload(path: str, request: Request):
     if not local:
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(local)
+
+
+@app.get("/uploads/v/{token}/{path:path}")
+def serve_upload_signed(token: str, path: str, request: Request):
+    """Stream private media to a holder of a valid prefix-scoped token.
+
+    HLS playlists reference segments relatively, so every segment request arrives
+    under this same ``/v/<token>/`` prefix without the player knowing the token
+    exists.
+    """
+    if verify_media_token(token, path) is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return _serve_stored(path, request)
+
+
+@app.get("/uploads/{path:path}")
+def serve_upload(path: str, request: Request):
+    """Serve uploaded files. Video under ``videos/`` requires a signed token and is
+    served by ``serve_upload_signed``; requests without one are refused as 404 so the
+    endpoint cannot be used to confirm that a recording exists."""
+    if storage_service.is_video(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return _serve_stored(path, request)
 
 
 register_routes(app)
