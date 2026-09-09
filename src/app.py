@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, FileResponse, StreamingResponse
 from starlette.requests import Request
 from datetime import datetime
+from typing import Optional
 from dotenv import load_dotenv
 import logging
 import os
@@ -13,6 +14,7 @@ from src.config import init_db
 from src.routes import register_routes
 from src.services import cache_service
 from src.services import storage_service
+from src.services.media_tokens import normalise_key, verify_media_token
 
 load_dotenv()
 
@@ -151,26 +153,73 @@ async def invalidate_cache_on_mutation(request: Request, call_next):
         logging.debug("Cache invalidation middleware failed: %s", exc)
     return response
 
-@app.get("/uploads/{path:path}")
-def serve_upload(path: str, request: Request):
-    """Serve uploaded files. On S3 backend: HLS videos (``videos/`` prefix) are
-    streamed through the backend so relative segment refs stay access-controlled and
-    Range requests work; everything else redirects to the resolved (public or
-    presigned) S3 URL. On local backend, stream from the uploads/ dir (dev parity;
-    FileResponse handles Range for local videos)."""
+def _upload_key(path: str) -> Optional[str]:
+    """The one place a request path becomes a storage key.
+
+    ``storage_service`` classifies a key by its first segment, while the backends
+    resolve ``.`` and ``..`` away when they fetch — so ``videos/x`` asked for as
+    ``materials/../videos/x`` used to be classified non-video, skip the token
+    guard, and still land on the video bytes. Everything below is handed the
+    result of this one call, so the classification and the fetch cannot disagree.
+    Anchoring at ``/`` also means no run of leading ``..`` climbs out of the
+    uploads root. Returns ``None`` when nothing addressable is left.
+    """
+    return normalise_key(path) or None
+
+
+def _serve_stored(key: str, request: Request):
+    """Serve an already-normalised, already-authorised storage key.
+
+    On the S3 backend: HLS videos (``videos/`` prefix) are streamed through the
+    backend so relative segment refs stay access-controlled and Range requests
+    work; everything else redirects to the resolved (public or presigned) S3 URL.
+    On the local backend, stream from the uploads/ dir (dev parity; FileResponse
+    handles Range for local videos).
+
+    Deliberately does not normalise ``key`` — its callers already did, once.
+    """
     if storage_service.use_s3():
-        if storage_service.is_video(path):
-            result = storage_service.open_stream(path, request.headers.get("range"))
+        if storage_service.is_video(key):
+            result = storage_service.open_stream(key, request.headers.get("range"))
             if result is None:
                 raise HTTPException(status_code=404, detail="File not found")
             status, headers, body = result
             media_type = headers.pop("Content-Type", None)
             return StreamingResponse(body, status_code=status, headers=headers, media_type=media_type)
-        return RedirectResponse(storage_service.url_for(path), status_code=307)
-    local = storage_service.local_path(path)
+        return RedirectResponse(storage_service.url_for(key), status_code=307)
+    local = storage_service.local_path(key)
     if not local:
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(local)
+
+
+@app.get("/uploads/v/{token}/{path:path}")
+def serve_upload_signed(token: str, path: str, request: Request):
+    """Stream private media to a holder of a valid prefix-scoped token.
+
+    HLS playlists reference segments relatively, so every segment request arrives
+    under this same ``/v/<token>/`` prefix without the player knowing the token
+    exists. The route stays confined to video: tokens are only ever minted for a
+    ``videos/`` prefix, and refusing everything else here means one mis-scoped
+    mint could never turn this into a general reader for ``exam_proof/``.
+    """
+    key = _upload_key(path)
+    if key is None or not storage_service.is_video(key):
+        raise HTTPException(status_code=404, detail="File not found")
+    if verify_media_token(token, key) is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return _serve_stored(key, request)
+
+
+@app.get("/uploads/{path:path}")
+def serve_upload(path: str, request: Request):
+    """Serve uploaded files. Video under ``videos/`` requires a signed token and is
+    served by ``serve_upload_signed``; requests without one are refused as 404 so the
+    endpoint cannot be used to confirm that a recording exists."""
+    key = _upload_key(path)
+    if key is None or storage_service.is_video(key):
+        raise HTTPException(status_code=404, detail="File not found")
+    return _serve_stored(key, request)
 
 
 register_routes(app)
