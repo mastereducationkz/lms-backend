@@ -3041,7 +3041,7 @@ def get_teacher_salary_breakdown(
     # explicit `lesson_rate` still wins — a manager recalculating an old period needs to be
     # able to say what the rate WAS. With neither, fall back to the historical default so an
     # unsynced teacher keeps working exactly as before.
-    from src.auth.models import TeacherHourlyRate
+    from src.auth.models import GroupPayKind, TeacherHourlyRate
     from src.services.lesson_minutes import amount_for, format_hours, lesson_minutes
 
     stored = (
@@ -3080,6 +3080,13 @@ def get_teacher_salary_breakdown(
         by_group[group.id]["lesson_dates"].append(event.start_datetime.date())
         by_group[group.id]["minutes"] += lesson_minutes(event.start_datetime, event.end_datetime)
 
+    pay_kinds: dict[int, str] = {
+        int(gid): kind
+        for gid, kind in db.query(GroupPayKind.group_id, GroupPayKind.pay_kind)
+        .filter(GroupPayKind.group_id.in_(list(by_group) or [-1]))
+        .all()
+    }
+
     groups = []
     total_amount = 0
     total_lessons = 0
@@ -3087,12 +3094,19 @@ def get_teacher_salary_breakdown(
     for _, item in sorted(by_group.items(), key=lambda x: x[1]["group_name"].lower()):
         dates = sorted(item["lesson_dates"])
         lesson_count = len(dates)
-        # The group's own type decides which rate applies. The old check was a substring
-        # match on the name ("indi"), which missed every individual group named differently
-        # and mispriced any group that happened to contain those letters.
-        is_indi_group = (item.get("group_type") or "").strip().lower() == "individual" or (
-            "indi" in item["group_name"].lower()
-        )
+        # Which rate applies is the CRM's verdict, mirrored into `group_pay_kinds`, because
+        # it is the same verdict that decides what the student is charged and it is reached
+        # from the group's starting roster — evidence this side does not have. Deciding it
+        # here from the type and the name was wrong twice: «Indi Inayat & Tomiris SAT 2026»
+        # is two students, and a group whose registers say nothing has only its name to go on.
+        # No row yet (a group created since the last push) falls back to the old reading.
+        mirrored = pay_kinds.get(item["group_id"])
+        if mirrored is not None:
+            is_indi_group = mirrored == "individual"
+        else:
+            is_indi_group = (item.get("group_type") or "").strip().lower() == "individual" or (
+                "indi" in item["group_name"].lower()
+            )
         applied_rate = individual_rate if is_indi_group else group_rate
         # The stored rate is hourly and was multiplied by the lesson *count*, so a
         # ninety-minute group paid what a sixty-minute one did.
