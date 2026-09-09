@@ -31,6 +31,7 @@ from src.services.azure_openai_service import AzureOpenAIService
 from src.services import storage_service
 from src.services import video_ingest
 from src.services.cache_service import cached
+from src.services.media_tokens import signed_hls_url
 from src.utils import lesson_access_errors as lesson_errors
 from src.utils.duration_calculator import update_course_duration
 from src.trials.services import trial_lesson_access, get_active_trial as get_active_trial_grant
@@ -1910,7 +1911,10 @@ def get_step(
     assert_student_not_blocked_by_checkpoint(db, current_user, step.lesson_id)
     _trial_hard_gate(db, current_user, step.lesson_id)
 
-    return StepSchema.from_orm(step)
+    schema = StepSchema.from_orm(step)
+    schema.hls_url = signed_hls_url(step.hls_url, current_user.id)
+    schema.hls_url_en = signed_hls_url(step.hls_url_en, current_user.id)
+    return schema
 
 @router.put("/steps/{step_id}", response_model=StepSchema)
 def update_step(

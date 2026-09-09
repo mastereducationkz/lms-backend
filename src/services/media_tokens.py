@@ -43,3 +43,15 @@ def verify_media_token(token: str, path: str) -> Optional[dict]:
     if candidate != prefix and not candidate.startswith(prefix + "/"):
         return None
     return payload
+
+
+def signed_hls_url(stored_path: Optional[str], user_id: int) -> Optional[str]:
+    """Turn a stored ``/uploads/videos/<id>/<lang>/master.m3u8`` path into a
+    token-bearing URL. The token is scoped to the playlist's directory so the
+    variant playlists and segments alongside it resolve under the same token."""
+    if not stored_path:
+        return None
+    key = _normalise(stored_path.split("/uploads/", 1)[-1])
+    prefix = posixpath.dirname(key)
+    token = mint_media_token(prefix, user_id)
+    return f"/uploads/v/{token}/{key}"
