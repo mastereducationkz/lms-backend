@@ -3,6 +3,13 @@ from datetime import datetime, date, timezone
 from typing import Optional, List
 
 
+class RecordingSummary(BaseModel):
+    """What the calendar shows about a lesson's recording. Never a URL: the calendar response
+    is cached, and playback links are minted per viewer when someone presses play."""
+    status: str  # ready | pending | failed | removed
+    duration_seconds: Optional[int] = None
+
+
 class EventSchema(BaseModel):
     id: int
     title: str
@@ -33,6 +40,8 @@ class EventSchema(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     is_substitution: bool = False
+    # Class lessons the viewer may watch; None otherwise (and for anything not a lesson).
+    recording: Optional[RecordingSummary] = None
 
     class Config:
         from_attributes = True

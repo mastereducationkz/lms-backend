@@ -10,7 +10,7 @@ from src.schemas.models import (
     EventSchema, EventParticipantSchema, Enrollment, EventCourse, Course,
     CreateEventRequest, Assignment, Lesson, Module, LessonSchedule,
     AttendanceBulkUpdateSchema, EventStudentSchema, CourseGroupAccess, CourseHeadTeacher,
-    SubstitutionLessonSchema
+    SubstitutionLessonSchema, LessonRecording, RecordingSummary
 )
 from src.routes.auth import get_current_user_dependency
 from src.utils.permissions import require_role, require_teacher_or_admin, require_teacher_curator_or_admin, check_event_access
@@ -21,6 +21,7 @@ from src.services.attendance_service import (
 )
 from src.services.cache_service import cached
 from src.services.operational_groups import event_belongs_on_calendar_clause, operational_group_ids
+from src.services.recording_access import public_status, watchable_event_clause
 
 import logging
 from src.events.display import MULTI_GROUP_TYPES, display_groups, display_title
@@ -539,6 +540,21 @@ def get_calendar_events(
         ).group_by(EventParticipant.event_id).all()
         
         count_map = {event_id: count for event_id, count in participant_counts}
+
+    # Recording status for the lessons this viewer may watch — status only, never a URL:
+    # this response is cached, and playback links are minted per viewer on demand.
+    recording_map = {}
+    class_ids = [e.id for e in standard_events if e.event_type == "class"]
+    if class_ids:
+        for rec in (
+            db.query(LessonRecording)
+            .join(Event, Event.id == LessonRecording.event_id)
+            .filter(LessonRecording.event_id.in_(class_ids), watchable_event_clause(current_user))
+            .all()
+        ):
+            recording_map[rec.event_id] = RecordingSummary(
+                status=public_status(rec), duration_seconds=rec.duration_seconds,
+            )
     
     # Enrich with additional data
     result = []
@@ -684,6 +700,7 @@ def get_calendar_events(
         
         # Add participant count
         event_data.participant_count = count_map.get(event.id, 0)
+        event_data.recording = recording_map.get(event.id)
         
         # Group-scoped events carry their group in the title; multi-group weekly tests do not.
         event_data.title = display_title(event, group_names)

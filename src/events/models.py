@@ -166,6 +166,9 @@ class LessonRecording(Base):
 
     status = Column(String, nullable=False, default="pending")
     hls_url = Column(String, nullable=True)
+    # The preview the Recordings library shows, stored beside the HLS so the same signed
+    # token covers it. NULL for recordings ingested before previews existed.
+    poster_url = Column(String, nullable=True)
     duration_seconds = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)
     attempts = Column(Integer, nullable=False, default=0)

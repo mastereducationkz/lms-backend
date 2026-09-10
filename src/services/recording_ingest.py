@@ -18,6 +18,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from sqlalchemy.exc import OperationalError
 
@@ -128,6 +129,60 @@ def _repackage_hls(src: Path, out: Path, *, has_audio: bool) -> None:
         raise RuntimeError("ffmpeg did not produce master.m3u8")
 
 
+def probe_duration(src: Path) -> Optional[int]:
+    """Length of the recording in whole seconds, or None if ffprobe cannot tell."""
+    try:
+        out = video_ingest._run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+            timeout=120, capture=True,
+        )
+        return int(round(float(out.strip().splitlines()[0])))
+    except Exception as e:
+        logger.warning("could not read the duration of %s: %s", src.name, e)
+        return None
+
+
+# Where to look for the preview, as fractions of the lesson. Not the first frame: Meet opens on
+# a webcam tile (the preview Google Drive shows). Slides and a whiteboard come later.
+POSTER_FRACTIONS = (0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80)
+POSTER_WIDTH = 1280
+
+
+def make_poster(src: Path, out_dir: Path, duration: Optional[int]) -> Optional[Path]:
+    """Write ``poster.jpg`` into ``out_dir`` — the most detailed of several candidate frames.
+
+    At the same JPEG quality a busier picture compresses worse, so the largest candidate is
+    the one with the most on it: a slide full of text beats a face, and both beat a black
+    frame from a camera that was off. It is a cheap proxy that needs no image library.
+    Returns None rather than raising: a lesson without a preview is still a lesson.
+    """
+    if not duration or duration < 1:
+        return None
+    candidates = []
+    for i, fraction in enumerate(POSTER_FRACTIONS):
+        frame = out_dir / f".poster_candidate_{i}.jpg"
+        try:
+            video_ingest._run(
+                ["ffmpeg", "-y", "-v", "error", "-ss", f"{duration * fraction:.2f}", "-i", str(src),
+                 "-frames:v", "1", "-vf", f"scale='min({POSTER_WIDTH},iw)':-2", "-q:v", "3",
+                 str(frame)],
+                timeout=120,
+            )
+            if frame.exists() and frame.stat().st_size > 0:
+                candidates.append(frame)
+        except Exception as e:
+            logger.warning("%s: no preview frame at %.0f%%: %s", src.name, fraction * 100, e)
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda f: f.stat().st_size)
+    poster = out_dir / "poster.jpg"
+    best.replace(poster)
+    for leftover in candidates:
+        leftover.unlink(missing_ok=True)
+    return poster
+
+
 def package_hls(src: Path, out: Path) -> str:
     """Make the recording streamable. Returns ``"repackaged"`` or ``"re-encoded"``.
 
@@ -204,13 +259,20 @@ def process_recording(db, recording) -> None:
         how = package_hls(source, hls_dir)
         logger.info("recording %s: %s for streaming", rec_id, how)
 
+        duration = probe_duration(source)
+        # Written into the HLS folder so it uploads with the tree, under the same token.
+        poster = make_poster(source, hls_dir, duration)
+
         prefix = storage_prefix(event_id)
         video_ingest._upload_tree(hls_dir, prefix)
 
         hls_url = storage_service.stored_path(f"{prefix}/master.m3u8")
+        poster_url = storage_service.stored_path(f"{prefix}/poster.jpg") if poster else None
         _save(db, recording, hls_url=hls_url, status="ready", error=None,
+              duration_seconds=duration, poster_url=poster_url,
               ingested_at=datetime.now(timezone.utc))
-        logger.info("recording %s: ready at %s", rec_id, hls_url)
+        logger.info("recording %s: ready at %s (%ss, preview %s)",
+                    rec_id, hls_url, duration, "yes" if poster else "no")
 
         # Archive into the Shared Drive (spec §4.3 step 5). Deliberately after the row is
         # committed as ready: the lesson is already watchable from S3, so a Drive hiccup
@@ -225,6 +287,36 @@ def process_recording(db, recording) -> None:
             db.rollback()
             logger.error("recording %s: Shared Drive archive failed (video is still "
                          "playable; Drive original will not be purged): %s", rec_id, e)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def backfill_media(db, recording) -> dict:
+    """Add the duration and preview to a recording ingested before either existed.
+
+    Works from the Drive original (the HLS on S3 is left untouched) and uploads only
+    ``poster.jpg``. Safe to re-run: it overwrites the preview and rewrites the two columns.
+    """
+    rec_id, event_id, drive_file_id = recording.id, recording.event_id, recording.drive_file_id
+    if not drive_file_id:
+        raise RuntimeError(f"recording {rec_id} has no drive_file_id")
+    db.commit()  # see process_recording: never idle in a transaction through the download
+
+    workdir = Path(tempfile.mkdtemp(prefix=f"rec_media_{event_id}_"))
+    try:
+        source = _download_drive_file(drive_file_id, workdir)
+        duration = probe_duration(source)
+        out = workdir / "media"
+        out.mkdir()
+        poster = make_poster(source, out, duration)
+        fields = {"duration_seconds": duration}
+        if poster:
+            prefix = storage_prefix(event_id)
+            storage_service.save(f"{prefix}/poster.jpg", poster.read_bytes(),
+                                 content_type=storage_service.content_type_for("poster.jpg"))
+            fields["poster_url"] = storage_service.stored_path(f"{prefix}/poster.jpg")
+        _save(db, recording, **fields)
+        return fields
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

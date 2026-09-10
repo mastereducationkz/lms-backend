@@ -115,3 +115,45 @@ def test_an_unreadable_file_is_left_to_the_encoder(tmp_path, out, encoder):
 
     assert recording_ingest.package_hls(src, out) == "re-encoded"
     assert encoder == ["junk.mp4"]
+
+
+# --- duration and preview -----------------------------------------------------------------
+
+
+def _black_then_busy(path):
+    """10 s of black (a camera that is off), then 10 s of a detailed picture (a slide)."""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=black:s=640x360:d=10:r=10",
+         "-f", "lavfi", "-i", "testsrc=s=640x360:d=10:r=10",
+         "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
+        check=True,
+    )
+    return path
+
+
+def test_the_duration_is_read_from_the_file(tmp_path):
+    assert recording_ingest.probe_duration(_clip(tmp_path / "lesson.mp4", seconds=20)) == 20
+
+
+def test_an_unreadable_file_has_no_duration(tmp_path):
+    junk = tmp_path / "junk.mp4"
+    junk.write_bytes(b"not a video")
+    assert recording_ingest.probe_duration(junk) is None
+
+
+def test_the_preview_is_the_most_detailed_frame_not_the_first(tmp_path, out):
+    src = _black_then_busy(tmp_path / "lesson.mp4")
+    poster = recording_ingest.make_poster(src, out, duration=20)
+
+    assert poster == out / "poster.jpg" and poster.exists()
+    black = tmp_path / "black.jpg"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", "2", "-i", str(src), "-frames:v", "1",
+                    "-q:v", "3", str(black)], check=True)
+    assert poster.stat().st_size > 3 * black.stat().st_size, "a slide beats a camera that was off"
+    assert not list(out.glob(".poster_candidate_*")), "candidates are cleaned up"
+
+
+def test_no_duration_means_no_preview_rather_than_an_error(tmp_path, out):
+    assert recording_ingest.make_poster(_clip(tmp_path / "lesson.mp4"), out, duration=None) is None
