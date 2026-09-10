@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 
+# yt-dlp's own defaults (10 retries on both counts) are tuned for a flaky-but-reachable
+# host. They turn an unreachable host into a very long hang instead: a CDN node that
+# accepts TCP but never completes TLS (see incident below) burns the full retry budget
+# per fragment while reporting 0 bytes downloaded, wedging the single-threaded worker
+# behind it. Bound both explicitly so a dead CDN fails fast and the job gets retried
+# (via MAX_ATTEMPTS) instead of sitting in "processing" forever.
+YTDLP_RETRIES = 2
+YTDLP_FRAGMENT_RETRIES = 2
+# Subprocess-level ceiling. Kept generous (a legitimate long video can take a while to
+# download) — the retry bound above is what protects against the wedge, not this.
+DOWNLOAD_TIMEOUT = 1800
+
 # --- YouTube URL helpers (self-contained; mirrors utils/youtube.ts) ----------
 _YT_PATTERNS = [
     re.compile(r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})'),
@@ -136,15 +148,18 @@ def _run(cmd: list, timeout: int, capture: bool = False) -> str:
 
 def _download(url: str, workdir: Path) -> Path:
     out_tmpl = str(workdir / "source.%(ext)s")
-    _run(
-        ["yt-dlp", "--no-playlist", "--socket-timeout", "30",
-         # Fetch + run YouTube's nsig challenge solver (EJS) via Deno. Required since
-         # yt-dlp moved nsig solving to remote components; without it downloads throttle.
-         "--remote-components", "ejs:github",
-         "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
-         "--merge-output-format", "mp4", "-o", out_tmpl, url],
-        timeout=1800,
-    )
+    cmd = ["yt-dlp", "--no-playlist", "--socket-timeout", "30",
+           "--retries", str(YTDLP_RETRIES), "--fragment-retries", str(YTDLP_FRAGMENT_RETRIES),
+           # Fetch + run YouTube's nsig challenge solver (EJS) via Deno. Required since
+           # yt-dlp moved nsig solving to remote components; without it downloads throttle.
+           "--remote-components", "ejs:github",
+           "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
+           "--merge-output-format", "mp4", "-o", out_tmpl]
+    proxy = os.getenv("YTDLP_PROXY")
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd.append(url)
+    _run(cmd, timeout=DOWNLOAD_TIMEOUT)
     files = sorted(workdir.glob("source.*"))
     if not files:
         raise RuntimeError("yt-dlp produced no output file")
