@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.services import google_workspace, storage_service, video_ingest
+from src.services import google_workspace, meet_recordings, storage_service, video_ingest
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,23 @@ def process_recording(db, recording) -> None:
         recording.ingested_at = datetime.now(timezone.utc)
         db.commit()
         logger.info("recording %s: ready at %s", recording.id, recording.hls_url)
+
+        # Archive into the Shared Drive (spec §4.3 step 5). Deliberately after the row is
+        # committed as ready: the lesson is already watchable from S3, so a Drive hiccup
+        # must not fail the ingest or make a student wait. It does leave
+        # shared_drive_file_id NULL, which retention treats as "not safe to purge the
+        # original yet" — so a failure here costs storage, never the recording.
+        try:
+            recording.shared_drive_file_id = meet_recordings.copy_to_shared_drive(
+                recording.drive_file_id, recording.event
+            )
+            db.commit()
+            logger.info("recording %s: archived to Shared Drive as %s",
+                        recording.id, recording.shared_drive_file_id)
+        except Exception as e:
+            db.rollback()
+            logger.error("recording %s: Shared Drive archive failed (video is still "
+                         "playable; Drive original will not be purged): %s", recording.id, e)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

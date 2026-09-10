@@ -29,9 +29,13 @@ S3_VIDEO_MONTHS = 12
 def purge_drive_originals(db, dry_run: bool = True, limit: int = 100) -> dict:
     """Delete the robot's copy of recordings ingested more than 7 days ago.
 
-    Only ``status='ready'`` rows are eligible. A ``failed`` recording is explicitly spared:
-    its Drive original is the *only* remaining copy of that lesson, and deleting it would
-    destroy the very thing a human needs in order to fix the failure.
+    Two conditions, and both are about never destroying the last copy:
+
+    * only ``status='ready'`` — a ``failed`` recording's Drive original is the *only*
+      remaining copy of that lesson, and is exactly what a human needs to fix the failure;
+    * only when ``shared_drive_file_id`` is set — that is the Shared Drive archive. If the
+      archive step failed, the original is still the only copy outside S3, so it stays.
+      A failure there costs storage; purging anyway could cost the lesson.
     """
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=DRIVE_ORIGINAL_DAYS)
     due = (
@@ -42,6 +46,8 @@ def purge_drive_originals(db, dry_run: bool = True, limit: int = 100) -> dict:
             LessonRecording.ingested_at < cutoff,
             LessonRecording.drive_file_id.isnot(None),
             LessonRecording.drive_purged_at.is_(None),
+            # No archive, no purge. See the docstring.
+            LessonRecording.shared_drive_file_id.isnot(None),
         )
         .limit(limit)
         .all()

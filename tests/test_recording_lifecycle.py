@@ -32,6 +32,7 @@ class _Recording:
         self.hls_url = kw.get("hls_url", "/uploads/videos/recordings/10/master.m3u8")
         self.ingested_at = kw.get("ingested_at")
         self.drive_purged_at = kw.get("drive_purged_at")
+        self.shared_drive_file_id = kw.get("shared_drive_file_id")
         self.attempts = kw.get("attempts", 0)
         self.error = None
 
@@ -233,3 +234,69 @@ def test_ingest_counts_the_attempt_before_trying(monkeypatch):
 
 def test_ingest_returns_false_when_nothing_pending():
     assert recordings_worker.ingest_one_pending(_DB([])) is False
+
+
+# --- the Shared Drive archive ------------------------------------------------
+
+def _fake_download(file_id, workdir):
+    """Stand in for the Drive download, writing a real (empty-ish) file.
+
+    process_recording logs the downloaded size, so the path handed back has to exist.
+    """
+    dest = workdir / "source.mp4"
+    dest.write_bytes(b"x")
+    return dest
+
+
+def test_ingest_archives_to_the_shared_drive(monkeypatch):
+    """The archive step was dead code once; pin that it is actually called.
+
+    Spec 4.3 step 5 requires a copy in the Shared Drive. Without it, retention would
+    delete the Drive original at 7 days leaving only the S3 HLS, and the lesson would have
+    no archived master.
+    """
+    from src.services import recording_ingest
+
+    rec = _Recording(status="pending", hls_url=None, ingested_at=None)
+    rec.event = _Recording()  # any object; copy_to_shared_drive is faked
+    db = _DB([rec])
+    copied = []
+
+    monkeypatch.setattr(recording_ingest, "_download_drive_file", _fake_download)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_transcode_hls", lambda s, o: None)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p: None)
+    monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
+
+    def _fake_copy(file_id, event):
+        copied.append(file_id)
+        return "shared-file-9"
+
+    monkeypatch.setattr(recording_ingest.meet_recordings, "copy_to_shared_drive", _fake_copy)
+
+    # _download_drive_file is faked, so stat() is never called on a real file.
+    recording_ingest.process_recording(db, rec)
+
+    assert rec.status == "ready"
+    assert copied == ["drive-1"], "the Shared Drive archive must actually happen"
+    assert rec.shared_drive_file_id == "shared-file-9"
+
+
+def test_archive_failure_does_not_fail_the_ingest(monkeypatch):
+    """The video is already on S3 and playable; a Drive hiccup must not undo that."""
+    from src.services import recording_ingest
+
+    rec = _Recording(status="pending", hls_url=None, ingested_at=None)
+    rec.event = _Recording()
+    db = _DB([rec])
+
+    monkeypatch.setattr(recording_ingest, "_download_drive_file", _fake_download)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_transcode_hls", lambda s, o: None)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p: None)
+    monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
+    monkeypatch.setattr(recording_ingest.meet_recordings, "copy_to_shared_drive",
+                        lambda f, e: (_ for _ in ()).throw(RuntimeError("Drive 503")))
+
+    recording_ingest.process_recording(db, rec)
+
+    assert rec.status == "ready", "a failed archive must not un-ready a playable lesson"
+    assert rec.shared_drive_file_id is None, "and retention must see there is no archive yet"
