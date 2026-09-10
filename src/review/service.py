@@ -123,6 +123,54 @@ def best_attempts_for_step(
     )
 
 
+def average_percent_for_steps(
+    db: Session, step_ids: Sequence[int], student_ids: Sequence[int]
+) -> Dict[int, float]:
+    """Per-step average of each roster student's best submitted attempt.
+
+    Same best-attempt rule as best_attempts_for_step (highest score_percentage,
+    ties broken by the later COALESCE(completed_at, created_at)), but widened to
+    every step id at once — a single DISTINCT ON over the whole course's quiz
+    steps, averaged per step in Python — instead of one query per quiz. Calling
+    best_attempts_for_step in a loop here would be an N+1 on an endpoint that
+    fires on every group-dropdown change.
+
+    Students who never submitted are excluded from the average, not counted as
+    zero. A step with no qualifying attempts is simply absent from the result.
+
+    This is the score students themselves saw (the stored `score_percentage`),
+    not recomputed from `answers` — the backend doesn't grade quizzes, the
+    frontend's `gradeQuestion` does. It can therefore differ slightly from the
+    presenter's summary screen, which recomputes over gradable questions only.
+    """
+    if not step_ids or not student_ids:
+        return {}
+    done_at = func.coalesce(QuizAttempt.completed_at, QuizAttempt.created_at)
+    best_rows = (
+        db.query(QuizAttempt.step_id, QuizAttempt.score_percentage)
+        .filter(
+            QuizAttempt.step_id.in_(list(step_ids)),
+            QuizAttempt.is_draft.is_(False),
+            QuizAttempt.user_id.in_(list(student_ids)),
+        )
+        .distinct(QuizAttempt.step_id, QuizAttempt.user_id)
+        .order_by(
+            QuizAttempt.step_id,
+            QuizAttempt.user_id,
+            QuizAttempt.score_percentage.desc(),
+            done_at.desc(),
+        )
+        .all()
+    )
+    scores_by_step: Dict[int, List[float]] = {}
+    for step_id, score in best_rows:
+        scores_by_step.setdefault(step_id, []).append(score)
+    return {
+        step_id: round(sum(scores) / len(scores), 1)
+        for step_id, scores in scores_by_step.items()
+    }
+
+
 def course_id_for_step(db: Session, step: Step) -> int:
     """The course a quiz step belongs to (steps reach it via lesson -> module)."""
     row = (
@@ -184,6 +232,10 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
     lesson_ids = list(dict.fromkeys(row.lesson_id for row in rows))
     completed_counts = completed_lesson_counts(db, roster_ids, lesson_ids)
 
+    # Same idea for averages: one bulk query across every quiz step in the course,
+    # not one best_attempts_for_step() call per quiz.
+    averages = average_percent_for_steps(db, step_ids, roster_ids)
+
     units: List[Dict[str, Any]] = []
     by_lesson: Dict[int, Dict[str, Any]] = {}
     for row in rows:
@@ -202,6 +254,7 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
             "title": row.step_title,
             "question_count": quiz_question_count(row.step_content_text),
             "submitted_count": submitted.get(row.step_id, 0),
+            "average_percent": averages.get(row.step_id),
         })
 
     return {
