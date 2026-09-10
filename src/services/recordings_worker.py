@@ -26,6 +26,7 @@ from src.config import SessionLocal
 from src.schemas.models import Event, LessonRecording, UserInDB
 from src.services import (
     google_workspace,
+    meet_attendance,
     meet_recordings,
     meet_scheduling,
     recording_alerts,
@@ -260,11 +261,12 @@ class RecordingsWorker:
     def tick(self) -> dict:
         """One pass. Returns a summary, which makes it directly testable and callable by hand."""
         db = SessionLocal()
-        summary = {"links": 0, "claimed": 0, "ingested": 0, "missing": 0}
+        summary = {"links": 0, "claimed": 0, "attendance": 0, "ingested": 0, "missing": 0}
         try:
             for key, fn in (
                 ("links", ensure_upcoming_meet_links),
                 ("claimed", poll_for_recordings),
+                ("attendance", meet_attendance.sync_if_enabled),
                 ("ingested", ingest_pending),
                 ("missing", recording_alerts.sweep_missing_recordings),
             ):

@@ -221,6 +221,94 @@ class MissingRecordingLog(Base):
     )
 
 
+class MeetConference(Base):
+    """One call held in a lesson's Meet room.
+
+    Every lesson has its own room, and a room opens a new call each time it goes from empty
+    to occupied — an early test call, the lesson, a reconnect after everyone dropped. All of
+    them belong to the lesson; which parts count is decided when the record is read, not here.
+    Google keeps these for about 30 days, so this table is the lasting copy.
+    """
+
+    __tablename__ = "meet_conferences"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    conference_record = Column(String, nullable=False, unique=True)  # "conferenceRecords/<id>"
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    # Set once the call had ended and its people were saved; the job never asks again.
+    synced_at = Column(DateTime, nullable=True)
+
+    participants = relationship("MeetParticipant", back_populates="conference",
+                                cascade="all, delete-orphan")
+
+
+class MeetParticipant(Base):
+    """One person in one call, as Meet identifies them.
+
+    Meet gives a stable Google account id and a display name — never an email. Who that is in
+    the LMS comes from GoogleAccountLink, confirmed once. A guest (not signed in) has no
+    account to remember, so a guest is matched for this lesson only, on the row itself.
+    """
+
+    __tablename__ = "meet_participants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conference_id = Column(Integer, ForeignKey("meet_conferences.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    participant_name = Column(String, nullable=False, unique=True)  # ".../participants/<id>"
+    kind = Column(String, nullable=False)  # signed_in | guest | phone
+    google_user = Column(String, nullable=True, index=True)  # "users/<id>", signed-in only
+    display_name = Column(String, nullable=True)
+    # Guests and phone callers only: who this was in this lesson, or not a student at all.
+    lesson_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    lesson_not_a_student = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    conference = relationship("MeetConference", back_populates="participants")
+    sessions = relationship("MeetParticipantSession", back_populates="participant",
+                            cascade="all, delete-orphan", order_by="MeetParticipantSession.joined_at")
+
+
+class MeetParticipantSession(Base):
+    """One stretch in the call: a join and the leave that ended it. A reconnect is a new one."""
+
+    __tablename__ = "meet_participant_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    participant_id = Column(Integer, ForeignKey("meet_participants.id", ondelete="CASCADE"),
+                            nullable=False, index=True)
+    session_name = Column(String, nullable=False, unique=True)  # ".../participantSessions/<id>"
+    joined_at = Column(DateTime, nullable=False)
+    left_at = Column(DateTime, nullable=True)
+
+    participant = relationship("MeetParticipant", back_populates="sessions")
+
+
+class GoogleAccountLink(Base):
+    """Which LMS person a Google account belongs to — confirmed once by a person, then used
+    for every lesson, past and future.
+
+    ``user_id`` NULL with ``not_a_student`` set means "someone we do not track here" (a staff
+    member, a parent), so the account stops being asked about.
+    """
+
+    __tablename__ = "google_account_links"
+
+    google_user = Column(String, primary_key=True)  # "users/<id>"
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    not_a_student = Column(Boolean, nullable=False, default=False, server_default="false")
+    display_name = Column(String, nullable=True)  # as Meet showed it when confirmed
+    confirmed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    confirmed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+                          server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("(user_id IS NOT NULL) <> not_a_student", name="ck_google_account_link_target"),
+    )
+
+
 class LessonSchedule(Base):
     __tablename__ = "lesson_schedules"
     id = Column(Integer, primary_key=True, index=True)
