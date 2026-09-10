@@ -41,6 +41,18 @@ def main():
         except Exception as e:
             logger.error(f"Failed to start video ingest worker: {e}", exc_info=True)
 
+    # Start the lesson-recording pipeline (Meet -> Drive -> HLS -> S3). Scheduler
+    # container only, same as video ingest, so the API process never double-processes.
+    # Self-gating: RecordingsWorker.start() returns immediately unless ENABLE_RECORDINGS
+    # is true AND the OAuth env is complete.
+    try:
+        from src.services.recordings_worker import RecordingsWorker
+        RecordingsWorker(
+            poll_interval=int(os.getenv('RECORDINGS_POLL_SECONDS', '300'))
+        ).start()
+    except Exception as e:
+        logger.error(f"Failed to start recordings worker: {e}", exc_info=True)
+
     # Start the cross-platform sync outbox drainer (HTTP-pushes group/membership changes to
     # SAT/NUET, later IELTS). No-op unless SYNC_ENABLED; runs only here so the API process
     # never double-drains. See SSO_SYNC_DESIGN.md.

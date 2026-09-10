@@ -149,6 +149,38 @@ def delete(key: str) -> None:
             pass
 
 
+def list_keys(prefix: str) -> list:
+    """Every stored key under ``prefix``, as keys (not /uploads/ paths).
+
+    Added for retention (src/services/recording_retention.py): an HLS video is a tree of
+    a master playlist, per-rendition playlists and dozens of .ts segments, so purging one
+    means enumerating what was actually written rather than guessing at filenames.
+
+    Paginates on S3 — a 40-minute lesson at three renditions runs well past the 1000-key
+    page limit, and a silent truncation would leave orphaned segments paid for forever.
+    """
+    nprefix = _norm_key(prefix)
+    if use_s3():
+        out, token = [], None
+        s3_prefix = _s3_key(nprefix)
+        while True:
+            kwargs = {"Bucket": AWS_S3_BUCKET, "Prefix": s3_prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = _client().list_objects_v2(**kwargs)
+            for item in resp.get("Contents", []):
+                full = item["Key"]
+                # Strip the bucket-side prefix so callers get the same key space they save with.
+                out.append(full[len(s3_prefix) - len(nprefix):] if s3_prefix != nprefix else full)
+            if not resp.get("IsTruncated"):
+                return out
+            token = resp.get("NextContinuationToken")
+    root = _LOCAL_ROOT / nprefix
+    if not root.exists():
+        return []
+    return [str(p.relative_to(_LOCAL_ROOT)) for p in root.rglob("*") if p.is_file()]
+
+
 def url_for(key: str) -> str:
     """Resolve a stored key to a fetchable URL (used by the /uploads serving route)."""
     nkey = _norm_key(key)

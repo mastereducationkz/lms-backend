@@ -12,7 +12,7 @@ def register_routes(app: FastAPI):
     from src.courses.routes import courses_router
     from src.assignments.routes import assignments_router, assignment_zero_router
     from src.progress.routes import progress_router, admin_progress_router
-    from src.events.routes import events_router
+    from src.events.routes import events_router, lesson_recordings_router
     from src.messages.routes import messages_router, notifications_router, group_messages_router
     from src.parents.routes import router as parents_router
     from src.gamification.routes import (
@@ -50,6 +50,9 @@ def register_routes(app: FastAPI):
     app.include_router(progress_router, prefix="/progress", tags=["Progress"])
     app.include_router(media_router, prefix="/media", tags=["Media"])
     app.include_router(events_router, prefix="/events", tags=["Events"])
+    # Same /events prefix: a lesson recording is an attribute of the lesson, so it reads
+    # as GET /events/{id}/recording rather than inventing a parallel resource.
+    app.include_router(lesson_recordings_router, prefix="/events", tags=["Events"])
     app.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
     app.include_router(flashcards_router, prefix="/flashcards", tags=["Flashcards"])
     app.include_router(favorite_steps_router, prefix="/favorite-steps", tags=["Favorite Steps"])
