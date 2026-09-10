@@ -44,7 +44,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/meetings.space.created",
 ]
 
-RECORDINGS_SHARED_DRIVE_ID = "0AAR1I-vUrpFRUk9PVA"  # "Уроки — записи"
+# Shared Drive ids come from the environment so a staging deployment can point at
+# different drives. The defaults are the production drives, so a missing env var
+# degrades to "correct in prod" rather than to an empty id that fails obscurely.
+RECORDINGS_SHARED_DRIVE_ID = os.getenv("RECORDINGS_SHARED_DRIVE_ID") or "0AAR1I-vUrpFRUk9PVA"
+SALES_SHARED_DRIVE_ID = os.getenv("SALES_SHARED_DRIVE_ID") or "0ABz89lc-3YQ5Uk9PVA"
 
 
 class GoogleWorkspaceNotConfigured(RuntimeError):
@@ -80,13 +84,15 @@ def credentials(scopes: Optional[list] = None):
     No access token is passed: google-auth fetches one on first use and refreshes it
     thereafter, so nothing long-lived beyond the refresh token is ever held in memory.
 
-    ``Credentials`` is imported here rather than at module scope on purpose. Importing
-    ``google.oauth2.credentials`` pulls in ``google.oauth2.reauth`` → ``pyu2f``, which
-    enumerates USB HID devices looking for security keys; under a sandboxed macOS shell
-    that enumeration blocks indefinitely, wedging any test run that merely *collects* a
-    module importing this one. Linux containers are unaffected — but there is no reason
-    for a module whose main job is answering ``recordings_enabled()`` to drag that in at
-    import time anyway.
+    ``Credentials`` is imported here rather than at module scope so that a module whose
+    main job is answering ``recordings_enabled()`` does not drag the google-auth tree in
+    at import time.
+
+    (An earlier version of this comment blamed ``pyu2f`` USB-key enumeration for import
+    hangs on the dev Mac. That was wrong: ``faulthandler`` showed the process parked in
+    ``importlib._bootstrap_external.get_data`` — file I/O — because the venv lives under
+    ``~/Documents`` and iCloud had evicted it. Same import: >120 s from that venv, 1.06 s
+    from ``/tmp``. Nothing to do with this code.)
     """
     from google.oauth2.credentials import Credentials
 
