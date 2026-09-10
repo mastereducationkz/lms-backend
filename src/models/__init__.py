@@ -35,6 +35,7 @@ from src.checkpoints.models import (  # noqa: F401
 from src.events.models import (
     Event, EventGroup, EventCourse, EventParticipant,
     MissedAttendanceLog, LessonSchedule, Attendance,
+    LessonRecording, MissingRecordingLog,
 )
 from src.messages.models import Message, Notification
 from src.messages.group_models import GroupConversation, GroupConversationMember, GroupMessage
@@ -77,6 +78,7 @@ __all__ = [
     "StudentCourseSummary", "CourseAnalyticsCache", "QuizAttempt",
     "Event", "EventGroup", "EventCourse", "EventParticipant",
     "MissedAttendanceLog", "LessonSchedule", "Attendance",
+    "LessonRecording", "MissingRecordingLog",
     "Message", "Notification",
     "GroupConversation", "GroupConversationMember", "GroupMessage",
     "LeaderboardEntry", "LeaderboardConfig", "CuratorRating",

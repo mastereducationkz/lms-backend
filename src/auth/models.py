@@ -88,6 +88,12 @@ class UserInDB(Base):
     # Stable central-IdP (Zitadel) subject, captured at OIDC login — the canonical
     # cross-system identity link (SSO Phase 2). Distinct from the overloaded student_id.
     central_auth_user_id = Column(String, nullable=True, index=True)
+    # Google Workspace address (…@mastereducation.kz) for staff who host recorded
+    # lessons. `email` above is the person's own address and is what they log in with;
+    # this is the separate identity Meet and Calendar know them by, so the two cannot be
+    # collapsed. Its absence is also the rollout switch: a lesson only gets a Meet link
+    # if its teacher has one set (src/services/meet_scheduling.py).
+    workspace_email = Column(String, nullable=True, index=True)
     total_study_time_minutes = Column(Integer, default=0, nullable=False)
     daily_streak = Column(Integer, default=0, nullable=False)
     last_activity_date = Column(Date, nullable=True)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, func
+from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, func, text
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -131,6 +131,90 @@ class MissedAttendanceLog(Base):
         UniqueConstraint('event_id', 'group_id', name='uq_missed_attendance_event_group'),
         Index('ix_missed_attendance_teacher', 'teacher_id'),
         Index('ix_missed_attendance_resolved', 'resolved_at'),
+    )
+
+
+class LessonRecording(Base):
+    """One Google Meet recording, bound to the lesson it came from.
+
+    The binding is explicit, never inferred. Google tells us a recording exists via
+    ``conferenceRecords``; we resolve that to a Drive file id and match it back to the
+    lesson through the Meet space we created for that lesson (``Event.meeting_url``).
+    Timestamp- or filename-matching was considered and rejected — back-to-back lessons
+    and rescheduled events make it guesswork (spec §4.3).
+
+    `status` is payroll data, not just plumbing: accountants read it to decide whether a
+    lesson gets paid ("no recording, no pay"), so the vocabulary is fixed and small.
+      pending  — lesson happened, we are waiting for / working on the recording
+      ready    — hls_url is populated and a student can watch it
+      failed   — we found a recording but could not ingest it; needs a human
+      missing  — the lesson ended and no recording ever arrived (the payroll case)
+    """
+
+    __tablename__ = "lesson_recordings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
+
+    # Google's identifiers. conference_record is "conferenceRecords/<id>"; drive_file_id
+    # is the file in the robot's Drive that Meet produced.
+    conference_record = Column(String, nullable=True)
+    drive_file_id = Column(String, nullable=True)
+    # The copy we made into the Shared Drive. Kept separate from drive_file_id because
+    # the original is deleted after 7 days (§4.6) while this one is the archive.
+    shared_drive_file_id = Column(String, nullable=True)
+
+    status = Column(String, nullable=False, default="pending")
+    hls_url = Column(String, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime, server_default=func.now(),
+                        default=lambda: datetime.now(timezone.utc), nullable=False)
+    ingested_at = Column(DateTime, nullable=True)
+    # When the 7-day original was deleted from the robot's Drive. NULL means either not
+    # yet due or not yet purged; the retention job uses it to stay idempotent.
+    drive_purged_at = Column(DateTime, nullable=True)
+
+    event = relationship("Event")
+
+    __table_args__ = (
+        # One recording row per lesson. Pub/Sub is gone but polling is still at-least-once:
+        # the same conference will be seen on every tick until it reaches a terminal state,
+        # and this constraint is what stops that becoming duplicate rows.
+        UniqueConstraint("event_id", name="uq_lesson_recording_event"),
+        # A Drive file must never be ingested twice, even if two lessons somehow resolve
+        # to it. Partial: many rows legitimately sit with drive_file_id NULL while pending.
+        Index("uq_lesson_recording_drive_file", "drive_file_id", unique=True,
+              postgresql_where=text("drive_file_id IS NOT NULL")),
+        Index("ix_lesson_recording_status", "status"),
+    )
+
+
+class MissingRecordingLog(Base):
+    """A lesson that ended without a recording — raised before payroll runs.
+
+    Deliberately shaped like MissedAttendanceLog (same idea: something a teacher was
+    supposed to do and didn't), so accountants and curators read one familiar pattern
+    rather than two. Resolvable, because a recording can still arrive late.
+    """
+
+    __tablename__ = "missing_recording_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+
+    event = relationship("Event")
+    teacher = relationship("UserInDB")
+
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_missing_recording_event"),
+        Index("ix_missing_recording_teacher", "teacher_id"),
+        Index("ix_missing_recording_resolved", "resolved_at"),
     )
 
 
