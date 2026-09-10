@@ -15,7 +15,13 @@ from src.progress.models import StepProgress, StudentProgress
 def _required_steps_by_lesson(
     db: Session, lesson_ids: List[int]
 ) -> Dict[int, List[int]]:
-    """Per lesson: non-optional step ids, or every step id if all steps are optional."""
+    """Per lesson: non-optional step ids, or every step id if all steps are optional.
+
+    This is the single source of the required-steps rule. Both `completed_lesson_ids`
+    and `completed_lesson_counts` must call this rather than reimplementing it inline —
+    that is the whole point of this module existing (one definition of "completed",
+    not two copies that happen to agree today).
+    """
     steps_by_lesson: Dict[int, List[Tuple[int, bool]]] = {}
     for sid, lid, is_optional in db.query(Step.id, Step.lesson_id, Step.is_optional).filter(
         Step.lesson_id.in_(lesson_ids)
@@ -51,15 +57,10 @@ def completed_lesson_ids(db: Session, user_id: int, lesson_ids: Iterable[int]) -
             StepProgress.status == "completed",
         ).all()
     }
-    steps_by_lesson: Dict[int, List[Tuple[int, bool]]] = {}
-    for sid, lid, is_optional in db.query(Step.id, Step.lesson_id, Step.is_optional).filter(
-        Step.lesson_id.in_(remaining)
-    ).all():
-        steps_by_lesson.setdefault(lid, []).append((sid, bool(is_optional)))
+    required_by_lesson = _required_steps_by_lesson(db, remaining)
     for lid in remaining:
-        lesson_steps = steps_by_lesson.get(lid, [])
-        required = [s for s in lesson_steps if not s[1]] or lesson_steps
-        if required and all(sid in completed_step_ids for sid, _ in required):
+        required = required_by_lesson.get(lid, [])
+        if required and all(sid in completed_step_ids for sid in required):
             completed.add(lid)
     return completed
 
@@ -101,6 +102,7 @@ def completed_lesson_counts(
         for uid, sid in db.query(StepProgress.user_id, StepProgress.step_id).filter(
             StepProgress.user_id.in_(user_ids),
             StepProgress.step_id.in_(all_required_step_ids),
+            StepProgress.lesson_id.in_(lesson_ids),
             StepProgress.status == "completed",
         ).all():
             completed_steps_by_user.setdefault(uid, set()).add(sid)

@@ -142,6 +142,32 @@ def test_bulk_empty_inputs(db):
     assert completed_lesson_counts(db, [s.id], []) == {}
 
 
+def test_zero_step_lesson_never_counts_as_completed(db):
+    """A lesson with no Step rows at all must not count as completed for anyone, for
+    either function."""
+    from src.checkpoints.completion import completed_lesson_ids, completed_lesson_counts
+    from src.schemas.models import Course, Module, Lesson
+    course = Course(title="No-step course", is_active=True); db.add(course); db.flush()
+    module = Module(title="M", course_id=course.id, order_index=0); db.add(module); db.flush()
+    lesson = Lesson(title="Empty unit", module_id=module.id, order_index=0); db.add(lesson); db.flush()
+    s = make_user(db)
+    assert completed_lesson_ids(db, s.id, [lesson.id]) == set()
+    assert completed_lesson_counts(db, [s.id], [lesson.id]) == {}
+
+
+def test_duplicate_ids_do_not_double_count(db):
+    """Duplicate ids in user_ids/lesson_ids must not inflate results for either function."""
+    from src.checkpoints.completion import completed_lesson_ids, completed_lesson_counts
+    course, v, m = make_sat_course(db)
+    s = make_user(db)
+    complete_lesson_explicit(db, s, course, v[0])
+
+    assert completed_lesson_ids(db, s.id, [v[0].id, v[0].id]) == {v[0].id}
+
+    counts = completed_lesson_counts(db, [s.id, s.id], [v[0].id, v[0].id])
+    assert counts == {v[0].id: 1}
+
+
 def test_bulk_agrees_with_per_user_definition_across_mixed_fixture(db):
     """Property-style guard: completed_lesson_counts must exactly agree, per user and per
     lesson, with completed_lesson_ids — the two must never be allowed to drift apart."""
