@@ -56,7 +56,7 @@ class _DB:
 def meet(monkeypatch):
     """Wire a lesson, its conferences, and each conference's recording."""
 
-    def setup(conferences, lesson=None, durations=None, not_ready=()):
+    def setup(conferences, lesson=None, durations=None, not_ready=(), never_recorded=()):
         lesson = lesson or _Lesson()
         monkeypatch.setattr(recordings_worker.meet_recordings, "list_recent_conferences",
                             lambda: [{"name": n, "space": "spaces/S"} for n in conferences])
@@ -66,6 +66,8 @@ def meet(monkeypatch):
                             lambda db, code: lesson)
 
         def detail(name):
+            if name in never_recorded:
+                raise meet_recordings.NoRecording(name)
             if name in not_ready:
                 raise meet_recordings.RecordingNotReady(name)
             return f"file-{name}", (durations or {}).get(name, 0.0)
@@ -145,6 +147,31 @@ def test_patience_runs_out_so_one_stuck_render_cannot_strand_a_lesson(meet):
     )
     assert recordings_worker.poll_for_recordings(_DB()) == 1
     assert claims[0][1] == "conf-early", "take the best in hand rather than nothing"
+
+
+def test_a_call_that_never_recorded_does_not_hold_up_the_lesson(meet):
+    """Lesson 14156 exactly: two morning test calls in the same room recorded nothing.
+
+    Read as "still rendering", they kept the real 64-minute recording unclaimed for the whole
+    patience window — four hours after a lesson whose file was sitting in Drive.
+    """
+    claims, _ = meet(
+        conferences=["conf-morning-test", "conf-midday-test", "conf-lesson"],
+        durations={"conf-lesson": 3834.0},
+        never_recorded=("conf-morning-test", "conf-midday-test"),
+    )
+    assert recordings_worker.poll_for_recordings(_DB()) == 1
+    assert claims[0][1] == "conf-lesson"
+
+
+def test_students_alone_before_the_teacher_do_not_delay_it_either(meet):
+    """The everyday version: students open the room early, nobody from staff yet, no recording."""
+    claims, _ = meet(
+        conferences=["conf-students-early", "conf-lesson"],
+        durations={"conf-lesson": 3600.0},
+        never_recorded=("conf-students-early",),
+    )
+    assert recordings_worker.poll_for_recordings(_DB()) == 1
 
 
 def test_an_already_claimed_lesson_is_left_alone(meet):

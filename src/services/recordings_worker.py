@@ -156,13 +156,16 @@ def _claim_best_recording(db, lesson, conference_names: list, now: datetime) -> 
     if lesson.end_datetime and now < lesson.end_datetime + timedelta(minutes=SETTLE_MINUTES):
         return False
 
-    best, pending = None, False
+    best, rendering = None, 0
     for name in conference_names:
         try:
             file_id, seconds = meet_recordings.resolve_recording_detail(name)
+        except meet_recordings.NoRecording:
+            # Students alone in the room, or a test call: nothing was recorded, nothing will be.
+            continue
         except meet_recordings.RecordingNotReady:
             # Meet publishes a conference before it finishes rendering the file.
-            pending = True
+            rendering += 1
             continue
         if best is None or seconds > best[2]:
             best = (name, file_id, seconds)
@@ -173,9 +176,9 @@ def _claim_best_recording(db, lesson, conference_names: list, now: datetime) -> 
     # If some sibling is still rendering it might be the real lesson, so normally wait
     # rather than lock in a shorter one. Not forever: a recording that never materialises
     # must not block the one we already have.
-    if pending and now < lesson.end_datetime + timedelta(hours=PATIENCE_HOURS):
-        logger.info("lesson %s: %s conference(s) still rendering — waiting before claiming",
-                    lesson.id, len(conference_names))
+    if rendering and now < lesson.end_datetime + timedelta(hours=PATIENCE_HOURS):
+        logger.info("lesson %s: %s of %s conference(s) still rendering — waiting before claiming",
+                    lesson.id, rendering, len(conference_names))
         return False
 
     name, file_id, seconds = best

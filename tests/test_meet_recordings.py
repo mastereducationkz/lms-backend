@@ -85,12 +85,15 @@ def test_resolve_returns_drive_file_id(monkeypatch):
     assert meet_recordings.resolve_recording("conferenceRecords/c1") == "drive-file-123"
 
 
-def test_no_recording_yet_is_not_a_failure(monkeypatch):
-    """A lesson that just ended has a conference record but no recording. Come back later."""
+def test_a_conference_that_never_recorded_is_final(monkeypatch):
+    """Only ended conferences are asked about, and Meet lists a recording the moment it
+    starts, so an empty list means none is coming — not "come back later"."""
     _meet(monkeypatch, {"recordings": []})
 
-    with pytest.raises(meet_recordings.RecordingNotReady):
+    with pytest.raises(meet_recordings.NoRecording):
         meet_recordings.resolve_recording("conferenceRecords/c1")
+    assert not issubclass(meet_recordings.NoRecording, meet_recordings.RecordingNotReady), \
+        "a caller waiting on 'not ready' must never catch 'never recorded'"
 
 
 def test_recording_still_processing_is_not_a_failure(monkeypatch):

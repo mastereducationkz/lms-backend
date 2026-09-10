@@ -44,6 +44,20 @@ class RecordingNotReady(Exception):
     """
 
 
+class NoRecording(Exception):
+    """The conference ended without recording anything, and never will.
+
+    Auto-recording starts only when someone from the organisation is in the call, so a room
+    opened by students alone — or a quick test call — closes with no recording at all. Meet
+    creates the recording entry the moment recording *starts*, and only ended conferences are
+    asked about, so an empty list is final. It used to be read as "not ready yet", and the
+    worker waited out its whole patience window for a file that could not exist: the first
+    live lesson (14156, 2026-09-10) sat unclaimed behind two morning test calls.
+
+    Deliberately not a RecordingNotReady, so no caller can mistake one for the other.
+    """
+
+
 def meet_code(url: Optional[str]) -> Optional[str]:
     """The stable part of a Meet URL, lowercased — what we actually match on.
 
@@ -99,8 +113,9 @@ def resolve_recording_detail(conference_record_name: str) -> tuple:
     perfectly valid recording of an empty room — and it lands in Drive *before* the real
     lesson has even started. Duration is how we tell the lesson from the noise.
 
-    Raises RecordingNotReady when the conference has no recording yet, or has one whose
-    file has not landed. Both are ordinary "come back later" states, not failures.
+    Raises RecordingNotReady when the conference has a recording whose file has not landed
+    — an ordinary "come back later". Raises NoRecording when it never recorded at all, which
+    is final.
     """
     client = google_workspace.meet_client()
     resp = client.conferenceRecords().recordings().list(
@@ -109,7 +124,7 @@ def resolve_recording_detail(conference_record_name: str) -> tuple:
 
     recordings = resp.get("recordings", [])
     if not recordings:
-        raise RecordingNotReady(f"{conference_record_name}: no recording yet")
+        raise NoRecording(f"{conference_record_name}: ended without recording")
 
     for rec in recordings:
         file_id = (rec.get("driveDestination") or {}).get("file")
