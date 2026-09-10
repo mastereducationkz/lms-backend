@@ -129,12 +129,19 @@ def copy_to_shared_drive(drive_file_id: str, event: Event) -> str:
     **Copy, never move.** Moving a file out of Meet's own recordings folder is reported to
     revert, which would silently undo the archive (§4.3 step 5). The original stays where
     Meet put it and is deleted on the 7-day retention schedule instead.
+
+    The destination is ``Teacher / Group /`` inside the Shared Drive, and the teacher can
+    read their own folder — see ``recording_archive``.
     """
+    from src.services import recording_archive
+
     drive = google_workspace.drive_client()
-    name = f"lesson-{event.id}-{event.start_datetime:%Y%m%d-%H%M}.mp4"
     created = drive.files().copy(
         fileId=drive_file_id,
-        body={"name": name, "parents": [google_workspace.RECORDINGS_SHARED_DRIVE_ID]},
+        body={
+            "name": recording_archive.lesson_file_name(event),
+            "parents": [recording_archive.ensure_lesson_folder(event)],
+        },
         supportsAllDrives=True,
         fields="id",
     ).execute()

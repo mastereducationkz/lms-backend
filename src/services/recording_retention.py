@@ -38,6 +38,7 @@ def write_tombstone(recording, event, reason: str) -> str:
     The database row already records all of this, but the Shared Drive is where a human
     looks, and a database nobody queries is not traceability.
     """
+    from src.services import recording_archive
     from src.services.recording_ingest import storage_prefix
 
     lines = [
@@ -63,8 +64,10 @@ def write_tombstone(recording, event, reason: str) -> str:
     drive = google_workspace.drive_client()
     created = drive.files().create(
         body={
-            "name": f"lesson-{event.id}-{event.start_datetime:%Y%m%d}-REMOVED.txt",
-            "parents": [google_workspace.RECORDINGS_SHARED_DRIVE_ID],
+            # Beside the video it replaces, so the gap is visible where someone looks for
+            # the lesson — not in a root nobody browses.
+            "name": recording_archive.lesson_file_name(event, suffix=" — REMOVED.txt"),
+            "parents": [recording_archive.ensure_lesson_folder(event)],
             "mimeType": "text/plain",
         },
         media_body=MediaInMemoryUpload(body, mimetype="text/plain"),

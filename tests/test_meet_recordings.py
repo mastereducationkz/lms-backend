@@ -191,9 +191,13 @@ class _Event:
 
 
 def test_copy_into_shared_drive(monkeypatch):
+    """Where the file goes is recording_archive's job; this is about how it gets there."""
+    from src.services import recording_archive
+
     sink = []
     monkeypatch.setattr(meet_recordings.google_workspace, "drive_client",
                         lambda: _FakeDrive(sink))
+    monkeypatch.setattr(recording_archive, "ensure_lesson_folder", lambda ev: "GROUPFOLDER")
 
     new_id = meet_recordings.copy_to_shared_drive("orig-file", _Event())
 
@@ -201,8 +205,30 @@ def test_copy_into_shared_drive(monkeypatch):
     verb, kwargs = sink[0]
     assert verb == "copy", "copy, never move — a move out of Meet's folder reverts"
     assert kwargs["supportsAllDrives"] is True, "Shared Drives are invisible without this"
-    assert kwargs["body"]["parents"] == [meet_recordings.google_workspace.RECORDINGS_SHARED_DRIVE_ID]
-    assert "lesson-77" in kwargs["body"]["name"]
+    assert kwargs["body"]["parents"] == ["GROUPFOLDER"], "Teacher/Group, not the root"
+    assert "[77]" in kwargs["body"]["name"], "the event id ties the file back to the LMS"
+
+
+def test_copy_still_lands_somewhere_when_the_folder_tree_fails(monkeypatch):
+    """A misfiled archive is untidy; a missing one lets retention delete the last copy."""
+    from src.services import recording_archive
+
+    sink = []
+    monkeypatch.setattr(meet_recordings.google_workspace, "drive_client",
+                        lambda: _FakeDrive(sink))
+
+    def boom(ev):
+        raise RuntimeError("Drive is down")
+
+    monkeypatch.setattr(recording_archive, "_find_or_create_folder",
+                        lambda *a, **k: boom(None))
+
+    new_id = meet_recordings.copy_to_shared_drive("orig-file", _Event())
+
+    assert new_id == "shared-copy-1"
+    _verb, kwargs = sink[0]
+    assert kwargs["body"]["parents"] == [
+        meet_recordings.google_workspace.RECORDINGS_SHARED_DRIVE_ID]
 
 
 # --- claiming exactly once ---------------------------------------------------
