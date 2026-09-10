@@ -19,7 +19,6 @@ class ReviewQuizStep(BaseModel):
 class ReviewUnit(BaseModel):
     lesson_id: int
     title: str
-    order: int
     quizzes: List[ReviewQuizStep] = []
 
 

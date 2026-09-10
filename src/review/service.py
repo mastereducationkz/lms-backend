@@ -50,7 +50,14 @@ def quiz_question_count(content_text: Optional[str]) -> int:
 
 
 def visible_group_ids(user: UserInDB, db: Session) -> Optional[List[int]]:
-    """Group ids this user may review. None means "no restriction"."""
+    """Group ids this user may review. None means "no restriction".
+
+    Deliberately diverges from ``check_group_access`` (src/utils/permissions.py), which
+    scopes head_teacher to ``get_head_teacher_group_ids``. Here head_teacher is treated as
+    unrestricted instead — intentional, because reaching this function at all already
+    required a `CourseHeadTeacher` row via the course-level gate in the routes. This is now
+    a second implementation of group visibility; don't "fix" one to match the other.
+    """
     if user.role in UNRESTRICTED_ROLES:
         return None
     if user.role == "teacher":
@@ -77,7 +84,11 @@ def roster_for_group(db: Session, group_id: int) -> List[UserInDB]:
     return (
         db.query(UserInDB)
         .join(GroupStudent, GroupStudent.student_id == UserInDB.id)
-        .filter(GroupStudent.group_id == group_id, UserInDB.is_active.is_(True))
+        .filter(
+            GroupStudent.group_id == group_id,
+            UserInDB.is_active.is_(True),
+            UserInDB.role == "student",
+        )
         .order_by(UserInDB.name)
         .all()
     )
@@ -120,7 +131,7 @@ def course_id_for_step(db: Session, step: Step) -> int:
         .first()
     )
     if row is None:
-        raise HTTPException(status_code=404, detail="Quiz step not found")
+        raise HTTPException(status_code=404, detail="Lesson or module not found for this step")
     return row[0]
 
 
@@ -128,8 +139,19 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
     """Units in the course that hold quiz steps, with how many of the group submitted."""
     roster_ids = [u.id for u in roster_for_group(db, group_id)]
 
+    # Columns only — Step.content_text is the quiz's whole JSON body, and loading full
+    # ORM entities here would json.loads every quiz in the course just to report one
+    # integer (question_count) per quiz. Same shape of fix as
+    # src/admin/routes/analytics.py's "columns only" latest_quiz_rows query.
     rows = (
-        db.query(Lesson, Step)
+        db.query(
+            Lesson.id.label("lesson_id"),
+            Lesson.title.label("lesson_title"),
+            Lesson.order_index.label("lesson_order_index"),
+            Step.id.label("step_id"),
+            Step.title.label("step_title"),
+            Step.content_text.label("step_content_text"),
+        )
         .join(Module, Lesson.module_id == Module.id)
         .join(Step, Step.lesson_id == Lesson.id)
         .filter(
@@ -142,7 +164,7 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
     )
 
     submitted: Dict[int, int] = {}
-    step_ids = [step.id for _, step in rows]
+    step_ids = [row.step_id for row in rows]
     if step_ids and roster_ids:
         counts = (
             db.query(QuizAttempt.step_id, func.count(func.distinct(QuizAttempt.user_id)))
@@ -158,22 +180,21 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
 
     units: List[Dict[str, Any]] = []
     by_lesson: Dict[int, Dict[str, Any]] = {}
-    for lesson, step in rows:
-        unit = by_lesson.get(lesson.id)
+    for row in rows:
+        unit = by_lesson.get(row.lesson_id)
         if unit is None:
             unit = {
-                "lesson_id": lesson.id,
-                "title": lesson.title,
-                "order": lesson.order_index,
+                "lesson_id": row.lesson_id,
+                "title": row.lesson_title,
                 "quizzes": [],
             }
-            by_lesson[lesson.id] = unit
+            by_lesson[row.lesson_id] = unit
             units.append(unit)
         unit["quizzes"].append({
-            "step_id": step.id,
-            "title": step.title,
-            "question_count": quiz_question_count(step.content_text),
-            "submitted_count": submitted.get(step.id, 0),
+            "step_id": row.step_id,
+            "title": row.step_title,
+            "question_count": quiz_question_count(row.step_content_text),
+            "submitted_count": submitted.get(row.step_id, 0),
         })
 
     return {

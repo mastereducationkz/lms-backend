@@ -10,6 +10,7 @@ from src.courses.models import Lesson, Step
 from src.review import service
 from src.review.schemas import ReviewQuizzesResponse, ReviewSessionResponse
 from src.routes.auth import get_current_user_dependency
+from src.services.cache_service import cached
 from src.utils.permissions import check_course_access
 
 review_router = APIRouter()
@@ -25,6 +26,7 @@ def _display_name(user: UserInDB) -> str:
 
 
 @review_router.get("/quizzes", response_model=ReviewQuizzesResponse)
+@cached(namespace="review:quizzes", ttl=60, key_args=("course_id", "group_id"))
 def get_review_quizzes(
     course_id: int = Query(...),
     group_id: int = Query(...),

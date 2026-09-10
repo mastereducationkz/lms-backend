@@ -166,6 +166,18 @@ def test_roster_lists_group_students_by_name(db):
     assert [u.name for u in service.roster_for_group(db, g.id)] == ["Abenov", "Borisov"]
 
 
+def test_roster_excludes_non_student_members(db):
+    # Test/demo groups do carry staff rows in group_students; they must not show up in
+    # the roster, in not_submitted, or count toward roster_count/class stats.
+    teacher = _user(db, "t2@x.kz", "Teacher Two", role="teacher")
+    g = _group(db, teacher=teacher)
+    student = _user(db, "stu@x.kz", "Student")
+    curator = _user(db, "cur@x.kz", "Curator Member", role="curator")
+    _enroll(db, g, student); _enroll(db, g, curator)
+    roster = service.roster_for_group(db, g.id)
+    assert [u.id for u in roster] == [student.id]
+
+
 # --- visibility --------------------------------------------------------------
 
 def test_admin_sees_every_group(db):
