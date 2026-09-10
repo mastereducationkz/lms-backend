@@ -9,12 +9,19 @@ vanish when someone leaves (spec §4.3).
 **Students are deliberately not invited.** Lessons average ~10 students, so inviting them
 would put every student's personal email on an invite visible to their classmates, send
 ~20k invitations across the schedule, and re-email everyone on every reschedule — and
-this LMS reschedules a lot. Instead the meeting is created with open access so anyone
-holding the link joins without knocking, and the link reaches students through the LMS.
-Owner decision, 2026-09-10.
+this LMS reschedules a lot. Instead the meeting is opened to anyone holding the link, and
+the link reaches students through the LMS. Owner decision, 2026-09-10.
+
+**The Meet space is created through the Meet API, not by Calendar.** This is not a detail.
+A space that Calendar creates as a side effect of an event is not "created by" this app,
+so with the ``meetings.space.created`` scope we get **403 on every read of it** — verified.
+That would have broken the pipeline in two silent ways: students would have had to knock
+to get in (a Calendar-made space defaults to ``accessType: TRUSTED``), and the poller
+could never have matched a conference back to its lesson, because matching reads the
+space. Creating the space ourselves fixes both: we can set it OPEN, and we can read it
+later.
 """
 import logging
-import uuid
 from typing import Optional
 
 from src.services import google_workspace
@@ -30,20 +37,37 @@ class MeetSchedulingError(RuntimeError):
     """Calendar/Meet refused to create the conference for this lesson."""
 
 
-def _request_id(event_id: int) -> str:
-    """Deterministic conference request id.
-
-    Google treats ``conferenceData.createRequest.requestId`` as an idempotency key: the
-    same id returns the existing conference instead of minting a second one. Deriving it
-    from the lesson id means a retry after a timeout re-attaches to the conference we
-    already made, rather than leaving an orphan Meet nobody will ever join.
-    """
-    return f"lms-lesson-{event_id}"
-
-
 def _teacher_workspace_email(event) -> Optional[str]:
     teacher = getattr(event, "teacher", None)
     return getattr(teacher, "workspace_email", None) if teacher else None
+
+
+def create_open_space() -> tuple:
+    """Create a Meet space that anyone with the link may join. Returns (uri, name).
+
+    Two API calls, and both matter:
+
+    ``spaces.create`` makes the space *ours*, which is what later lets us read it back —
+    a space Calendar creates returns 403 under the ``meetings.space.created`` scope.
+
+    ``spaces.patch`` to ``accessType=OPEN`` is what lets students in. A new space defaults
+    to ``TRUSTED``, under which an anonymous joiner has to knock and be admitted — roughly
+    ten knocks per lesson, every lesson. OPEN is a deliberate trade: anyone holding the
+    link can join, including someone it was forwarded to, which is the same exposure the
+    link itself already carries.
+
+    Moderation is left OFF (the default), so there are no host controls to lock the
+    teacher out of presenting or recording — the robot is not in the room to grant them.
+    """
+    meet = google_workspace.meet_client()
+    space = meet.spaces().create(body={}).execute()
+    name = space["name"]
+    meet.spaces().patch(
+        name=name,
+        updateMask="config.accessType",
+        body={"config": {"accessType": "OPEN"}},
+    ).execute()
+    return space["meetingUri"], name
 
 
 def ensure_meet_link(db, event) -> Optional[str]:
@@ -64,6 +88,11 @@ def ensure_meet_link(db, event) -> Optional[str]:
         logger.debug("lesson %s: teacher has no workspace_email — skipping", event.id)
         return None
 
+    try:
+        space_uri, space_name = create_open_space()
+    except Exception as e:
+        raise MeetSchedulingError(f"lesson {event.id}: could not create Meet space: {e}") from e
+
     body = {
         "summary": event.title,
         "description": (event.description or "")[:8000],
@@ -74,11 +103,14 @@ def ensure_meet_link(db, event) -> Optional[str]:
         # Belt and braces: even with a one-person guest list, never leak the list itself.
         "guestsCanSeeOtherGuests": False,
         "guestsCanInviteOthers": False,
+        # Attach the space we already made, rather than asking Calendar to mint one.
         "conferenceData": {
-            "createRequest": {
-                "requestId": _request_id(event.id),
-                "conferenceSolutionKey": {"type": "hangoutsMeet"},
-            }
+            "conferenceId": space_uri.rsplit("/", 1)[-1],
+            "conferenceSolution": {
+                "key": {"type": "hangoutsMeet"},
+                "name": "Google Meet",
+            },
+            "entryPoints": [{"entryPointType": "video", "uri": space_uri}],
         },
     }
 
@@ -99,12 +131,10 @@ def ensure_meet_link(db, event) -> Optional[str]:
     except Exception as e:  # googleapiclient raises HttpError, but also socket errors
         raise MeetSchedulingError(f"lesson {event.id}: {e}") from e
 
-    link = created.get("hangoutLink")
-    if not link:
-        raise MeetSchedulingError(
-            f"lesson {event.id}: calendar event {created.get('id')} created without a "
-            "Meet link — conferenceDataVersion or the conference solution was rejected"
-        )
+    # Trust our own space URI over hangoutLink: the event carries the conference we
+    # attached, and hangoutLink is only populated for Calendar-created conferences.
+    link = created.get("hangoutLink") or space_uri
+    logger.debug("lesson %s attached space %s", event.id, space_name)
 
     event.meeting_url = link
     db.commit()
