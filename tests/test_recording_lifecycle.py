@@ -369,6 +369,71 @@ def test_archive_failure_does_not_fail_the_ingest(monkeypatch):
     assert rec.shared_drive_file_id is None, "and retention must see there is no archive yet"
 
 
+def _wire_ingest(monkeypatch, recording_ingest, on_download=None):
+    def _download(file_id, workdir):
+        if on_download:
+            on_download()
+        return _fake_download(file_id, workdir)
+
+    monkeypatch.setattr(recording_ingest, "_download_drive_file", _download)
+    monkeypatch.setattr(recording_ingest, "package_hls", lambda s, o: "repackaged")
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p: None)
+    monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
+    monkeypatch.setattr(recording_ingest.meet_recordings, "copy_to_shared_drive",
+                        lambda f, e: "shared-file-9")
+
+
+def test_no_transaction_is_held_open_through_the_download(monkeypatch):
+    """Postgres and pgbouncer kill a transaction idle for 60 s. The first live lesson
+    downloaded 685 MB, repackaged in 3 s, uploaded — and lost its "ready" to a connection
+    closed minutes earlier, because reading the row had left a transaction open."""
+    from src.services import recording_ingest
+
+    rec = _Recording(status="pending", hls_url=None)
+    rec.event = _Recording()
+    db = _DB([rec])
+    commits_before_download = []
+    _wire_ingest(monkeypatch, recording_ingest,
+                 on_download=lambda: commits_before_download.append(db.commits))
+
+    recording_ingest.process_recording(db, rec)
+
+    assert commits_before_download == [1], "the read must be committed before the slow part"
+    assert rec.status == "ready"
+
+
+class _DropsOnce(_DB):
+    """Commits fine, except the ``n``-th, which finds its connection closed."""
+
+    def __init__(self, rows, n):
+        super().__init__(rows)
+        self._n = n
+
+    def commit(self):
+        from sqlalchemy.exc import OperationalError
+
+        self.commits += 1
+        if self.commits == self._n:
+            raise OperationalError("UPDATE lesson_recordings", {},
+                                   Exception("server closed the connection unexpectedly"))
+
+
+def test_a_dropped_connection_does_not_cost_a_finished_recording(monkeypatch):
+    """The video is already uploaded; a dead connection at the save gets one fresh try."""
+    from src.services import recording_ingest
+
+    rec = _Recording(status="pending", hls_url=None)
+    rec.event = _Recording()
+    db = _DropsOnce([rec], n=2)  # 1 = the early read commit, 2 = the "ready" save
+    _wire_ingest(monkeypatch, recording_ingest)
+
+    recording_ingest.process_recording(db, rec)
+
+    assert rec.status == "ready" and rec.hls_url.endswith("/master.m3u8")
+    assert db.rollbacks == 1, "the dead transaction is rolled back before the retry"
+    assert rec.shared_drive_file_id == "shared-file-9", "and the archive still happens"
+
+
 # --- traceability ------------------------------------------------------------
 
 def test_purge_writes_a_tombstone_before_deleting(monkeypatch):
