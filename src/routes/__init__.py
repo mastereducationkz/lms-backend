@@ -26,7 +26,7 @@ def register_routes(app: FastAPI):
     from src.routes.email_internal import router as email_internal_router
     from src.exams.routes import router as exams_router
     from src.trials.routes import trials_router
-    from src.announcements.routes import announcements_router
+    from src.announcements.routes import announcements_router, telegram_links_router
     from src.routes.support_api import router as support_api_router
     from src.reports.routes import router as reports_router
     from src.integrations.routes import router as integrations_router
@@ -79,6 +79,8 @@ def register_routes(app: FastAPI):
     app.include_router(exams_router, prefix="/exams", tags=["Exams"])
     app.include_router(trials_router, prefix="/trials", tags=["Trials"])
     app.include_router(announcements_router, prefix="/announcements", tags=["Telegram Announcements"])
+    # Its own prefix: under /announcements it would be caught by /announcements/{announcement_id}.
+    app.include_router(telegram_links_router, prefix="/telegram-links", tags=["Telegram Announcements"])
     app.include_router(support_api_router, prefix="/support-api", tags=["Support API"])
     app.include_router(reports_router, prefix="/reports", tags=["Reports"])
     app.include_router(integrations_router, prefix="/integrations", tags=["Platform Integrations"])

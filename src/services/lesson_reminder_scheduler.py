@@ -71,6 +71,7 @@ class LessonReminderScheduler:
             try:
                 now = datetime.now(timezone.utc)
                 logger.info(f"⏰ [SCHEDULER] Checking at {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                self._send_telegram_invitations()
                 self._check_and_send_reminders()
                 self._check_and_send_post_lesson_reminders()
             except Exception as e:
@@ -79,6 +80,24 @@ class LessonReminderScheduler:
             # Wait for next check
             time.sleep(self.check_interval)
     
+    def _send_telegram_invitations(self):
+        """Post each LMS Meet lesson's invitation into its group's Telegram chat, 5 minutes
+        before it starts (src/services/telegram_invitations.py). Off unless enabled."""
+        from src.services import telegram_invitations
+
+        if not telegram_invitations.enabled():
+            return
+        db = SessionLocal()
+        try:
+            summary = telegram_invitations.send_due_invitations(db)
+            if any(summary.values()):
+                logger.info(f"📨 [TELEGRAM] Lesson invitations: {summary}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ [TELEGRAM] Lesson invitations failed: {e}", exc_info=True)
+        finally:
+            db.close()
+
     def _check_and_send_reminders(self):
         """Check for upcoming lesson events and send reminders"""
         db = SessionLocal()

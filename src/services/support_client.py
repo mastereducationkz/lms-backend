@@ -58,6 +58,12 @@ def _headers(actor_email: str, actor_name: str) -> dict:
     }
 
 
+#: The detail of a 502 raised because Support could not be reached at all. Support itself also
+#: answers 502 (a Telegram refusal that will not go away); callers that retry need to tell the two
+#: apart, and comparing with this constant is how.
+UNREACHABLE_DETAIL = "Could not reach the Support platform"
+
+
 def call(
     method: str,
     path: str,
@@ -102,9 +108,7 @@ def call(
         )
     except requests.RequestException as exc:
         logger.error("support-api %s %s failed: %s", method, path, exc)
-        raise HTTPException(
-            status_code=502, detail="Could not reach the Support platform"
-        ) from exc
+        raise HTTPException(status_code=502, detail=UNREACHABLE_DETAIL) from exc
 
     if response.status_code >= 400:
         detail = "Support platform rejected the request"
