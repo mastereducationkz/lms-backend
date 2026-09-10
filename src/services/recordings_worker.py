@@ -40,6 +40,16 @@ SCHEDULE_HORIZON_DAYS = 3
 
 POLL_INTERVAL_SECONDS = 300
 
+# How long after a lesson's scheduled end to wait before choosing among its recordings.
+# Lessons overrun, and a lesson still in progress has not produced its real recording yet
+# — the only candidate would be an early-joiner's empty room.
+SETTLE_MINUTES = 20
+
+# How long to keep waiting for a sibling recording that is still rendering before giving
+# up and claiming the best one already in hand. Long enough for Meet to finish a
+# feature-length lesson; short enough that one stuck render cannot strand a lesson.
+PATIENCE_HOURS = 4
+
 
 def _horizon() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=SCHEDULE_HORIZON_DAYS)
@@ -81,8 +91,27 @@ def ensure_upcoming_meet_links(db, limit: int = 50) -> int:
 
 
 def poll_for_recordings(db) -> int:
-    """Claim recordings for conferences that have finished."""
-    claimed = 0
+    """Claim, for each finished lesson, the recording that is actually the lesson.
+
+    **One lesson can produce several recordings.** A Meet space opens a new conference
+    every time the room goes from empty to occupied, and with auto-recording each one
+    produces its own finished file. A student who joins fifteen minutes early and leaves
+    again generates a complete recording of an empty room — and because it ends first, it
+    also lands in Drive first.
+
+    Claiming the first file to appear therefore claims the wrong one, and
+    ``claim_recording`` is idempotent per lesson, so the real recording that arrives an
+    hour later is silently discarded. The lesson is lost with no error anywhere: the row
+    reads ``ready``, and students get two minutes of an empty room.
+
+    So we do not claim per conference. We group every conference by the lesson it belongs
+    to, wait until the lesson is over and its recordings have settled, and then claim the
+    **longest** one — the only one of them that can be an hour-long lesson.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # lesson id -> (lesson, [conference names])
+    by_lesson: dict = {}
     for conference in meet_recordings.list_recent_conferences():
         name = conference.get("name")
         space = conference.get("space")
@@ -94,17 +123,58 @@ def poll_for_recordings(db) -> int:
             if lesson is None:
                 # Someone's ad-hoc meeting, or a lesson from before the pilot. Not ours.
                 continue
-            drive_file_id = meet_recordings.resolve_recording(name)
-            if meet_recordings.claim_recording(db, lesson, name, drive_file_id):
+            by_lesson.setdefault(lesson.id, (lesson, []))[1].append(name)
+        except Exception as e:
+            logger.warning("conference %s: %s", name, e)
+
+    claimed = 0
+    for lesson, names in by_lesson.values():
+        try:
+            if _claim_best_recording(db, lesson, names, now):
                 claimed += 1
-        except meet_recordings.RecordingNotReady:
-            # Normal for a lesson that just ended: Meet publishes the conference before
-            # the file. Nothing to log at warning level; we look again next tick.
-            continue
         except Exception as e:
             db.rollback()
-            logger.warning("conference %s: %s", name, e)
+            logger.warning("lesson %s: %s", lesson.id, e)
     return claimed
+
+
+def _claim_best_recording(db, lesson, conference_names: list, now: datetime) -> bool:
+    """Pick the longest finished recording for one lesson and claim it."""
+    if db.query(LessonRecording).filter(LessonRecording.event_id == lesson.id).first():
+        return False
+
+    # Don't choose while the lesson may still be running: the real recording does not
+    # exist yet, so the only candidate would be an early-joiner's empty room.
+    if lesson.end_datetime and now < lesson.end_datetime + timedelta(minutes=SETTLE_MINUTES):
+        return False
+
+    best, pending = None, False
+    for name in conference_names:
+        try:
+            file_id, seconds = meet_recordings.resolve_recording_detail(name)
+        except meet_recordings.RecordingNotReady:
+            # Meet publishes a conference before it finishes rendering the file.
+            pending = True
+            continue
+        if best is None or seconds > best[2]:
+            best = (name, file_id, seconds)
+
+    if best is None:
+        return False
+
+    # If some sibling is still rendering it might be the real lesson, so normally wait
+    # rather than lock in a shorter one. Not forever: a recording that never materialises
+    # must not block the one we already have.
+    if pending and now < lesson.end_datetime + timedelta(hours=PATIENCE_HOURS):
+        logger.info("lesson %s: %s conference(s) still rendering — waiting before claiming",
+                    lesson.id, len(conference_names))
+        return False
+
+    name, file_id, seconds = best
+    if len(conference_names) > 1:
+        logger.info("lesson %s: %s conferences, claiming the longest (%.0fs) — %s",
+                    lesson.id, len(conference_names), seconds, name)
+    return bool(meet_recordings.claim_recording(db, lesson, name, file_id))
 
 
 def ingest_one_pending(db) -> bool:

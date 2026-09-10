@@ -74,8 +74,30 @@ def list_recent_conferences(lookback_hours: int = LOOKBACK_HOURS) -> list:
             return out
 
 
-def resolve_recording(conference_record_name: str) -> str:
-    """Conference record → the Drive file id Meet produced.
+def _rfc3339(value: Optional[str]) -> Optional[datetime]:
+    """Parse Meet's timestamps, which carry a Z and more than 6 fractional digits."""
+    if not value:
+        return None
+    text = value.replace("Z", "+00:00")
+    if "." in text:
+        head, _, tail = text.partition(".")
+        digits = "".join(c for c in tail if c.isdigit())[:6]
+        offset = tail[len(tail) - 6:] if "+" in tail or "-" in tail else "+00:00"
+        text = f"{head}.{digits:0<6}{offset}"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def resolve_recording_detail(conference_record_name: str) -> tuple:
+    """Conference record → ``(drive_file_id, duration_seconds)``.
+
+    The duration matters because a Meet *space* accumulates one conference per
+    join-to-empty cycle, and with auto-recording every one of them produces a file. A
+    student who joins fifteen minutes early and leaves creates a complete, finished,
+    perfectly valid recording of an empty room — and it lands in Drive *before* the real
+    lesson has even started. Duration is how we tell the lesson from the noise.
 
     Raises RecordingNotReady when the conference has no recording yet, or has one whose
     file has not landed. Both are ordinary "come back later" states, not failures.
@@ -91,9 +113,17 @@ def resolve_recording(conference_record_name: str) -> str:
 
     for rec in recordings:
         file_id = (rec.get("driveDestination") or {}).get("file")
-        if file_id:
-            return file_id
+        if not file_id:
+            continue
+        start, end = _rfc3339(rec.get("startTime")), _rfc3339(rec.get("endTime"))
+        seconds = (end - start).total_seconds() if start and end else 0.0
+        return file_id, seconds
     raise RecordingNotReady(f"{conference_record_name}: recording still processing")
+
+
+def resolve_recording(conference_record_name: str) -> str:
+    """Conference record → the Drive file id Meet produced."""
+    return resolve_recording_detail(conference_record_name)[0]
 
 
 def space_meet_code(space_name: str) -> Optional[str]:
