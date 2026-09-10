@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +40,41 @@ YTDLP_FRAGMENT_RETRIES = 2
 # Subprocess-level ceiling. Kept generous (a legitimate long video can take a while to
 # download) — the retry bound above is what protects against the wedge, not this.
 DOWNLOAD_TIMEOUT = 1800
+
+# How long the worker stands down after concluding the media CDN is unreachable. Long
+# enough that a full queue costs one probe per interval instead of one failed download
+# per job; short enough that the queue drains on its own once egress is fixed.
+CDN_BACKOFF_SECONDS = 900
+
+
+class MediaCdnUnreachable(RuntimeError):
+    """YouTube's media CDN refuses to serve this host — an environment fault, not a job fault.
+
+    YouTube picks the CDN node from the requesting IP and bakes that hostname into the
+    signed media URL; the node cannot be substituted (a different Google edge answers the
+    same signed URL with 400/421) and the HLS variant is no help either, because the
+    segments inside the manifest point back at the same node. So when the assigned node
+    refuses us, it refuses us for *every* video, and retrying a particular job proves
+    nothing about that job.
+
+    That distinction is the whole point of this class. Counting these against a job's
+    attempt budget would walk the entire queue to ``status='failed'`` (and every ru step
+    to ``video_status='failed'``) in a couple of hours, destroying real state over a fault
+    that lives in the network. Jobs that raise this go back to ``pending`` untouched.
+    """
+
+
+# yt-dlp reports the refusal as a timeout against a *.googlevideo.com host. Matched against
+# the tail of yt-dlp's stderr, which `_run` puts in the RuntimeError message.
+_CDN_UNREACHABLE_RE = re.compile(
+    r"googlevideo\.com.{0,200}?"
+    r"(?:Read timed out|timed out|Connection (?:timed out|refused|reset)|Remote end closed)",
+    re.I | re.S,
+)
+
+
+def _is_cdn_unreachable(message: str) -> bool:
+    return bool(_CDN_UNREACHABLE_RE.search(message or ""))
 
 # --- YouTube URL helpers (self-contained; mirrors utils/youtube.ts) ----------
 _YT_PATTERNS = [
@@ -159,7 +195,12 @@ def _download(url: str, workdir: Path) -> Path:
     if proxy:
         cmd += ["--proxy", proxy]
     cmd.append(url)
-    _run(cmd, timeout=DOWNLOAD_TIMEOUT)
+    try:
+        _run(cmd, timeout=DOWNLOAD_TIMEOUT)
+    except RuntimeError as e:
+        if _is_cdn_unreachable(str(e)):
+            raise MediaCdnUnreachable(str(e)) from e
+        raise
     files = sorted(workdir.glob("source.*"))
     if not files:
         raise RuntimeError("yt-dlp produced no output file")
@@ -266,12 +307,27 @@ def _fail(db, job: VideoIngestJob, exc: Exception) -> None:
                    job.step_id, job.lang, job.attempts, msg)
 
 
+def _requeue_environmental(db, job: VideoIngestJob, exc: Exception) -> None:
+    """Put a job back untouched after an environment fault (see MediaCdnUnreachable).
+
+    `_process_one` claims a job by incrementing `attempts` before it knows whether the
+    work is even possible, so giving the attempt back here is what keeps a dead CDN from
+    exhausting the budget of every job it touches.
+    """
+    job.attempts = max(0, job.attempts - 1)
+    job.status = "pending"
+    job.error = str(exc)[:1900]
+    db.commit()
+
+
 # --- worker ------------------------------------------------------------------
 class VideoIngestWorker:
     def __init__(self, poll_interval: int = 15):
         self.poll_interval = poll_interval
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Monotonic deadline; while it is in the future the worker claims no jobs.
+        self._cdn_backoff_until = 0.0
 
     def start(self) -> None:
         if not tools_available():
@@ -294,6 +350,8 @@ class VideoIngestWorker:
             self._stop.wait(1 if worked else self.poll_interval)
 
     def _process_one(self) -> bool:
+        if time.monotonic() < self._cdn_backoff_until:
+            return False
         db = SessionLocal()
         try:
             job = (
@@ -309,6 +367,17 @@ class VideoIngestWorker:
             db.commit()
             try:
                 process_job(db, job)
+            except MediaCdnUnreachable as e:
+                db.rollback()
+                _requeue_environmental(db, job, e)
+                self._cdn_backoff_until = time.monotonic() + CDN_BACKOFF_SECONDS
+                logger.error(
+                    "YouTube media CDN unreachable from this host — video ingest standing "
+                    "down for %ss. Every queued job would fail identically; none were "
+                    "counted as failed. Fix egress (set YTDLP_PROXY) to resume. Detail: %s",
+                    CDN_BACKOFF_SECONDS, str(e)[:500],
+                )
+                return False
             except Exception as e:
                 db.rollback()
                 _fail(db, job, e)
