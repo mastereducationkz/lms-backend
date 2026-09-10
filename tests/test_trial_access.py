@@ -258,7 +258,7 @@ def test_auth_me_carries_trial_expiry(monkeypatch):
     deadline = datetime.utcnow() + timedelta(hours=3)
     monkeypatch.setattr("src.trials.services.earliest_active_expiry", lambda db, uid: deadline)
     monkeypatch.setattr(us, "student_has_only_special_groups", lambda uid, db: False)
-    monkeypatch.setattr(us.UserSchema, "model_validate", classmethod(lambda cls, u: us.UserSchema(
+    monkeypatch.setattr(us.CurrentUserSchema, "model_validate", classmethod(lambda cls, u: us.CurrentUserSchema(
         id=u.id, email=u.email, name=u.name, role=u.role, is_active=u.is_active, is_trial=True,
     )))
     resp = us.build_user_schema_response(user, db=None)

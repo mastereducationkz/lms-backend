@@ -21,6 +21,7 @@ from src.services.email_service import (
 )
 from src.services import email_log
 from src.config import get_db
+from src.auth.schemas import CurrentUserSchema
 from src.schemas.models import UserInDB, Token, UserSchema
 from src.auth.user_schema import build_user_schema_response
 from src.auth.user_resolve import resolve_user_by_payload
@@ -256,7 +257,7 @@ def refresh_token(request: RefreshTokenRequest, response: Response, db: Session 
         logger.error(f"Refresh token error: {e}")
         raise HTTPException(status_code=500, detail="Could not refresh token")
 
-@router.get("/me", response_model=UserSchema)
+@router.get("/me", response_model=CurrentUserSchema)
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Get current user information"""
     payload = verify_bearer_token(token)

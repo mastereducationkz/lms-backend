@@ -42,6 +42,26 @@ class UserSchema(BaseModel):
         from_attributes = True
 
 
+class CurrentUserSchema(UserSchema):
+    """The signed-in user's own record — the response of ``/auth/me``.
+
+    Holds fields that belong to the viewer alone. They are declared here and not on
+    ``UserSchema`` because ``UserSchema`` also serialises *other* people (user lists,
+    profile updates made by admins): FastAPI renders each route through its own
+    ``response_model``, so a field that exists only on this subclass is dropped from every
+    route typed as ``UserSchema`` and reaches nobody but its owner.
+    """
+
+    # The Google Workspace address (…@mastereducation.kz). The frontend adds it to Meet
+    # links as ``authuser`` so Meet joins on the work account instead of whichever Google
+    # account the browser defaults to. It matters because a teacher on a personal account
+    # counts as outside the organisation — she cannot record, cannot remove participants,
+    # and auto-recording does not start until someone from the organisation joins. First
+    # observed live on 2026-09-10: the lesson only recorded because an admin happened to
+    # join at 18:59:59.
+    workspace_email: Optional[str] = None
+
+
 class PointHistorySchema(BaseModel):
     id: int
     user_id: int
