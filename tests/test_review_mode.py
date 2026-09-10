@@ -232,3 +232,128 @@ def test_quiz_units_excludes_checkpoint_lessons(db):
     g = _group(db, teacher=teacher)
     course, lesson, step = _quiz_step(db, kind="checkpoint")
     assert service.quiz_units_for_course(db, course.id, g.id)["units"] == []
+
+
+def test_curator_does_not_see_inactive_groups(db):
+    curator = _user(db, "c2@x.kz", "C2", role="curator")
+    live = _group(db, name="Live2", curator=curator)
+    inactive = _group(db, name="Inactive", curator=curator, is_active=False)
+    ids = service.visible_group_ids(curator, db)
+    assert live.id in ids and inactive.id not in ids
+
+
+def test_roster_omits_inactive_students(db):
+    teacher = _user(db, "t14@x.kz", "T14", role="teacher")
+    g = _group(db, teacher=teacher)
+    active = _user(db, "act@x.kz", "Active")
+    inactive = _user(db, "inact@x.kz", "Inactive")
+    inactive.is_active = False
+    db.flush()
+    _enroll(db, g, active); _enroll(db, g, inactive)
+    ids = [u.id for u in service.roster_for_group(db, g.id)]
+    assert active.id in ids and inactive.id not in ids
+
+
+# --- endpoints ---------------------------------------------------------------
+
+from fastapi import HTTPException  # noqa: E402
+
+from src.review.routes import get_review_quizzes, get_review_session  # noqa: E402
+
+
+def _grant(db, group, course):
+    """Give a group access to a course so check_course_access() passes for its teacher."""
+    from src.courses.models import CourseGroupAccess
+    # granted_by is NOT NULL in the schema; the identity of the granter doesn't
+    # matter for these tests, so a throwaway admin satisfies the FK.
+    granter = _user(db, f"granter{course.id}-{group.id}@x.kz", "Granter", role="admin")
+    db.add(CourseGroupAccess(group_id=group.id, course_id=course.id,
+                             granted_by=granter.id, is_active=True))
+    db.flush()
+
+
+def test_session_returns_roster_attempts_and_not_submitted(db):
+    teacher = _user(db, "t7@x.kz", "T7", role="teacher")
+    g = _group(db, teacher=teacher)
+    done = _user(db, "d@x.kz", "Did It")
+    missing = _user(db, "m@x.kz", "Missed It")
+    _enroll(db, g, done); _enroll(db, g, missing)
+    course, lesson, step = _quiz_step(db)
+    _grant(db, g, course)
+    _attempt(db, done, step, lesson, course, score=75.0, answers='[["q1", 1]]')
+
+    payload = get_review_session(step_id=step.id, group_id=g.id,
+                                 current_user=teacher, db=db)
+
+    assert payload["step"]["step_id"] == step.id
+    assert payload["step"]["lesson_title"] == "Unit 3"
+    assert payload["step"]["content"]["title"] == "Vocabulary quiz"
+    assert [s["student_id"] for s in payload["roster"]] == [done.id, missing.id]
+    assert len(payload["attempts"]) == 1
+    assert payload["attempts"][0]["student_id"] == done.id
+    assert payload["attempts"][0]["answers"] == '[["q1", 1]]'
+    assert [s["student_id"] for s in payload["not_submitted"]] == [missing.id]
+
+
+def test_session_refuses_another_teachers_group(db):
+    mine = _user(db, "t8@x.kz", "T8", role="teacher")
+    theirs = _user(db, "t9@x.kz", "T9", role="teacher")
+    other = _group(db, name="Theirs", teacher=theirs)
+    course, lesson, step = _quiz_step(db)
+    _grant(db, other, course)
+    with pytest.raises(HTTPException) as exc:
+        get_review_session(step_id=step.id, group_id=other.id, current_user=mine, db=db)
+    assert exc.value.status_code == 403
+
+
+def test_session_404s_on_a_non_quiz_step(db):
+    teacher = _user(db, "t10@x.kz", "T10", role="teacher")
+    g = _group(db, teacher=teacher)
+    course, lesson, step = _quiz_step(db)
+    _grant(db, g, course)
+    step.content_type = "text"
+    db.flush()
+    with pytest.raises(HTTPException) as exc:
+        get_review_session(step_id=step.id, group_id=g.id, current_user=teacher, db=db)
+    assert exc.value.status_code == 404
+
+
+def test_session_404s_on_a_missing_step(db):
+    teacher = _user(db, "t11@x.kz", "T11", role="teacher")
+    g = _group(db, teacher=teacher)
+    with pytest.raises(HTTPException) as exc:
+        get_review_session(step_id=99999999, group_id=g.id, current_user=teacher, db=db)
+    assert exc.value.status_code == 404
+
+
+def test_quizzes_endpoint_lists_the_course_units(db):
+    teacher = _user(db, "t12@x.kz", "T12", role="teacher")
+    g = _group(db, teacher=teacher)
+    s1 = _user(db, "q1@x.kz", "Q1"); _enroll(db, g, s1)
+    course, lesson, step = _quiz_step(db)
+    _grant(db, g, course)
+    payload = get_review_quizzes(course_id=course.id, group_id=g.id,
+                                 current_user=teacher, db=db)
+    assert payload["units"][0]["lesson_id"] == lesson.id
+    assert payload["units"][0]["quizzes"][0]["step_id"] == step.id
+
+
+def test_session_refuses_a_course_the_teacher_cannot_see(db):
+    """The group is the teacher's, but nobody granted it access to this course."""
+    teacher = _user(db, "t13@x.kz", "T13", role="teacher")
+    g = _group(db, teacher=teacher)
+    course, lesson, step = _quiz_step(db)      # deliberately no _grant()
+    with pytest.raises(HTTPException) as exc:
+        get_review_session(step_id=step.id, group_id=g.id, current_user=teacher, db=db)
+    assert exc.value.status_code == 403
+    assert "course" in exc.value.detail.lower()
+
+
+def test_quizzes_endpoint_refuses_a_student(db):
+    student = _user(db, "st@x.kz", "Student")
+    g = _group(db)
+    course, lesson, step = _quiz_step(db)
+    with pytest.raises(HTTPException) as exc:
+        get_review_quizzes(course_id=course.id, group_id=g.id,
+                           current_user=student, db=db)
+    assert exc.value.status_code == 403

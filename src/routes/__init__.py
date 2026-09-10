@@ -33,6 +33,7 @@ def register_routes(app: FastAPI):
     from src.integrations.assignment_routes import platform_assignments_router
     from src.integrations.targets_routes import targets_router
     from src.checkpoints.routes import checkpoints_router, checkpoints_admin_router
+    from src.review.routes import review_router
 
     app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
     app.include_router(admin_router, prefix="/admin", tags=["Admin"])
@@ -78,5 +79,6 @@ def register_routes(app: FastAPI):
     app.include_router(targets_router, prefix="/targets", tags=["Student Targets"])
     app.include_router(checkpoints_admin_router, prefix="/checkpoints/admin", tags=["Checkpoints Admin"])
     app.include_router(checkpoints_router, prefix="/checkpoints", tags=["Checkpoints"])
+    app.include_router(review_router, prefix="/review", tags=["Quiz Review"])
     app.include_router(handoff_router, prefix="/handoff", tags=["Platform Handoff"])
     app.include_router(wellknown_router, tags=["Platform Handoff"])
