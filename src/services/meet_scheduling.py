@@ -22,6 +22,7 @@ space. Creating the space ourselves fixes both: we can set it OPEN, and we can r
 later.
 """
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from src.services import google_workspace
@@ -95,6 +96,19 @@ def create_open_space() -> tuple:
     return space["meetingUri"], name
 
 
+def calendar_time(value: datetime) -> dict:
+    """A lesson time as Google Calendar should read it.
+
+    Lesson times are stored as naive UTC. Sent without an offset, Calendar reads them in
+    ``timeZone`` — so labelling 14:00 UTC as Asia/Almaty put a 19:00 lesson at 14:00 on the
+    teacher's calendar, five hours early, with its notifications firing to match. The offset
+    fixes the instant; ``timeZone`` only chooses how it is displayed.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return {"dateTime": value.astimezone(timezone.utc).isoformat(), "timeZone": "Asia/Almaty"}
+
+
 def ensure_meet_link(db, event) -> Optional[str]:
     """Return the lesson's Meet link, creating the calendar event if needed.
 
@@ -121,8 +135,8 @@ def ensure_meet_link(db, event) -> Optional[str]:
     body = {
         "summary": event.title,
         "description": (event.description or "")[:8000],
-        "start": {"dateTime": event.start_datetime.isoformat(), "timeZone": "Asia/Almaty"},
-        "end": {"dateTime": event.end_datetime.isoformat(), "timeZone": "Asia/Almaty"},
+        "start": calendar_time(event.start_datetime),
+        "end": calendar_time(event.end_datetime),
         # Only the teacher. See the module docstring for why students are excluded.
         "attendees": [{"email": organiser_email}],
         # Belt and braces: even with a one-person guest list, never leak the list itself.

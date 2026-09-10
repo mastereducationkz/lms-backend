@@ -16,7 +16,8 @@ production rather than raising:
 
 No network: the calendar client is replaced with a fake that records the request body.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -279,3 +280,17 @@ def test_api_failure_is_wrapped(monkeypatch, meet_calls):
     with pytest.raises(meet_scheduling.MeetSchedulingError) as excinfo:
         meet_scheduling.ensure_meet_link(_FakeDB(), _Event())
     assert "4242" in str(excinfo.value), "the lesson id must be in the error"
+
+
+def test_the_invite_is_at_the_lessons_real_time(calls):
+    """Lesson times are naive UTC. Sent bare and labelled Asia/Almaty, Calendar read 10:00 UTC
+    as 10:00 Almaty — every invite five hours early on the teacher's calendar (2026-09-10:
+    a 19:00 lesson sat at 14:00). The offset fixes the instant; the zone is display only."""
+    meet_scheduling.ensure_meet_link(_FakeDB(), _Event())
+
+    start, end = calls[0]["body"]["start"], calls[0]["body"]["end"]
+    assert datetime.fromisoformat(start["dateTime"]) == datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    assert datetime.fromisoformat(end["dateTime"]) - datetime.fromisoformat(start["dateTime"]) \
+        == timedelta(minutes=90)
+    assert datetime.fromisoformat(start["dateTime"]).astimezone(ZoneInfo("Asia/Almaty")).hour == 15
+    assert start["timeZone"] == "Asia/Almaty"
