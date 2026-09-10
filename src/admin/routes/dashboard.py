@@ -3288,23 +3288,36 @@ def get_teacher_salary_breakdown(
     }
 
 @router.get("/teacher/students-progress")
-@cached(namespace="dashboard:teacher-students-progress", ttl=45)
+@cached(
+    namespace="dashboard:teacher-students-progress",
+    ttl=45,
+    key_args=("include_archived", "include_inactive"),
+)
 def get_teacher_students_progress(
+    include_archived: bool = Query(False),
+    include_inactive: bool = Query(False),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """Get list of students with their current lesson progress for teacher's groups"""
+    """Get list of students with their current lesson progress for teacher's groups.
+
+    Defaults show active students of active groups. ``include_archived`` brings in
+    the teacher's archived groups and ``include_inactive`` deactivated students —
+    the same two switches the curator journal and analytics have, so a finished
+    cohort never disappears from the teacher who taught it. Rows carry
+    ``group_is_archived`` / ``is_inactive`` so the UI can badge them.
+    """
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
-    
+
     from src.schemas.models import CourseGroupAccess, Group, StudentCourseSummary
     from src.progress.services.lesson_completion import calculate_module_progress_for_students
 
     # Get teacher's groups (groups where this teacher is the owner)
-    teacher_groups = db.query(Group).filter(
-        Group.teacher_id == current_user.id,
-        Group.is_active == True
-    ).all()
+    groups_query = db.query(Group).filter(Group.teacher_id == current_user.id)
+    if not include_archived:
+        groups_query = groups_query.filter(Group.is_active == True)
+    teacher_groups = groups_query.all()
 
     if not teacher_groups:
         return {"students_progress": []}
@@ -3313,12 +3326,24 @@ def get_teacher_students_progress(
     teacher_groups_map = {g.id: g for g in teacher_groups}
 
     # Get all students from teacher's groups with their group info
-    group_student_records = db.query(GroupStudent).filter(
+    student_query = db.query(GroupStudent).filter(
         GroupStudent.group_id.in_(teacher_group_ids)
-    ).all()
+    )
+    if not include_inactive:
+        student_query = student_query.join(
+            UserInDB, UserInDB.id == GroupStudent.student_id
+        ).filter(UserInDB.is_active == True)
+    group_student_records = student_query.all()
 
     if not group_student_records:
         return {"students_progress": []}
+
+    # A student in both a current and an archived group of this teacher is shown
+    # under the current one: the first occurrence wins the dedupe below, so put
+    # active groups first (then membership id, for a deterministic order).
+    group_student_records.sort(
+        key=lambda gs: (not teacher_groups_map[gs.group_id].is_active, gs.id)
+    )
 
     # --- Pass 1: figure out, for each student, which group "wins" (first
     # occurrence in group_student_records, exactly as the original loop did),
@@ -3435,6 +3460,9 @@ def get_teacher_students_progress(
                 "student_email": student.email,
                 "student_avatar": student.avatar_url,
                 "group_name": group_name,
+                "group_id": gs.group_id,
+                "group_is_archived": bool(group and not group.is_active),
+                "is_inactive": not student.is_active,
                 "course_id": None,
                 "course_title": "No courses assigned",
                 "current_lesson_id": None,
@@ -3475,6 +3503,9 @@ def get_teacher_students_progress(
                 "student_email": student.email,
                 "student_avatar": student.avatar_url,
                 "group_name": group_name,
+                "group_id": gs.group_id,
+                "group_is_archived": bool(group and not group.is_active),
+                "is_inactive": not student.is_active,
                 "course_id": course.id,
                 "course_title": course.title,
                 "current_lesson_id": module_progress["current_module_id"],
