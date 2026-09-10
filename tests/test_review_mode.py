@@ -22,6 +22,7 @@ from src.schemas.models import (  # noqa: F401  (import-order guard: shim first)
 )
 from src.progress.models import QuizAttempt
 from src.review import service
+from src.review.schemas import ReviewQuizzesResponse
 
 
 @pytest.fixture
@@ -155,6 +156,88 @@ def test_only_roster_students_are_returned(db):
     assert [r.user_id for r in rows] == [inside.id]
 
 
+# --- average_percent_for_steps ------------------------------------------------
+
+def test_average_percent_uses_best_attempt_not_all_attempts(db):
+    student = _user(db, "avg1@x.kz", "Avg One")
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, student, step, lesson, course, score=40.0, done=NOW - timedelta(days=1))
+    _attempt(db, student, step, lesson, course, score=90.0, done=NOW)
+    averages = service.average_percent_for_steps(db, [step.id], [student.id])
+    assert averages[step.id] == 90.0
+
+
+def test_average_percent_excludes_non_submitters(db):
+    a = _user(db, "avg2a@x.kz", "A")
+    b = _user(db, "avg2b@x.kz", "B")
+    c = _user(db, "avg2c@x.kz", "C")
+    d = _user(db, "avg2d@x.kz", "D")
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, a, step, lesson, course, score=100.0)
+    _attempt(db, b, step, lesson, course, score=50.0)
+    # c and d never submit
+    averages = service.average_percent_for_steps(db, [step.id], [a.id, b.id, c.id, d.id])
+    assert averages[step.id] == 75.0
+
+
+def test_average_percent_excludes_drafts(db):
+    student = _user(db, "avg3@x.kz", "Avg Three")
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, student, step, lesson, course, score=100.0, is_draft=True)
+    averages = service.average_percent_for_steps(db, [step.id], [student.id])
+    assert averages.get(step.id) is None
+
+
+def test_average_percent_excludes_students_outside_roster(db):
+    inside = _user(db, "avg4in@x.kz", "In")
+    outside = _user(db, "avg4out@x.kz", "Out")
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, inside, step, lesson, course, score=60.0)
+    _attempt(db, outside, step, lesson, course, score=0.0)
+    averages = service.average_percent_for_steps(db, [step.id], [inside.id])
+    assert averages[step.id] == 60.0
+
+
+def test_average_percent_is_none_when_nobody_submitted(db):
+    course, lesson, step = _quiz_step(db)
+    student = _user(db, "avg5@x.kz", "Avg Five")
+    averages = service.average_percent_for_steps(db, [step.id], [student.id])
+    assert averages.get(step.id) is None
+
+
+def test_average_percent_rounds_to_one_decimal(db):
+    a = _user(db, "avg6a@x.kz", "A")
+    b = _user(db, "avg6b@x.kz", "B")
+    c = _user(db, "avg6c@x.kz", "C")
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, a, step, lesson, course, score=100.0)
+    _attempt(db, b, step, lesson, course, score=100.0)
+    _attempt(db, c, step, lesson, course, score=99.0)
+    averages = service.average_percent_for_steps(db, [step.id], [a.id, b.id, c.id])
+    assert averages[step.id] == 99.7  # 299 / 3 = 99.666... -> 99.7
+
+
+def test_average_percent_tie_break_keeps_one_row_per_student(db):
+    # Two attempts share the top score of 70 for one student. If the DISTINCT ON
+    # tie-break (later completed_at wins) weren't applied consistently with
+    # best_attempts_for_step, both rows could survive and double-count that
+    # student, skewing the average away from (70 + 30) / 2 = 50.0.
+    student = _user(db, "avg7@x.kz", "Avg Seven")
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, student, step, lesson, course, score=70.0, done=NOW - timedelta(days=2))
+    later = _attempt(db, student, step, lesson, course, score=70.0, done=NOW)
+    other = _user(db, "avg7b@x.kz", "Avg Seven B")
+    _attempt(db, other, step, lesson, course, score=30.0, done=NOW)
+
+    averages = service.average_percent_for_steps(db, [step.id], [student.id, other.id])
+    assert averages[step.id] == 50.0
+
+    # Cross-check against best_attempts_for_step directly: it must select the
+    # later of the two tied rows, same rule average_percent_for_steps relies on.
+    rows = service.best_attempts_for_step(db, step.id, [student.id])
+    assert [r.id for r in rows] == [later.id]
+
+
 # --- roster ------------------------------------------------------------------
 
 def test_roster_lists_group_students_by_name(db):
@@ -237,6 +320,62 @@ def test_quiz_units_counts_questions_and_submissions(db):
     assert quiz["step_id"] == step.id
     assert quiz["question_count"] == 2      # image_content excluded
     assert quiz["submitted_count"] == 1     # distinct students, not attempts
+
+
+def test_quiz_units_reports_average_percent_per_quiz(db):
+    teacher = _user(db, "t16@x.kz", "T16", role="teacher")
+    g = _group(db, teacher=teacher)
+    s1 = _user(db, "avgu1@x.kz", "AU1"); s2 = _user(db, "avgu2@x.kz", "AU2")
+    _enroll(db, g, s1); _enroll(db, g, s2)
+    course, lesson, step = _quiz_step(db)
+    _attempt(db, s1, step, lesson, course, score=80.0)
+    # s2 never submits — excluded from the average, not counted as zero.
+    payload = service.quiz_units_for_course(db, course.id, g.id)
+    quiz = payload["units"][0]["quizzes"][0]
+    assert quiz["average_percent"] == 80.0
+
+    validated = ReviewQuizzesResponse(**payload)
+    assert validated.units[0].quizzes[0].average_percent == 80.0
+
+
+def test_quiz_units_average_percent_is_none_with_no_submissions(db):
+    teacher = _user(db, "t17@x.kz", "T17", role="teacher")
+    g = _group(db, teacher=teacher)
+    s1 = _user(db, "avgu3@x.kz", "AU3"); _enroll(db, g, s1)
+    course, lesson, step = _quiz_step(db)
+    payload = service.quiz_units_for_course(db, course.id, g.id)
+    assert payload["units"][0]["quizzes"][0]["average_percent"] is None
+
+    # A payload cached before this field existed still validates: default is None.
+    stale_payload = dict(payload)
+    stale_units = [dict(u) for u in stale_payload["units"]]
+    for u in stale_units:
+        u["quizzes"] = [
+            {k: v for k, v in q.items() if k != "average_percent"} for q in u["quizzes"]
+        ]
+    stale_payload["units"] = stale_units
+    validated = ReviewQuizzesResponse(**stale_payload)
+    assert validated.units[0].quizzes[0].average_percent is None
+
+
+def test_quiz_units_reports_completed_count_per_unit(db):
+    teacher = _user(db, "t15@x.kz", "T15", role="teacher")
+    g = _group(db, teacher=teacher)
+    done = _user(db, "cc1@x.kz", "Done")
+    not_done = _user(db, "cc2@x.kz", "NotDone")
+    outsider = _user(db, "cc3@x.kz", "Outsider")
+    _enroll(db, g, done); _enroll(db, g, not_done)
+    course, lesson, step = _quiz_step(db)
+
+    from src.schemas.models import StudentProgress
+    db.add(StudentProgress(user_id=done.id, course_id=course.id, lesson_id=lesson.id,
+                           status="completed")); db.flush()
+    # An outsider (not in the roster) completing the same lesson must not raise the count.
+    db.add(StudentProgress(user_id=outsider.id, course_id=course.id, lesson_id=lesson.id,
+                           status="completed")); db.flush()
+
+    payload = service.quiz_units_for_course(db, course.id, g.id)
+    assert payload["units"][0]["completed_count"] == 1
 
 
 def test_quiz_units_excludes_checkpoint_lessons(db):
@@ -344,10 +483,19 @@ def test_quizzes_endpoint_lists_the_course_units(db):
     s1 = _user(db, "q1@x.kz", "Q1"); _enroll(db, g, s1)
     course, lesson, step = _quiz_step(db)
     _grant(db, g, course)
+
+    from src.schemas.models import StudentProgress
+    db.add(StudentProgress(user_id=s1.id, course_id=course.id, lesson_id=lesson.id,
+                           status="completed")); db.flush()
+
     payload = get_review_quizzes(course_id=course.id, group_id=g.id,
                                  current_user=teacher, db=db)
     assert payload["units"][0]["lesson_id"] == lesson.id
     assert payload["units"][0]["quizzes"][0]["step_id"] == step.id
+    assert payload["units"][0]["completed_count"] == 1
+
+    validated = ReviewQuizzesResponse(**payload)
+    assert validated.units[0].completed_count == 1
 
 
 def test_session_refuses_a_course_the_teacher_cannot_see(db):

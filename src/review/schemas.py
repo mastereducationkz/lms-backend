@@ -14,11 +14,16 @@ class ReviewQuizStep(BaseModel):
     title: str
     question_count: int
     submitted_count: int
+    # Group average of each roster student's best submitted attempt, one decimal
+    # place; None when nobody submitted. Default keeps a payload cached just
+    # before this field shipped valid against this model.
+    average_percent: Optional[float] = None
 
 
 class ReviewUnit(BaseModel):
     lesson_id: int
     title: str
+    completed_count: int = 0
     quizzes: List[ReviewQuizStep] = []
 
 
