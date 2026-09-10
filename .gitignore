@@ -31,3 +31,6 @@ docs/.DS_Store
 # Claude Code worktrees and macOS metadata
 .claude/worktrees/
 .DS_Store
+
+# One-time OAuth consent output (scripts/google_oauth_consent.py) — never commit
+.google_refresh_token

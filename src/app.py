@@ -121,6 +121,11 @@ _MUTATION_INVALIDATION_RULES: dict[str, tuple[str, ...]] = {
     "integrations": ("progress:*", "dashboard:*", "assignments:*", "events:*"),
     # Student targets (E5) feed the dashboard tile.
     "targets": ("dashboard:*",),
+    # Telegram announcements hold no LMS state of their own -- the routes proxy
+    # to the Support platform, which owns every row. Listed so the middleware
+    # doesn't have to special-case an unknown prefix; there is nothing cached
+    # under it to invalidate beyond its own reads.
+    "announcements": ("announcements:*",),
 }
 
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
