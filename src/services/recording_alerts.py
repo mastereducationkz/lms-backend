@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.schemas.models import Event, LessonRecording, MissingRecordingLog, UserInDB
+from src.services.operational_groups import event_has_operational_group_clause
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ def sweep_missing_recordings(db) -> int:
             UserInDB.workspace_email.isnot(None),
             MissingRecordingLog.id.is_(None),
             LessonRecording.id.is_(None),
+            # A lesson of a group that stopped was never taught, so its silence is not a
+            # missing recording. Same judgement the unmarked-attendance queue makes.
+            event_has_operational_group_clause(),
         )
         .limit(200)
         .all()

@@ -19,6 +19,7 @@ from src.services.email_service import send_invite_email, send_password_changed_
 from src.utils.permissions import require_admin, require_teacher_or_admin_for_groups, require_teacher_curator_or_admin, require_admin_or_head_curator
 from src.services.group_completion_service import sync_groups_over_status
 from src.services.cache_service import cached
+from src.services.operational_groups import event_belongs_on_calendar_clause
 import secrets
 import string
 import logging
@@ -320,6 +321,7 @@ def _admin_operational_counts(db: Session) -> dict:
         Event.is_active == True,
         Event.start_datetime >= now,
         Event.start_datetime <= week_end,
+        event_belongs_on_calendar_clause(now),  # count what the calendars draw
     ).count()
     return {
         "pending_homework_to_grade": pending_homework_to_grade,

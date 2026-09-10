@@ -19,6 +19,7 @@ import pytest
 
 from src.schemas.models import Event, EventGroup, Group, GroupStudent, UserInDB
 from src.services.operational_groups import (
+    event_belongs_on_calendar_clause,
     event_has_operational_group_clause,
     operational_group_clause,
     operational_group_ids,
@@ -79,11 +80,11 @@ def world(db):
         db.flush()
         return student
 
-    def lesson(*groups, days_ahead=1):
+    def lesson(*groups, days_ahead=1, **fields):
         start = datetime.utcnow() + timedelta(days=days_ahead)
-        ev = Event(title="Урок", event_type="class", start_datetime=start,
-                   end_datetime=start + timedelta(hours=1), is_active=True,
-                   teacher_id=teacher.id, created_by=teacher.id)
+        ev = Event(**{"title": "Урок", "event_type": "class", "start_datetime": start,
+                      "end_datetime": start + timedelta(hours=1), "is_active": True,
+                      "teacher_id": teacher.id, "created_by": teacher.id, **fields})
         db.add(ev); db.flush()
         for g in groups:
             db.add(EventGroup(event_id=ev.id, group_id=g.id))
@@ -313,3 +314,86 @@ def test_the_clause_and_the_id_helper_agree(world):
     by_clause = {g.id for g in world["db"].query(Group).filter(operational_group_clause()).all()}
     assert live.id in by_clause and dead.id not in by_clause
     assert by_clause == _operational(world)
+
+
+# --- the LMS calendar: the past stays, the future must be running -----------------------------
+#
+# The CRM's calendars apply the rule to every date. The LMS calendar is also the archive —
+# students open past lessons there to watch the recording — so it judges only lessons that have
+# not ended. On 2026-09-10 the LMS drew 232 upcoming lessons the CRM hid.
+
+
+def _lms_calendar_ids(world, *, scope=None):
+    """Asked the way the LMS calendar asks: outer-joined to its access scope, then the clause."""
+    from src.schemas.models import EventCourse
+
+    query = world["db"].query(Event).outerjoin(EventGroup).outerjoin(EventCourse)
+    if scope is not None:
+        query = query.filter(EventGroup.group_id.in_(scope))
+    query = query.filter(event_belongs_on_calendar_clause(datetime.utcnow()))
+    return [row.id for row in query.distinct().all()]
+
+
+def test_a_switched_off_groups_next_lesson_is_off_the_lms_calendar(world):
+    """`Indi Aldiyar SAT 2026 - Gulzada` (group 223): switched off, not finished, its one
+    student still active — and a lesson the next evening that nobody was going to teach."""
+    group = world["group"](name="Indi Aldiyar SAT 2026 - Gulzada", is_active=False)
+    world["enrol"](group)
+    phantom = world["lesson"](group)
+
+    assert phantom.id not in _lms_calendar_ids(world)
+
+
+def test_its_past_lessons_stay_on_the_lms_calendar(world):
+    """History and recordings: a lesson that happened is still where the student left it."""
+    group = world["group"](is_active=False)
+    world["enrol"](group)
+    taught = world["lesson"](group, days_ahead=-7)
+
+    assert taught.id in _lms_calendar_ids(world)
+
+
+def test_a_lesson_under_way_is_still_judged(world):
+    """Ahead means "not ended": a lesson that began half an hour ago is not history yet."""
+    group = world["group"](is_active=False)
+    world["enrol"](group)
+    running = world["lesson"](group, days_ahead=-30 / 1440)
+
+    assert running.id not in _lms_calendar_ids(world)
+
+
+def test_a_new_group_appears_as_soon_as_somebody_is_enrolled(world):
+    """`September 10 SAT - Мадина` (group 349): created with a schedule, nobody enrolled yet.
+    The CRM hides its lessons until the roster fills; so does the LMS, and no longer."""
+    group = world["group"](name="September 10 SAT - Мадина")
+    first = world["lesson"](group, days_ahead=11)
+    assert first.id not in _lms_calendar_ids(world)
+
+    world["enrol"](group)
+    assert first.id in _lms_calendar_ids(world)
+
+
+def test_events_that_are_not_lessons_are_not_judged(world):
+    group = world["group"](is_active=False)
+    webinar = world["lesson"](group, event_type="webinar")
+
+    assert webinar.id in _lms_calendar_ids(world)
+
+
+def test_a_lesson_with_no_group_is_not_judged(world):
+    """Nothing to ask, so nothing is guessed."""
+    loose = world["lesson"]()
+
+    assert loose.id in _lms_calendar_ids(world)
+
+
+def test_at_least_one_still_holds_inside_the_calendars_own_join(world):
+    """The calendar outer-joins `event_groups` for its scope. Left to auto-correlate, the
+    clause bound to *that* row, and "at least one of the lesson's groups is running" became
+    "the group on this row is running" — so a viewer scoped to the stopped half of a shared
+    lesson lost it. The clause keeps its own alias; this is the assertion that says so."""
+    live, stopped = world["group"](name="live"), world["group"](name="stopped", is_active=False)
+    world["enrol"](live); world["enrol"](stopped)
+    shared = world["lesson"](live, stopped)
+
+    assert _lms_calendar_ids(world, scope=[stopped.id]).count(shared.id) == 1

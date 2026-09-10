@@ -4,7 +4,7 @@ A parent may only read data about a student they are linked to via the
 `parent_students` table. Every child endpoint gates on `require_child`.
 """
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from src.routes.auth import get_current_user_dependency
 from src.schemas.models import (
     UserInDB, ParentStudent, Group, GroupStudent, AssignmentSubmission,
 )
+from src.services.operational_groups import event_belongs_on_calendar_clause
 
 router = APIRouter()
 
@@ -207,6 +208,8 @@ def child_attendance(
         Event.is_active == True,
         Event.start_datetime >= start,
         Event.start_datetime < end,
+        # A lesson still ahead only if its group is running — the child's own calendar rule.
+        event_belongs_on_calendar_clause(datetime.now(timezone.utc).replace(tzinfo=None)),
     ).distinct().all()
     if not events:
         return []

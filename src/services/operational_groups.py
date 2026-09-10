@@ -32,6 +32,7 @@ subtlety that matters when an event is shared by several groups.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Iterable, Optional
 
 from sqlalchemy import and_, exists, or_
@@ -116,14 +117,56 @@ def event_has_operational_group_clause():
     authorization scope on top — this clause answers *is this operational*, never *may you
     see it*.
     """
+    from sqlalchemy.orm import aliased
+
     from src.schemas.models import Event, EventGroup, Group
 
-    return exists().where(
-        and_(
-            EventGroup.event_id == Event.id,
-            EventGroup.group_id == Group.id,
-            operational_group_clause(),
+    # Correlated to ``events`` alone, over its own alias of ``event_groups``. The LMS event
+    # queries already outer-join ``event_groups`` for their access scope, and left to
+    # auto-correlate, the subquery binds to *that* row: "at least one of the lesson's groups"
+    # quietly becomes "the group on this row".
+    link = aliased(EventGroup)
+    return (
+        exists()
+        .where(
+            and_(
+                link.event_id == Event.id,
+                link.group_id == Group.id,
+                operational_group_clause(),
+            )
         )
+        .correlate(Event)
+    )
+
+
+def event_belongs_on_calendar_clause(now: datetime):
+    """What an LMS calendar draws: the whole past, and only a future that is still running.
+
+    The CRM's calendars are operational screens and apply
+    :func:`event_has_operational_group_clause` to every date. The LMS calendar is also the
+    archive — it is where a student goes back to a lesson to watch its recording — so a lesson
+    that has ended stays exactly where it was after its group winds up. What the two systems
+    must agree on is the future: on 2026-09-10 the LMS drew 232 upcoming lessons the CRM did
+    not, 84 in groups that had been switched off and 148 in groups with nobody enrolled, and
+    it had been sending reminders for them.
+
+    A lesson is judged while it has not ended, so one under way still counts as ahead. Events
+    that are not class lessons (webinars, weekly tests) keep their own lifecycles, and a lesson
+    attached to no group has no group to ask — both are left alone rather than guessed at.
+
+    ``now`` is naive UTC, like every stored event time.
+    """
+    from sqlalchemy.orm import aliased
+
+    from src.schemas.models import Event, EventGroup
+
+    any_link = aliased(EventGroup)
+    has_no_group = ~exists().where(any_link.event_id == Event.id).correlate(Event)
+    return or_(
+        Event.event_type != "class",
+        Event.end_datetime <= now,
+        has_no_group,
+        event_has_operational_group_clause(),
     )
 
 

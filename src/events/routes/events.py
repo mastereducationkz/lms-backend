@@ -20,9 +20,15 @@ from src.services.attendance_service import (
     ep_status_to_attendance_status,
 )
 from src.services.cache_service import cached
+from src.services.operational_groups import event_belongs_on_calendar_clause, operational_group_ids
 
 import logging
 from src.events.display import MULTI_GROUP_TYPES, display_groups, display_title
+
+
+def _utc_now() -> datetime:
+    """Naive UTC, the form every event time is stored in."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +137,12 @@ def get_my_events(
             )
         else:
             query = query.filter(access_condition)
-    
+
+        # A lesson still ahead must belong to a group that is running, as on the calendar.
+        # Not applied when one group was asked for by name: that is the group's own page,
+        # which lists everything it holds.
+        query = query.filter(event_belongs_on_calendar_clause(_utc_now()))
+
     query = query.distinct()
     
     # Apply filters
@@ -473,12 +484,16 @@ def get_calendar_events(
         logger.debug(f"DEBUG: Including events where teacher_id={current_user.id}")
         final_filter = or_(base_access, Event.teacher_id == current_user.id)
 
+    now = _utc_now()
     standard_events = db.query(Event).outerjoin(EventGroup).outerjoin(EventCourse).filter(
         final_filter,
         Event.is_active == True,
         Event.start_datetime >= start_date,
         Event.start_datetime <= end_date,
-        Event.is_recurring == False # Only non-recurring instances
+        Event.is_recurring == False, # Only non-recurring instances
+        # The CRM's rule for what is still being taught, applied to lessons still ahead.
+        # Past lessons stay: this calendar is also where students find their recordings.
+        event_belongs_on_calendar_clause(now),
     ).distinct().options(
         joinedload(Event.creator),
         joinedload(Event.event_groups).joinedload(EventGroup.group),
@@ -543,7 +558,14 @@ def get_calendar_events(
             joinedload(LessonSchedule.group),
             joinedload(LessonSchedule.lesson)
         ).order_by(LessonSchedule.scheduled_at).all()
-        
+
+        # Same rule as the events above: a planned lesson still ahead needs a running group.
+        # Planned lessons last an hour (see ``end_dt`` below).
+        ahead = {s.id: s.group_id for s in schedules if s.scheduled_at + timedelta(minutes=60) > now}
+        if ahead:
+            running = operational_group_ids(db, within=set(ahead.values()))
+            schedules = [s for s in schedules if s.id not in ahead or s.group_id in running]
+
         # Pre-calculate lesson numbers for each group
         all_group_schedules = db.query(LessonSchedule).filter(
             LessonSchedule.group_id.in_(user_group_ids),
@@ -812,7 +834,8 @@ def get_upcoming_events(
         ),
         Event.is_active == True,
         Event.start_datetime >= start_date,
-        Event.start_datetime <= end_date
+        Event.start_datetime <= end_date,
+        event_belongs_on_calendar_clause(_utc_now()),
     ).distinct().options(
         joinedload(Event.creator),
         joinedload(Event.event_groups).joinedload(EventGroup.group),

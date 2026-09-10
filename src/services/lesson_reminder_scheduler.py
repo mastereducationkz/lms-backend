@@ -10,6 +10,7 @@ from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 
 from src.config import SessionLocal
+from src.services.operational_groups import event_has_operational_group_clause
 from src.schemas.models import Event, EventGroup, EventParticipant, UserInDB, Group, GroupStudent
 from src.services import email_log
 from src.services.email_service import (
@@ -94,7 +95,10 @@ class LessonReminderScheduler:
                 Event.is_active == True,
                 Event.event_type == 'class',  # Only class events (lessons)
                 Event.start_datetime >= reminder_time_start,
-                Event.start_datetime <= reminder_time_end
+                Event.start_datetime <= reminder_time_end,
+                # Only lessons the calendar shows. A switched-off group keeps its future
+                # lessons on the books, and their rosters were being reminded to attend them.
+                event_has_operational_group_clause(),
             ).all()
             
             if not upcoming_events:
@@ -155,7 +159,8 @@ class LessonReminderScheduler:
                 Event.is_active == True,
                 Event.event_type == 'class',
                 Event.end_datetime >= reminder_time_start,
-                Event.end_datetime <= reminder_time_end
+                Event.end_datetime <= reminder_time_end,
+                event_has_operational_group_clause(),  # a lesson nobody taught has no register
             ).all()
             
             if not ended_events:

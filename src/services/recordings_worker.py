@@ -30,6 +30,7 @@ from src.services import (
     recording_alerts,
     recording_ingest,
 )
+from src.services.operational_groups import event_belongs_on_calendar_clause
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,9 @@ def ensure_upcoming_meet_links(db, limit: int = 50) -> int:
             Event.start_datetime > now,
             Event.start_datetime < _horizon(),
             UserInDB.workspace_email.isnot(None),
+            # No room for a lesson the calendar does not show: a switched-off group's leftover
+            # lessons were being given Meet links and invites on the teacher's calendar.
+            event_belongs_on_calendar_clause(now),
         )
         .order_by(Event.start_datetime)
         .limit(limit)
