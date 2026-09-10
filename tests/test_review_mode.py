@@ -22,6 +22,7 @@ from src.schemas.models import (  # noqa: F401  (import-order guard: shim first)
 )
 from src.progress.models import QuizAttempt
 from src.review import service
+from src.review.schemas import ReviewQuizzesResponse
 
 
 @pytest.fixture
@@ -239,6 +240,26 @@ def test_quiz_units_counts_questions_and_submissions(db):
     assert quiz["submitted_count"] == 1     # distinct students, not attempts
 
 
+def test_quiz_units_reports_completed_count_per_unit(db):
+    teacher = _user(db, "t15@x.kz", "T15", role="teacher")
+    g = _group(db, teacher=teacher)
+    done = _user(db, "cc1@x.kz", "Done")
+    not_done = _user(db, "cc2@x.kz", "NotDone")
+    outsider = _user(db, "cc3@x.kz", "Outsider")
+    _enroll(db, g, done); _enroll(db, g, not_done)
+    course, lesson, step = _quiz_step(db)
+
+    from src.schemas.models import StudentProgress
+    db.add(StudentProgress(user_id=done.id, course_id=course.id, lesson_id=lesson.id,
+                           status="completed")); db.flush()
+    # An outsider (not in the roster) completing the same lesson must not raise the count.
+    db.add(StudentProgress(user_id=outsider.id, course_id=course.id, lesson_id=lesson.id,
+                           status="completed")); db.flush()
+
+    payload = service.quiz_units_for_course(db, course.id, g.id)
+    assert payload["units"][0]["completed_count"] == 1
+
+
 def test_quiz_units_excludes_checkpoint_lessons(db):
     teacher = _user(db, "t6@x.kz", "T6", role="teacher")
     g = _group(db, teacher=teacher)
@@ -344,10 +365,19 @@ def test_quizzes_endpoint_lists_the_course_units(db):
     s1 = _user(db, "q1@x.kz", "Q1"); _enroll(db, g, s1)
     course, lesson, step = _quiz_step(db)
     _grant(db, g, course)
+
+    from src.schemas.models import StudentProgress
+    db.add(StudentProgress(user_id=s1.id, course_id=course.id, lesson_id=lesson.id,
+                           status="completed")); db.flush()
+
     payload = get_review_quizzes(course_id=course.id, group_id=g.id,
                                  current_user=teacher, db=db)
     assert payload["units"][0]["lesson_id"] == lesson.id
     assert payload["units"][0]["quizzes"][0]["step_id"] == step.id
+    assert payload["units"][0]["completed_count"] == 1
+
+    validated = ReviewQuizzesResponse(**payload)
+    assert validated.units[0].completed_count == 1
 
 
 def test_session_refuses_a_course_the_teacher_cannot_see(db):

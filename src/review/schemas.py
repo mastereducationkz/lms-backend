@@ -19,6 +19,7 @@ class ReviewQuizStep(BaseModel):
 class ReviewUnit(BaseModel):
     lesson_id: int
     title: str
+    completed_count: int = 0
     quizzes: List[ReviewQuizStep] = []
 
 

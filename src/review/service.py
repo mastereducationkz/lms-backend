@@ -13,6 +13,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.auth.models import UserInDB
+from src.checkpoints.completion import completed_lesson_counts
 from src.courses.models import Group, GroupStudent, Lesson, Module, Step
 from src.progress.models import QuizAttempt
 
@@ -178,6 +179,11 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
         )
         submitted = {step_id: count for step_id, count in counts}
 
+    # One bulk pass for the whole roster, not one completed_lesson_ids() call per student —
+    # this keeps the endpoint at a fixed number of queries regardless of group size.
+    lesson_ids = list(dict.fromkeys(row.lesson_id for row in rows))
+    completed_counts = completed_lesson_counts(db, roster_ids, lesson_ids)
+
     units: List[Dict[str, Any]] = []
     by_lesson: Dict[int, Dict[str, Any]] = {}
     for row in rows:
@@ -186,6 +192,7 @@ def quiz_units_for_course(db: Session, course_id: int, group_id: int) -> Dict[st
             unit = {
                 "lesson_id": row.lesson_id,
                 "title": row.lesson_title,
+                "completed_count": completed_counts.get(row.lesson_id, 0),
                 "quizzes": [],
             }
             by_lesson[row.lesson_id] = unit
