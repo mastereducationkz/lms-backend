@@ -4,7 +4,7 @@ Four jobs on a timer, in the order a lesson actually moves through them:
 
 1. give upcoming lessons a Meet link,
 2. notice conferences that have finished and claim their recordings,
-3. turn one claimed recording into HLS on S3,
+3. make claimed recordings streamable (HLS on S3), as many as fit in a tick,
 4. flag lessons that ended with no recording, before payroll runs.
 
 Each step is independent and each swallows its own exceptions. A Calendar outage must not
@@ -18,6 +18,7 @@ Off by default. ``ENABLE_RECORDINGS`` gates the whole thing, exactly as
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -40,6 +41,9 @@ logger = logging.getLogger(__name__)
 SCHEDULE_HORIZON_DAYS = 3
 
 POLL_INTERVAL_SECONDS = 300
+
+# How long one tick keeps starting new ingests before handing back to links and polling.
+INGEST_BUDGET_SECONDS = 240
 
 # How long after a lesson's scheduled end to wait before choosing among its recordings.
 # Lessons overrun, and a lesson still in progress has not produced its real recording yet
@@ -181,24 +185,23 @@ def _claim_best_recording(db, lesson, conference_names: list, now: datetime) -> 
     return bool(meet_recordings.claim_recording(db, lesson, name, file_id))
 
 
-def ingest_one_pending(db) -> bool:
-    """Transcode and upload a single claimed recording. True if one was processed.
+def ingest_one_pending(db, exclude: Optional[set] = None) -> bool:
+    """Make one claimed recording streamable and upload it. True if one was processed.
 
-    One per tick on purpose: transcoding is CPU-heavy and this container shares four
-    cores with the rest of the stack.
+    ``exclude`` holds ids already tried this tick; the one picked is added to it.
     """
-    recording = (
-        db.query(LessonRecording)
-        .filter(
-            LessonRecording.status == "pending",
-            LessonRecording.drive_file_id.isnot(None),
-            LessonRecording.attempts < recording_ingest.MAX_ATTEMPTS,
-        )
-        .order_by(LessonRecording.created_at)
-        .first()
+    query = db.query(LessonRecording).filter(
+        LessonRecording.status == "pending",
+        LessonRecording.drive_file_id.isnot(None),
+        LessonRecording.attempts < recording_ingest.MAX_ATTEMPTS,
     )
+    if exclude:
+        query = query.filter(~LessonRecording.id.in_(exclude))
+    recording = query.order_by(LessonRecording.created_at).first()
     if recording is None:
         return False
+    if exclude is not None:
+        exclude.add(recording.id)
 
     recording.attempts += 1
     db.commit()
@@ -208,6 +211,22 @@ def ingest_one_pending(db) -> bool:
         db.rollback()
         recording_ingest.fail_recording(db, recording, e)
     return True
+
+
+def ingest_pending(db, budget_seconds: float = INGEST_BUDGET_SECONDS, clock=time.monotonic) -> int:
+    """Work through the claimed recordings until none are left or the budget is spent.
+
+    One per tick made sense while each took ~23 minutes of re-encoding. A repackage takes
+    about a minute, and up to 23 lessons end at 20:00 on a busy day: one per five-minute
+    tick would leave the last of them waiting two hours for nothing. The budget only stops
+    new ones from *starting*, so Meet links and polling still get their turn every few
+    minutes. Each recording is tried at most once per tick — a failing one waits for the
+    next tick rather than spending its three attempts back to back.
+    """
+    started, tried, done = clock(), set(), 0
+    while clock() - started < budget_seconds and ingest_one_pending(db, exclude=tried):
+        done += 1
+    return done
 
 
 class RecordingsWorker:
@@ -238,12 +257,12 @@ class RecordingsWorker:
     def tick(self) -> dict:
         """One pass. Returns a summary, which makes it directly testable and callable by hand."""
         db = SessionLocal()
-        summary = {"links": 0, "claimed": 0, "ingested": False, "missing": 0}
+        summary = {"links": 0, "claimed": 0, "ingested": 0, "missing": 0}
         try:
             for key, fn in (
                 ("links", ensure_upcoming_meet_links),
                 ("claimed", poll_for_recordings),
-                ("ingested", ingest_one_pending),
+                ("ingested", ingest_pending),
                 ("missing", recording_alerts.sweep_missing_recordings),
             ):
                 try:

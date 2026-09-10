@@ -1,17 +1,18 @@
 """Turn a claimed Meet recording into a streamable HLS video on S3.
 
-Deliberately thin. The hard part — transcoding to an adaptive ladder, uploading the tree,
-serving it behind a signed token — already exists in ``video_ingest`` and was proven
-end-to-end against production S3 on 2026-09-10 (spec §13). This module only supplies a
-different *source*: a Google Drive file instead of a YouTube URL. ``_transcode_hls`` and
-``_upload_tree`` are reused untouched; duplicating them would mean two ladders to keep in
-step and two places for a bug to hide.
+Deliberately thin. Uploading the tree and serving it behind a signed token already exist in
+``video_ingest`` and were proven end-to-end against production S3 on 2026-09-10 (spec §13).
+This module supplies a different *source* — a Google Drive file instead of a YouTube URL —
+and a cheaper way to make it streamable: Meet's own H.264/AAC is repackaged into HLS rather
+than re-encoded (:func:`package_hls`). ``_transcode_hls``'s ladder stays as the fallback for
+a file that cannot be repackaged, reused untouched so there is still one ladder.
 
 The YouTube CDN outage in §12 does not apply here. That failure is specific to
 ``googlevideo.com`` media nodes; Drive downloads go to ``www.googleapis.com``, which is
 reachable from this host (verified). ``MediaCdnUnreachable`` deliberately plays no part in
 this path.
 """
+import json
 import logging
 import shutil
 import tempfile
@@ -61,6 +62,101 @@ def storage_prefix(event_id: int) -> str:
     return f"videos/recordings/{event_id}"
 
 
+# A repackaged video can only be cut where Meet put a keyframe. If those are further apart
+# than this, seeking would stall on huge segments, so the lesson is re-encoded instead.
+MAX_SEGMENT_SECONDS = 15
+
+
+def _probe_streams(src: Path) -> dict:
+    """The first video and audio stream of ``src``; each value None if absent or unreadable."""
+    info = {"video": None, "pix_fmt": None, "audio": None}
+    try:
+        out = video_ingest._run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,pix_fmt",
+             "-of", "json", str(src)],
+            timeout=120, capture=True,
+        )
+        streams = json.loads(out).get("streams", [])
+    except Exception as e:
+        logger.warning("ffprobe could not read %s: %s", src.name, e)
+        return info
+    for stream in streams:
+        if stream.get("codec_type") == "video" and info["video"] is None:
+            info["video"], info["pix_fmt"] = stream.get("codec_name"), stream.get("pix_fmt")
+        elif stream.get("codec_type") == "audio" and info["audio"] is None:
+            info["audio"] = stream.get("codec_name")
+    return info
+
+
+def _browser_playable(info: dict) -> bool:
+    """H.264 in 8-bit 4:2:0 with AAC (or no) sound: what every browser decodes.
+
+    The pixel format is not a formality. H.264 can also be 4:4:4 or 10-bit, which browsers
+    refuse — a repackage of such a file would "succeed" and then never play.
+    """
+    return (
+        info["video"] == "h264"
+        and info["pix_fmt"] in ("yuv420p", "yuvj420p")
+        and info["audio"] in ("aac", None)
+    )
+
+
+def _target_duration(playlist: Path) -> float:
+    for line in playlist.read_text().splitlines():
+        if line.startswith("#EXT-X-TARGETDURATION:"):
+            return float(line.split(":", 1)[1])
+    raise RuntimeError(f"{playlist.name} has no target duration")
+
+
+def _repackage_hls(src: Path, out: Path, *, has_audio: bool) -> None:
+    """Copy Meet's own H.264/AAC into HLS segments — no re-encoding, same layout as the ladder
+    (``master.m3u8`` + ``v0.m3u8`` + ``v0_NNN.ts``), so the player and token route see no difference."""
+    cmd = ["ffmpeg", "-y", "-i", str(src), "-map", "0:v:0"]
+    if has_audio:
+        cmd += ["-map", "0:a:0"]
+    cmd += ["-c", "copy", "-bsf:v", "h264_mp4toannexb",
+            "-f", "hls", "-hls_time", "6", "-hls_playlist_type", "vod",
+            "-hls_flags", "independent_segments",
+            "-hls_segment_filename", str(out / "v%v_%03d.ts"),
+            "-master_pl_name", "master.m3u8",
+            "-var_stream_map", "v:0,a:0" if has_audio else "v:0",
+            str(out / "v%v.m3u8")]
+    video_ingest._run(cmd, timeout=1800)
+    if not (out / "master.m3u8").exists():
+        raise RuntimeError("ffmpeg did not produce master.m3u8")
+
+
+def package_hls(src: Path, out: Path) -> str:
+    """Make the recording streamable. Returns ``"repackaged"`` or ``"re-encoded"``.
+
+    Meet already records H.264 video with AAC sound — what every browser plays. Re-encoding
+    it into three quality levels cost ~23 minutes of all four shared cores per lesson-hour
+    (measured on production, 2026-09-10) and ~2.5 GB of storage, which at 45–66 lessons a day
+    would never catch up. Copying the streams into HLS segments takes about a minute and
+    stores roughly the original size.
+
+    Anything else — another codec or pixel format, keyframes too far apart, a repackage that
+    fails — falls back to the full re-encode, so an unusual file costs time, never the lesson.
+    """
+    info = _probe_streams(src)
+    if _browser_playable(info):
+        try:
+            _repackage_hls(src, out, has_audio=info["audio"] is not None)
+            longest = _target_duration(out / "v0.m3u8")
+            if longest <= MAX_SEGMENT_SECONDS:
+                return "repackaged"
+            logger.warning("%s: keyframes up to %ss apart, re-encoding instead", src.name, longest)
+        except Exception as e:
+            logger.warning("%s: repackage failed, re-encoding instead: %s", src.name, e)
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+    else:
+        logger.info("%s: video=%s/%s audio=%s, re-encoding", src.name,
+                    info["video"], info["pix_fmt"], info["audio"])
+    video_ingest._transcode_hls(src, out)
+    return "re-encoded"
+
+
 def process_recording(db, recording) -> None:
     """Drive file → HLS on S3 → ``status='ready'``. Raises on failure.
 
@@ -76,7 +172,8 @@ def process_recording(db, recording) -> None:
 
         hls_dir = workdir / "hls"
         hls_dir.mkdir()
-        video_ingest._transcode_hls(source, hls_dir)
+        how = package_hls(source, hls_dir)
+        logger.info("recording %s: %s for streaming", recording.id, how)
 
         prefix = storage_prefix(recording.event_id)
         video_ingest._upload_tree(hls_dir, prefix)

@@ -201,7 +201,7 @@ def test_tick_continues_after_a_failing_step(monkeypatch):
 
     monkeypatch.setattr(recordings_worker, "ensure_upcoming_meet_links", _boom)
     monkeypatch.setattr(recordings_worker, "poll_for_recordings", lambda _db: 3)
-    monkeypatch.setattr(recordings_worker, "ingest_one_pending", lambda _db: True)
+    monkeypatch.setattr(recordings_worker, "ingest_pending", lambda _db: 1)
     monkeypatch.setattr(recordings_worker.recording_alerts,
                         "sweep_missing_recordings", lambda _db: 2)
 
@@ -209,7 +209,7 @@ def test_tick_continues_after_a_failing_step(monkeypatch):
 
     assert summary["links"] == 0, "the failed step reports nothing"
     assert summary["claimed"] == 3, "later steps still ran"
-    assert summary["ingested"] is True
+    assert summary["ingested"] == 1
     assert summary["missing"] == 2
     assert db.closed, "the session must be returned even when a step raises"
 
@@ -245,6 +245,62 @@ def test_ingest_counts_the_attempt_before_trying(monkeypatch):
 
 def test_ingest_returns_false_when_nothing_pending():
     assert recordings_worker.ingest_one_pending(_DB([])) is False
+
+
+def _queue(n, fail_ids=()):
+    """A stand-in for ``ingest_one_pending`` over ``n`` claimed recordings, ids 1..n."""
+    calls = []
+
+    def _one(_db, exclude=None):
+        left = [i for i in range(1, n + 1) if i not in (exclude or set()) and i not in calls]
+        if not left:
+            return False
+        rid = left[0]
+        calls.append(rid)
+        if exclude is not None:
+            exclude.add(rid)
+        return True  # a failed attempt still counts as processed
+
+    return _one, calls
+
+
+def test_a_tick_drains_the_evening_wave(monkeypatch):
+    """23 lessons end at 20:00 on a busy day. One per five-minute tick left the last one
+    queued for two hours; a repackage takes about a minute, so a tick takes them all."""
+    one, calls = _queue(23)
+    monkeypatch.setattr(recordings_worker, "ingest_one_pending", one)
+
+    assert recordings_worker.ingest_pending(_DB(), clock=lambda: 0.0) == 23
+    assert calls == list(range(1, 24))
+
+
+def test_the_budget_stops_new_ingests_but_not_the_tick(monkeypatch):
+    """Links and polling still need their turn every few minutes."""
+    one, calls = _queue(10)
+    monkeypatch.setattr(recordings_worker, "ingest_one_pending", one)
+    ticks = iter([0, 60, 130, 200, 250])  # the start, then the clock before each attempt
+
+    done = recordings_worker.ingest_pending(_DB(), budget_seconds=240, clock=lambda: next(ticks))
+
+    assert done == 3, "three began inside the budget; the fourth check found it spent"
+
+
+def test_each_recording_is_tried_once_per_tick(monkeypatch):
+    """A failing recording must wait for the next tick, not burn its three attempts back to back."""
+    seen = []
+
+    def _one(_db, exclude=None):
+        # The real query filters ``exclude`` out; a recording that failed stays pending.
+        if 7 in exclude:
+            return False
+        exclude.add(7)
+        seen.append(7)
+        return True
+
+    monkeypatch.setattr(recordings_worker, "ingest_one_pending", _one)
+
+    assert recordings_worker.ingest_pending(_DB(), clock=lambda: 0.0) == 1
+    assert seen == [7]
 
 
 # --- the Shared Drive archive ------------------------------------------------
