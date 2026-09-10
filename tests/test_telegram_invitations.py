@@ -57,6 +57,17 @@ def test_a_different_group_does_not(title):
     assert ti.match_score("July 8 SAT - Gulzada", title) < ti.SUGGESTION_THRESHOLD
 
 
+def test_a_leading_start_date_in_the_chat_title_is_not_the_groups_number():
+    """Real titles (2026-09-10): "07.08 SAT August 6 2026" is the chat of "August 6 SAT - …".
+    Read as numbers, "07" and "08" contradicted the 6, and 16 such chats got no suggestion."""
+    assert ti.match_score("August 6 SAT - Нурай", "07.08 SAT August 6 2026") >= ti.SUGGESTION_THRESHOLD
+    assert ti.match_score("August 7 SAT - Нурай", "07.08 SAT August 6 2026") < ti.SUGGESTION_THRESHOLD
+
+
+def test_leading_zeros_do_not_matter():
+    assert ti.match_score("SAT August 6", "SAT August 06") >= ti.SUGGESTION_THRESHOLD
+
+
 def test_each_chat_is_suggested_once_and_the_clearest_match_wins():
     groups = [(1, "July 8 SAT - Gulzada"), (2, "July 8 SAT")]
     chats = [(10, "July 8 SAT - Gulzada"), (11, "IELTS August 4")]

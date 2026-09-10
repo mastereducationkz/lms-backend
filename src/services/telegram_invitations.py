@@ -91,11 +91,18 @@ _NOISE = {"master", "education", "mastereducation", "masteredu", "group", "гр�
           "чат", "official", "class", "lessons", "урок", "уроки", "the"}
 
 
+# "07.08 SAT August 6 2026": chat titles often lead with a dd.mm start date. Read as numbers it
+# would contradict the group's own number ("August 6"), so dates like that are set aside.
+_DATE = re.compile(r"\b\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\b")
+
+
 def _tokens(text: str) -> set:
     tokens = set()
-    for raw in re.split(r"[^\w]+", (text or "").lower()):
+    for raw in re.split(r"[^\w]+", _DATE.sub(" ", (text or "").lower())):
         if not raw or raw in _NOISE:
             continue
+        if raw.isdigit() and len(raw) <= 2:
+            raw = str(int(raw))  # "06" is 6
         month = next((m for m in _MONTHS_EN if raw == m or (len(raw) >= 3 and m.startswith(raw))), None)
         if month is None:
             month = next((_MONTHS_EN[i] for stem, i in _RU_STEMS if raw.startswith(stem)), None)
