@@ -58,6 +58,15 @@ def create_open_space() -> tuple:
 
     Moderation is left OFF (the default), so there are no host controls to lock the
     teacher out of presenting or recording — the robot is not in the room to grant them.
+
+    ``autoRecordingGeneration=ON`` is what actually makes the recording happen. The
+    original design had the teacher press Record; that turned out to be impossible. The
+    robot owns the space but never joins, and Google gates recording on the *host* being
+    able to record, so the teacher's Record button is greyed out — verified live on
+    2026-09-10 with a fully licensed teacher in a correctly configured OU (spec §25).
+    Auto-recording bypasses the question entirely: the conference records itself from the
+    moment the first person joins until the last one leaves, and nobody has to remember
+    anything. Verified working on this tenant despite being documented as Business Plus.
     """
     meet = google_workspace.meet_client()
     space = meet.spaces().create(body={}).execute()
@@ -67,6 +76,22 @@ def create_open_space() -> tuple:
         updateMask="config.accessType",
         body={"config": {"accessType": "OPEN"}},
     ).execute()
+
+    # Separate call, and deliberately non-fatal: auto-recording is documented as a
+    # Business Plus feature and works here by grace, so if Google ever starts enforcing
+    # the edition this must degrade to "lesson has a link but is not recorded" rather
+    # than "lesson has no link at all". A lesson without a link cannot be taught.
+    try:
+        meet.spaces().patch(
+            name=name,
+            updateMask="config.artifactConfig.recordingConfig.autoRecordingGeneration",
+            body={"config": {"artifactConfig": {"recordingConfig": {"autoRecordingGeneration": "ON"}}}},
+        ).execute()
+    except Exception as e:
+        logger.error(
+            "space %s: could not enable auto-recording — the lesson will have a link but "
+            "will NOT be recorded unless someone records it manually: %s", name, e
+        )
     return space["meetingUri"], name
 
 

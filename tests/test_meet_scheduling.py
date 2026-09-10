@@ -158,11 +158,53 @@ def test_space_is_created_by_us_and_opened(calls, meet_calls):
     meet_scheduling.ensure_meet_link(_FakeDB(), _Event())
 
     verbs = [v for v, _ in meet_calls]
-    assert verbs == ["spaces.create", "spaces.patch"]
+    assert verbs == ["spaces.create", "spaces.patch", "spaces.patch"]
 
     _verb, patch_kwargs = meet_calls[1]
     assert patch_kwargs["body"]["config"]["accessType"] == "OPEN"
     assert patch_kwargs["updateMask"] == "config.accessType"
+
+
+def test_auto_recording_is_enabled_on_the_space(calls, meet_calls):
+    """Without this the lesson is simply never recorded.
+
+    The teacher cannot press Record: the robot owns the space and never joins, and Google
+    only lets participants record when the host can, so the button is greyed out for a
+    fully licensed teacher in a correctly configured OU (verified live 2026-09-10).
+    Auto-recording is what makes the whole pipeline produce anything at all.
+    """
+    meet_scheduling.ensure_meet_link(_FakeDB(), _Event())
+
+    _verb, patch_kwargs = meet_calls[2]
+    assert patch_kwargs["updateMask"] == (
+        "config.artifactConfig.recordingConfig.autoRecordingGeneration"
+    )
+    auto = (patch_kwargs["body"]["config"]["artifactConfig"]
+            ["recordingConfig"]["autoRecordingGeneration"])
+    assert auto == "ON"
+
+
+def test_a_lesson_still_gets_a_link_if_auto_recording_cannot_be_enabled(
+        monkeypatch, calls, meet_calls):
+    """Auto-recording is a Business Plus feature that works here by grace.
+
+    If Google ever enforces the edition, the failure must cost the recording, never the
+    lesson — a teacher with no link cannot teach at all.
+    """
+    real_patch = _FakeSpaces.patch
+
+    def patch(self, **kwargs):
+        if "autoRecordingGeneration" in kwargs.get("updateMask", ""):
+            self.sink.append(("spaces.patch", kwargs))
+            raise RuntimeError("Business Standard does not support auto-recording")
+        return real_patch(self, **kwargs)
+
+    monkeypatch.setattr(_FakeSpaces, "patch", patch)
+
+    link = meet_scheduling.ensure_meet_link(_FakeDB(), _Event())
+
+    assert link == "https://meet.google.com/abc-defg-hij"
+    assert calls, "the calendar event must still be created"
 
 
 def test_calendar_attaches_our_space_rather_than_minting_one(calls):
