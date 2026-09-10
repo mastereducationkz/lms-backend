@@ -35,6 +35,7 @@ LEAD = timedelta(minutes=5)
 # under way.
 GRACE_AFTER_START = timedelta(minutes=10)
 MAX_ATTEMPTS = 3
+SEND_TIMEOUT_SECONDS = 45
 SYSTEM_ACTOR = "lms-lesson-invitations@mastereducation.kz"
 
 RU_WEEKDAYS = ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье")
@@ -252,6 +253,10 @@ def send_due_invitations(db, now: Optional[datetime] = None) -> dict:
                     "silent": False,
                     "disable_web_page_preview": True,
                 },
+                # Support waits out a short Telegram 429 inside the request (worst case ~35 s).
+                # A timeout earlier than that is still safe — the retry reuses the key — but
+                # it would spend an attempt for nothing.
+                timeout=SEND_TIMEOUT_SECONDS,
             ) or {}
             outcome = {"status": "sent", "telegram_message_id": result.get("telegram_message_id"),
                        "sent_at": datetime.now(timezone.utc).replace(tzinfo=None), "error": None}

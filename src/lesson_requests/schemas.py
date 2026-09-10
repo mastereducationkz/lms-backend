@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Literal, Optional
+from src.utils.utc_json import utc_z
 
 #: How an approved cancel was (or is proposed to be) resolved.
 CancelResolution = Literal["cancel_only", "add_replacement"]
@@ -74,7 +75,7 @@ class LessonRequestSchema(BaseModel):
         # Datetimes are stored as naive UTC; emit them with a trailing 'Z' so
         # clients parse them as UTC (matches EventSchema) and render in Asia/Almaty.
         json_encoders = {
-            datetime: lambda v: v.isoformat() + 'Z' if v else None
+            datetime: utc_z,
         }
 
 

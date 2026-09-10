@@ -2,6 +2,7 @@ from pydantic import BaseModel, field_validator
 from datetime import datetime, date, timezone
 from typing import Optional, List, Dict
 import json
+from src.utils.utc_json import utc_z
 
 
 class AssignmentSchema(BaseModel):
@@ -430,5 +431,5 @@ class HomeworkUpdateSchema(BaseModel):
 
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat() + "Z" if v else None
+            datetime: utc_z,
         }

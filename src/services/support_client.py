@@ -74,6 +74,7 @@ def call(
     params: Optional[dict] = None,
     data: Optional[dict] = None,
     files: Optional[list] = None,
+    timeout: Optional[float] = None,
 ) -> Any:
     """Proxy one call to Support and return its parsed JSON.
 
@@ -104,7 +105,7 @@ def call(
             params=params,
             data=data,
             files=files,
-            timeout=UPLOAD_TIMEOUT_SECONDS if files else TIMEOUT_SECONDS,
+            timeout=timeout or (UPLOAD_TIMEOUT_SECONDS if files else TIMEOUT_SECONDS),
         )
     except requests.RequestException as exc:
         logger.error("support-api %s %s failed: %s", method, path, exc)

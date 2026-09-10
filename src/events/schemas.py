@@ -1,6 +1,7 @@
 from pydantic import BaseModel, field_validator
 from datetime import datetime, date, timezone
 from typing import Optional, List
+from src.utils.utc_json import utc_z
 
 
 class RecordingSummary(BaseModel):
@@ -46,7 +47,7 @@ class EventSchema(BaseModel):
     class Config:
         from_attributes = True
         json_encoders = {
-            datetime: lambda v: v.isoformat() + 'Z' if v else None
+            datetime: utc_z,
         }
 
 
