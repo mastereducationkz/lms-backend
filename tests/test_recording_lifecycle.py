@@ -35,6 +35,16 @@ class _Recording:
         self.shared_drive_file_id = kw.get("shared_drive_file_id")
         self.attempts = kw.get("attempts", 0)
         self.error = None
+        self.conference_record = kw.get("conference_record")
+        # Retention reads recording.event to write its tombstone, so the fake needs one.
+        self.event = kw.get("event")
+
+
+class _Ev:
+    id = 10
+    title = "SAT - Gulzada: Lesson 29"
+    teacher_id = 1623
+    start_datetime = datetime(2026, 9, 10, 14, 0)
 
 
 class _Q:
@@ -165,9 +175,10 @@ def test_failed_recordings_are_never_purged():
 def test_s3_purge_keeps_the_row_for_payroll(monkeypatch):
     """The video goes; the fact that the lesson was recorded must not."""
     old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
-    rec = _Recording(ingested_at=old)
+    rec = _Recording(ingested_at=old, event=_Ev())
     db = _DB([rec])
 
+    monkeypatch.setattr(recording_retention, "write_tombstone", lambda r, e, reason: "stub")
     monkeypatch.setattr(recording_retention.storage_service, "list_keys",
                         lambda p: [f"{p}/master.m3u8", f"{p}/v0_000.ts"])
     monkeypatch.setattr(recording_retention.storage_service, "delete", lambda k: None)
@@ -300,3 +311,52 @@ def test_archive_failure_does_not_fail_the_ingest(monkeypatch):
 
     assert rec.status == "ready", "a failed archive must not un-ready a playable lesson"
     assert rec.shared_drive_file_id is None, "and retention must see there is no archive yet"
+
+
+# --- traceability ------------------------------------------------------------
+
+def test_purge_writes_a_tombstone_before_deleting(monkeypatch):
+    """Deleting a lesson must never make it untraceable.
+
+    A ~1 KB stub in the Shared Drive costs nothing against the ~700 MB it replaces, and
+    it is the difference between "this lesson's video was removed on <date>, here is
+    where it lived" and a silent gap indistinguishable from a lesson never recorded.
+    """
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+    rec = _Recording(ingested_at=old)
+    rec.event = _Ev()
+    rec.conference_record = "conferenceRecords/c1"
+    db = _DB([rec])
+    order = []
+
+    monkeypatch.setattr(recording_retention, "write_tombstone",
+                        lambda r, e, reason: order.append(("tombstone", reason)) or "stub-1")
+    monkeypatch.setattr(recording_retention.storage_service, "list_keys",
+                        lambda p: [f"{p}/master.m3u8"])
+    monkeypatch.setattr(recording_retention.storage_service, "delete",
+                        lambda k: order.append(("delete", k)))
+
+    recording_retention.purge_expired_videos(db, dry_run=False)
+
+    assert order[0][0] == "tombstone", "the breadcrumb must be written before the delete"
+    assert any(o[0] == "delete" for o in order)
+
+
+def test_a_failed_tombstone_cancels_the_purge(monkeypatch):
+    """Better a video nobody can find than one nobody can trace."""
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+    rec = _Recording(ingested_at=old)
+    rec.event = _Ev()
+    db = _DB([rec])
+    deleted = []
+
+    monkeypatch.setattr(recording_retention, "write_tombstone",
+                        lambda r, e, reason: (_ for _ in ()).throw(RuntimeError("Drive down")))
+    monkeypatch.setattr(recording_retention.storage_service, "list_keys", lambda p: ["k"])
+    monkeypatch.setattr(recording_retention.storage_service, "delete", lambda k: deleted.append(k))
+
+    result = recording_retention.purge_expired_videos(db, dry_run=False)
+
+    assert deleted == [], "nothing may be deleted without a breadcrumb"
+    assert result["errors"] == 1
+    assert rec.hls_url is not None, "the lesson stays findable"

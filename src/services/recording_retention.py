@@ -26,6 +26,54 @@ DRIVE_ORIGINAL_DAYS = 7
 S3_VIDEO_MONTHS = 12
 
 
+def write_tombstone(recording, event, reason: str) -> str:
+    """Leave a breadcrumb in the Shared Drive when a video is deleted.
+
+    Deleting a lesson should never make it *untraceable*. A ~1 KB text file costs nothing
+    against the ~700 MB it replaces, and it means someone browsing «Уроки — записи» a year
+    later still finds a row for every lesson that was ever recorded, saying what happened
+    to it and where the pieces went — instead of a silent gap they cannot distinguish from
+    "this lesson was never recorded".
+
+    The database row already records all of this, but the Shared Drive is where a human
+    looks, and a database nobody queries is not traceability.
+    """
+    from src.services.recording_ingest import storage_prefix
+
+    lines = [
+        f"Lesson {event.id}: {event.title}",
+        f"Scheduled     : {event.start_datetime}",
+        f"Teacher id    : {event.teacher_id}",
+        "",
+        f"Video removed : {reason}",
+        f"Removed at    : {datetime.now(timezone.utc).replace(tzinfo=None)} UTC",
+        "",
+        f"LMS record    : lesson_recordings.id={recording.id} (status={recording.status})",
+        f"Watch in LMS  : /events/{event.id}/recording",
+        f"S3 prefix     : {storage_prefix(event.id)}",
+        f"HLS path      : {recording.hls_url or '(purged)'}",
+        f"Drive original: {recording.drive_file_id or '(none)'}",
+        f"Shared Drive  : {recording.shared_drive_file_id or '(none)'}",
+        f"Conference    : {recording.conference_record or '(unknown)'}",
+    ]
+    body = "\n".join(lines).encode("utf-8")
+
+    from googleapiclient.http import MediaInMemoryUpload
+
+    drive = google_workspace.drive_client()
+    created = drive.files().create(
+        body={
+            "name": f"lesson-{event.id}-{event.start_datetime:%Y%m%d}-REMOVED.txt",
+            "parents": [google_workspace.RECORDINGS_SHARED_DRIVE_ID],
+            "mimeType": "text/plain",
+        },
+        media_body=MediaInMemoryUpload(body, mimetype="text/plain"),
+        supportsAllDrives=True,
+        fields="id",
+    ).execute()
+    return created["id"]
+
+
 def purge_drive_originals(db, dry_run: bool = True, limit: int = 100) -> dict:
     """Delete the robot's copy of recordings ingested more than 7 days ago.
 
@@ -99,11 +147,21 @@ def purge_expired_videos(db, dry_run: bool = True, limit: int = 100) -> dict:
             logger.info("[dry-run] would delete S3 HLS for lesson %s (%s)", r.event_id, r.hls_url)
         return result
 
+    # Local import: recording_ingest pulls in the Google client tree, and retention is
+    # imported by anything that wants the constants.
     from src.services.recording_ingest import storage_prefix
 
     for r in due:
         try:
             prefix = storage_prefix(r.event_id)
+            # Breadcrumb first, delete second. If the tombstone fails we would rather
+            # keep a video nobody can find than delete one nobody can trace.
+            try:
+                write_tombstone(r, r.event, f"S3 retention: {S3_VIDEO_MONTHS} months elapsed")
+            except Exception as e:
+                logger.error("lesson %s: tombstone failed, skipping purge: %s", r.event_id, e)
+                result["errors"] += 1
+                continue
             for key in storage_service.list_keys(prefix):
                 storage_service.delete(key)
             r.hls_url = None
