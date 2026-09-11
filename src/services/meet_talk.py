@@ -250,6 +250,18 @@ def _insights(lines: list) -> tuple:
 
 # ── one lesson ───────────────────────────────────────────────────────────────────────────
 
+def _recording_start(event, batch, recording) -> Optional[datetime]:
+    """When the claimed recording's call began (Meet starts recording as the call opens)."""
+    if recording is None:
+        return None
+    calls = batch.conferences.get(event.id, [])
+    match = next((c for c in calls if c.conference_record == recording.conference_record), None)
+    if match is None:
+        match = max((c for c in calls if c.started_at), key=lambda c: (c.ended_at or c.started_at) - c.started_at,
+                    default=None)
+    return match.started_at if match else None
+
+
 def _has_words(transcript) -> bool:
     """A transcript that can stand in for Meet's timing: ready, and placed on the clock."""
     return bool(transcript is not None and transcript.status == "ready" and transcript.recording_started_at
@@ -287,6 +299,11 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
     if transcript is not None and transcript.status == "ready":
         started = transcript.recording_started_at
         lines = _name_lines(transcript.utterances or [], started, people)
+    # Where the lesson starts inside the recording: video second = lesson second + this. Known
+    # even without a transcript — the call the recording came from began at a known moment — so
+    # the watch page can follow the video too.
+    anchor = started or _recording_start(event, batch, recording)
+    offset = _secs(start - anchor) if anchor else None
 
     insights, answers = _insights(lines) if lines else (None, {})
     rows_out = []
@@ -366,6 +383,7 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
         "longest_teacher_stretch_seconds": round(longest),
         "speaker_changes_per_10_min": round(changes / (lesson_seconds / 600), 1),
         "held_back": held_back,
+        "recording_offset_seconds": round(offset, 2) if offset is not None else None,
         "insights": insights,
     }
     if with_transcript:
@@ -486,6 +504,8 @@ def public_talk(talk: dict) -> Optional[dict]:
         "state": "ready",
         "source": talk.get("source", "meet"),
         "lesson_seconds": talk["lesson_seconds"],
+        # The video's clock against the lesson's, so the page can follow playback. Nothing private.
+        "recording_offset_seconds": talk.get("recording_offset_seconds"),
         "speech_seconds": talk["speech_seconds"],
         "silence_seconds": talk["silence_seconds"],
         "teacher_share": talk["teacher_share"],

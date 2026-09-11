@@ -414,3 +414,16 @@ def test_the_quick_overlap_agrees_with_the_slow_one():
             a = rng.uniform(-60, 3660)
             lo, hi = base + timedelta(seconds=a), base + timedelta(seconds=a + rng.uniform(0.1, 120))
             assert abs(index.overlap(lo, hi) - meet_talk._overlap(lo, hi, spans)) < 1e-6
+
+
+
+def test_the_video_can_be_followed_without_a_transcript(talk):
+    """Where the lesson starts in the recording comes from the recorded call when there are no words."""
+    teacher, aya, *_ = _classroom(talk)
+    talk["spoke"]((teacher, 0, 20), (aya, 20, 25))
+    talk["db"].add(LessonRecording(event_id=talk["lesson"].id, status="ready", hls_url="x",
+                                   conference_record=talk["call"].conference_record))
+    talk["db"].flush()
+    t = _talk(talk)
+    assert t["recording_offset_seconds"] == 600, "the call opened 10 minutes before the lesson"
+    assert meet_talk.public_talk(t)["recording_offset_seconds"] == 600
