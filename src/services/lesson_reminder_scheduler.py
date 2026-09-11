@@ -40,7 +40,22 @@ class LessonReminderScheduler:
         # duplicate mail, because it dies with the process and this scheduler runs in its
         # own container that restarts on every deploy. The durable guarantee is the
         # unique idempotency_key claimed in email_log before each send.
-        self.sent_reminders = set()
+        #
+        # key -> when it was handled. The time is stored rather than parsed back out of the key:
+        # parsing it compared a naive timestamp with an aware one and raised on every tick —
+        # and it raised *inside* the per-lesson loop, so each tick reminded one lesson and
+        # silently skipped every other lesson starting at the same time (fixed 2026-09-11).
+        self.sent_reminders: dict = {}
+
+    SENT_MEMORY = timedelta(hours=24)
+
+    def _mark_handled(self, key: str, now: datetime) -> None:
+        self.sent_reminders[key] = now
+
+    def _forget_old(self, now: datetime) -> None:
+        """Keep a day of keys. Pruning a cache must never stop a send, so this cannot raise."""
+        cutoff = now - self.SENT_MEMORY
+        self.sent_reminders = {key: at for key, at in self.sent_reminders.items() if at > cutoff}
 
     def start(self):
         """Start the scheduler in a background thread"""
@@ -136,27 +151,21 @@ class LessonReminderScheduler:
                 
                 logger.info(f"📨 [SCHEDULER] Processing reminder for event ID {event.id} at {event.start_datetime.strftime('%H:%M')}")
                 
-                # Send reminders for this event
-                success = self._send_event_reminders(db, event)
+                # One lesson's failure is that lesson's: the others in this window still go out.
+                try:
+                    success = self._send_event_reminders(db, event)
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"❌ [SCHEDULER] Reminders for event ID {event.id} failed: {e}", exc_info=True)
+                    continue
                 
                 if success:
-                    self.sent_reminders.add(reminder_key)
+                    self._mark_handled(reminder_key, now)
                     logger.info(f"✅ [SCHEDULER] Marked event ID {event.id} as sent")
-                    
-                    # Clean up old entries from sent_reminders to prevent memory bloat
-                    # Keep only reminders from last 24 hours
-                    cutoff_time = now - timedelta(hours=24)
-                    old_count = len(self.sent_reminders)
-                    self.sent_reminders = {
-                        key for key in self.sent_reminders 
-                        if '_' in key and len(key.split('_')) >= 3 and
-                        datetime.fromisoformat(key.split('_', 2)[2]) > cutoff_time
-                    }
-                    cleaned = old_count - len(self.sent_reminders)
-                    if cleaned > 0:
-                        logger.debug(f"🧹 [SCHEDULER] Cleaned {cleaned} old reminder(s) from cache")
                 else:
                     logger.error(f"❌ [SCHEDULER] Failed to send reminders for event ID {event.id}")
+
+            self._forget_old(now)
                     
         except Exception as e:
             logger.error(f"❌ [SCHEDULER] Error checking for lesson reminders: {e}", exc_info=True)
@@ -207,12 +216,12 @@ class LessonReminderScheduler:
                     logger.info(f"⚠️  [POST-LESSON] Missing attendance for event {event.id}. sending notification.")
                     success = self._send_post_lesson_notification(db, event)
                     if success:
-                        self.sent_reminders.add(reminder_key)
+                        self._mark_handled(reminder_key, now)
                         logger.info(f"✅ [POST-LESSON] Notification sent for event {event.id}")
                 else:
                     logger.info(f"✓ [POST-LESSON] Attendance already recorded for event {event.id} ({attendance_count} records)")
                     # Mark as 'sent' so we don't check again
-                    self.sent_reminders.add(reminder_key)
+                    self._mark_handled(reminder_key, now)
                     
         except Exception as e:
             logger.error(f"❌ [SCHEDULER] Error checking post-lesson reminders: {e}", exc_info=True)

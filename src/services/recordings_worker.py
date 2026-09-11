@@ -28,6 +28,7 @@ from src.services import (
     google_workspace,
     meet_attendance,
     meet_recordings,
+    meet_room_closer,
     meet_scheduling,
     recording_alerts,
     recording_ingest,
@@ -261,10 +262,12 @@ class RecordingsWorker:
     def tick(self) -> dict:
         """One pass. Returns a summary, which makes it directly testable and callable by hand."""
         db = SessionLocal()
-        summary = {"links": 0, "claimed": 0, "attendance": 0, "ingested": 0, "missing": 0}
+        summary = {"links": 0, "closed": 0, "claimed": 0, "attendance": 0, "ingested": 0, "missing": 0}
         try:
             for key, fn in (
                 ("links", ensure_upcoming_meet_links),
+                # Before the pollers: a room left open by a student holds up both of them.
+                ("closed", meet_room_closer.close_lingering_rooms),
                 ("claimed", poll_for_recordings),
                 ("attendance", meet_attendance.sync_if_enabled),
                 ("ingested", ingest_pending),
