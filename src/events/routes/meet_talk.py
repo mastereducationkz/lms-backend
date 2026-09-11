@@ -46,11 +46,53 @@ def get_group_talk(
         raise HTTPException(status_code=404, detail="Group not found")
     if not talk_settings.enabled(db):
         raise HTTPException(status_code=409, detail="Talk time is switched off")
+    date_from, date_to, now = _range(date_from, date_to)
+    return meet_talk_stats.group_talk(db, current_user, group, date_from, date_to, now=now)
+
+
+def _range(date_from: Optional[datetime], date_to: Optional[datetime]) -> tuple:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     date_to = _utc_naive(date_to) or now
     date_from = _utc_naive(date_from) or date_to - timedelta(days=DEFAULT_DAYS)
-    date_from = max(date_from, date_to - timedelta(days=MAX_DAYS * 2))
-    return meet_talk_stats.group_talk(db, current_user, group, date_from, date_to, now=now)
+    return max(date_from, date_to - timedelta(days=MAX_DAYS * 2)), date_to, now
+
+
+def _heads_only(db, user) -> None:
+    """Every teacher side by side is for heads (owner, 2026-09-11) — and only while switched on."""
+    if user.role not in meet_talk_stats.HEADS:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not talk_settings.enabled(db):
+        raise HTTPException(status_code=409, detail="Talk time is switched off")
+
+
+@router.get("/talk/teachers")
+def get_teachers_talk(
+    date_from: Optional[datetime] = Query(None, description="UTC; default 30 days before date_to"),
+    date_to: Optional[datetime] = Query(None, description="UTC; default now"),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """Every teacher over the period: their share, stretches, questions, silent students."""
+    _heads_only(db, current_user)
+    date_from, date_to, now = _range(date_from, date_to)
+    return meet_talk_stats.teachers_talk(db, current_user, date_from, date_to, now=now)
+
+
+@router.get("/talk/teachers/{teacher_id}")
+def get_teacher_talk(
+    teacher_id: int,
+    date_from: Optional[datetime] = Query(None, description="UTC; default 30 days before date_to"),
+    date_to: Optional[datetime] = Query(None, description="UTC; default now"),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """One teacher over the period: all their groups together, each group, each lesson."""
+    _heads_only(db, current_user)
+    date_from, date_to, now = _range(date_from, date_to)
+    out = meet_talk_stats.teacher_talk(db, current_user, teacher_id, date_from, date_to, now=now)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    return out
 
 
 class TalkSettingsIn(BaseModel):

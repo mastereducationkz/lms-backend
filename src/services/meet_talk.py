@@ -201,8 +201,13 @@ def _name_lines(utterances: list, started: Optional[datetime], people: dict) -> 
     return lines
 
 
-def _insights(lines: list) -> dict:
-    questions, answered, waits = 0, 0, []
+def _insights(lines: list) -> tuple:
+    """The class's interaction, and who answered the teacher's questions: (insights, answers by key).
+
+    A teacher's line ending in «?» is a question put to the room; the first other voice within
+    20 s answered it — that person is credited with the answer.
+    """
+    questions, answered, waits, answers = 0, 0, [], {}
     for i, line in enumerate(lines):
         if line["role"] != "teacher" or not QUESTION.search(line["text"]):
             continue
@@ -211,12 +216,14 @@ def _insights(lines: list) -> dict:
         if reply and reply["role"] != "other" and reply["at"] - line["end"] <= WAIT_MAX:
             answered += 1
             waits.append(max(0.0, reply["at"] - line["end"]))
+            if reply["speaker_key"]:
+                answers[reply["speaker_key"]] = answers.get(reply["speaker_key"], 0) + 1
     return {
         "teacher_questions": questions,
         "answered": answered,
         "median_wait_seconds": round(statistics.median(waits), 1) if waits else None,
         "student_questions": sum(1 for n in lines if n["role"] in ("student", "unknown") and QUESTION.search(n["text"])),
-    }
+    }, answers
 
 
 # ── one lesson ───────────────────────────────────────────────────────────────────────────
@@ -259,6 +266,7 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
         started = transcript.recording_started_at
         lines = _name_lines(transcript.utterances or [], started, people)
 
+    insights, answers = _insights(lines) if lines else (None, {})
     rows_out = []
     for key, person in people.items():
         spans = _clip(person["spans"], lo, hi)
@@ -271,6 +279,8 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
             "in_room": present,
             "questions": (sum(1 for n in lines if n["speaker_key"] == key and QUESTION.search(n["text"]))
                           if lines else None),
+            # Teacher questions this person answered first; None without a transcript.
+            "answers": answers.get(key, 0) if lines else None,
             "spans": [[round(_secs(a - start), 1), round(_secs(b - start), 1)] for a, b in spans],
         })
     speaking_total = sum(r["seconds"] for r in rows_out if r["role"] in SPEAKING)
@@ -334,7 +344,7 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
         "longest_teacher_stretch_seconds": round(longest),
         "speaker_changes_per_10_min": round(changes / (lesson_seconds / 600), 1),
         "held_back": held_back,
-        "insights": _insights(lines) if lines else None,
+        "insights": insights,
     }
     if with_transcript:
         out["transcript"] = transcript_block(event, recording, transcript, lines, started,

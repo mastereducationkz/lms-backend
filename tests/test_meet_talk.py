@@ -15,6 +15,8 @@ from src.events.routes.meet_talk import (
     get_group_talk,
     get_lesson_talk,
     get_talk_settings,
+    get_teacher_talk,
+    get_teachers_talk,
     put_talk_settings,
 )
 from src.schemas.models import GoogleAccountLink, LessonRecording, LessonTranscript, MeetSpeech
@@ -294,7 +296,7 @@ def test_one_students_lessons_for_the_report(talk):
     talk["spoke"]((teacher, 0, 20), (aya, 20, 25))
     out = meet_talk_stats.student_talk(talk["db"], talk["aya"].id, now=talk["after"])
     assert out["totals"] == {"lessons": 1, "lessons_spoke": 1, "total_seconds": 300, "avg_seconds": 300,
-                             "questions": None}
+                             "questions": None, "answers": None}
     assert out["lessons"][0]["share_of_students"] == 1.0 and out["lessons"][0]["in_room"] is True
     talk_settings.update(talk["db"], talk["admin"], enabled=False)
     assert meet_talk_stats.student_talk(talk["db"], talk["aya"].id) is None
@@ -335,3 +337,58 @@ def test_a_transcript_still_being_made_is_not_talk_yet(talk):
     talk["words"](status="failed")
     later = talk["lesson"].end_datetime + meet_talk.SPEECH_EXPECTED_WITHIN + timedelta(minutes=1)
     assert meet_talk.lesson_talk(talk["db"], talk["lesson"], now=later)["state"] == "none"
+
+
+
+# ── who answered, and every teacher side by side (owner, 2026-09-11) ─────────────────────
+
+def _answered_lesson(talk):
+    teacher, aya, _eldana, _s = _classroom(talk)
+    talk["spoke"]((teacher, 0, 10), (aya, 10, 11), (teacher, 11, 20))
+    talk["db"].add(LessonRecording(event_id=talk["lesson"].id, status="ready", hls_url="x"))
+    talk["words"]((1, 9.8, 0, "Какой ответ правильный?"), (10, 10.5, 1, "Думаю, B."), (11, 12, 0, "Верно."))
+
+
+def test_the_student_who_answers_a_teachers_question_is_credited(talk):
+    _answered_lesson(talk)
+    t = _talk(talk)
+    assert _person(t, "Аяулым Сейтова")["answers"] == 1
+    assert _person(t, "Елдана Нұрлан")["answers"] == 0
+
+
+def test_a_groups_page_shows_questions_and_each_students_lessons(talk):
+    _answered_lesson(talk)
+    out = get_group_talk(talk["group"].id, date_from=None, date_to=None, db=talk["db"], current_user=talk["admin"])
+    by = {s["name"]: s for s in out["students"]}
+    assert by["Аяулым Сейтова"]["answers"] == 1
+    assert [x["state"] for x in by["Аяулым Сейтова"]["lessons"]] == ["spoke"]
+    assert [x["state"] for x in by["Елдана Нұрлан"]["lessons"]] == ["silent"]
+    assert [x["state"] for x in by["Шыңғыс Бек"]["lessons"]] == ["present"], "5 minutes, no words: not silent"
+    assert out["questions"] == {"teacher_questions": 1, "answered": 1, "student_questions": 0,
+                                "lessons_with_transcript": 1}
+    lesson = out["lessons"][0]
+    assert (lesson["teacher_questions"], lesson["answered"]) == (1, 1)
+    assert lesson["groups"] == [{"id": talk["group"].id, "name": "August 19 SAT - Gulzada"}]
+
+
+def test_heads_see_every_teacher_and_each_teachers_groups(talk):
+    db = talk["db"]
+    _answered_lesson(talk)
+    head = _user(db, "head_teacher")
+    everyone = get_teachers_talk(date_from=None, date_to=None, db=db, current_user=head)
+    row = next(r for r in everyone["teachers"] if r["teacher_id"] == talk["teacher"].id)
+    assert row["lessons"] == 1 and row["groups"] == 1 and row["name"] == "Гульзада Сапарова"
+    assert row["questions"]["teacher_questions"] == 1 and row["silent_per_lesson"] == 1.0
+
+    one = get_teacher_talk(talk["teacher"].id, date_from=None, date_to=None, db=db, current_user=head)
+    assert one["teacher"]["lessons"] == 1
+    assert [g["name"] for g in one["groups"]] == ["August 19 SAT - Gulzada"]
+    assert one["lessons"][0]["event_id"] == talk["lesson"].id
+
+    for outsider in (talk["teacher"], _user(db, "curator")):
+        with pytest.raises(HTTPException) as err:
+            get_teachers_talk(date_from=None, date_to=None, db=db, current_user=outsider)
+        assert err.value.status_code == 404
+    with pytest.raises(HTTPException) as err:
+        get_teacher_talk(999999, date_from=None, date_to=None, db=db, current_user=head)
+    assert err.value.status_code == 404
