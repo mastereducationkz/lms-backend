@@ -76,3 +76,50 @@ def test_a_day_old_entry_is_forgotten_and_a_fresh_one_kept(world, monkeypatch):
                                 "post_lesson_2_2026-09-11T14:00:00": now - timedelta(hours=1)}
     scheduler._forget_old(now)
     assert list(scheduler.sent_reminders) == ["post_lesson_2_2026-09-11T14:00:00"]
+
+
+# ── only running classes are reminded (owner, 2026-09-11) ────────────────────────────────
+
+def _recipients(world, monkeypatch):
+    """Run the real reminder step; record every email it would send as (email, role)."""
+    world["db"].execute(text("SET LOCAL TIME ZONE 'UTC'"))
+    monkeypatch.setattr(lrs, "SessionLocal", lambda: _Borrowed(world["db"]))
+    sent = []
+    monkeypatch.setattr(lrs, "send_lesson_reminder_notification",
+                        lambda **kw: sent.append((kw["to_email"], kw["role"])) or True)
+    lrs.LessonReminderScheduler()._check_and_send_reminders()
+    return sent
+
+
+def test_a_stopped_group_sharing_a_lesson_is_not_reminded(world, monkeypatch):
+    from src.schemas.models import EventGroup
+    from tests.test_operational_groups import _user
+
+    db = world["db"]
+    live = world["group"](name="August 19 SAT - Gulzada")
+    here = world["enrol"](live)
+    other_teacher = _user(db, "teacher")
+    stopped = world["group"](name="Gulzada - Сопровождение", is_active=False)
+    stopped.teacher_id = other_teacher.id
+    gone = world["enrol"](stopped)
+    shared = world["lesson"](live, days_ahead=30 / 1440)
+    db.add(EventGroup(event_id=shared.id, group_id=stopped.id))
+    db.flush()
+
+    sent = _recipients(world, monkeypatch)
+
+    emails = {email for email, _ in sent}
+    assert here.email in emails and world["teacher"].email in emails
+    assert gone.email not in emails, "a student of a switched-off group is not reminded"
+    assert other_teacher.email not in emails, "nor is that group's teacher"
+
+
+def test_students_who_left_or_were_switched_off_are_not_reminded(world, monkeypatch):
+    live = world["group"](name="live")
+    staying = world["enrol"](live)
+    switched_off = world["enrol"](live, active=False)  # a login the CRM turned off (not renewed)
+    world["lesson"](live, days_ahead=30 / 1440)
+
+    emails = {email for email, _ in _recipients(world, monkeypatch)}
+
+    assert staying.email in emails and switched_off.email not in emails

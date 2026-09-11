@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 
 from src.config import SessionLocal
-from src.services.operational_groups import event_has_operational_group_clause
+from src.services.operational_groups import event_has_operational_group_clause, operational_group_clause
 from src.schemas.models import Event, EventGroup, EventParticipant, UserInDB, Group, GroupStudent
 from src.services import email_log
 from src.services.email_service import (
@@ -294,13 +294,18 @@ class LessonReminderScheduler:
             event_datetime_kz = event.start_datetime + KZ_OFFSET
             event_datetime_str = event_datetime_kz.strftime("%d.%m.%Y в %H:%M")
             
-            # Get groups associated with this event
-            event_groups = db.query(EventGroup).filter(
-                EventGroup.event_id == event.id
-            ).all()
+            # The lesson's groups that are still running. The lesson itself qualified because at
+            # least one of its groups runs; a stopped group sharing it (switched off, finished,
+            # or with nobody enrolled) must not have its students or its teacher reminded of a
+            # class that is no longer theirs (owner, 2026-09-11: only active classes).
+            running = {gid for (gid,) in db.query(Group.id)
+                       .join(EventGroup, EventGroup.group_id == Group.id)
+                       .filter(EventGroup.event_id == event.id, operational_group_clause())}
+            event_groups = [eg for eg in db.query(EventGroup).filter(EventGroup.event_id == event.id).all()
+                            if eg.group_id in running]
             
             if not event_groups:
-                logger.warning(f"⚠️  [REMINDER] No groups found for event {event.id}")
+                logger.warning(f"⚠️  [REMINDER] No running groups for event {event.id}")
                 return False
             
             logger.info(f"   � Found {len(event_groups)} group(s) for this event")
