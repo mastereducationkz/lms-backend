@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import statistics
+from bisect import bisect_right
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -59,6 +60,26 @@ def _total(spans: list) -> float:
 
 def _overlap(a: datetime, b: datetime, spans: list) -> float:
     return sum(max(0.0, _secs(min(b, y) - max(a, x))) for x, y in spans)
+
+
+class _Spans:
+    """One person's merged, sorted speech, asked "how much of [a, b] is theirs?" by binary search —
+    a lesson is hundreds of lines against hundreds of stretches, and scanning them all for every
+    line was 90% of the time (0.25 s a lesson)."""
+
+    def __init__(self, spans: list):
+        self.spans = spans
+        self.starts = [a for a, _ in spans]
+
+    def overlap(self, a: datetime, b: datetime) -> float:
+        total, i = 0.0, bisect_right(self.starts, b)
+        while i > 0:
+            i -= 1
+            x, y = self.spans[i]
+            if y <= a:
+                break  # merged and sorted: every earlier stretch ended earlier still
+            total += _secs(min(b, y) - max(a, x))
+        return total
 
 
 def _turns(spans: list, gap: float = TURN_GAP) -> list:
@@ -166,12 +187,13 @@ def _name_lines(utterances: list, started: Optional[datetime], people: dict) -> 
         return []
     placed = []
     by_voice: dict = {}
+    index = {key: _Spans(person["spans"]) for key, person in people.items() if person["spans"]}
     for start, end, voice, text in utterances:
         best, best_overlap = None, 0.0
         if started is not None:
             a, b = started + timedelta(seconds=start), started + timedelta(seconds=end)
-            for key, person in people.items():
-                o = _overlap(a, b, person["spans"])
+            for key, spans in index.items():
+                o = spans.overlap(a, b)
                 if o > best_overlap:
                     best, best_overlap = key, o
             if best and best_overlap >= MATCH_SHARE * max(0.1, end - start):

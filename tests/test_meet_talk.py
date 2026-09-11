@@ -392,3 +392,25 @@ def test_heads_see_every_teacher_and_each_teachers_groups(talk):
     with pytest.raises(HTTPException) as err:
         get_teacher_talk(999999, date_from=None, date_to=None, db=db, current_user=head)
     assert err.value.status_code == 404
+
+
+def test_the_quick_overlap_agrees_with_the_slow_one():
+    """Binary search over merged stretches must give what summing every stretch gives."""
+    import random
+    from datetime import datetime
+
+    from src.services.meet_presence import merge_spans
+
+    rng = random.Random(4)
+    base = datetime(2026, 9, 11, 15, 0)
+    for _ in range(50):
+        raw = []
+        for _ in range(rng.randint(0, 40)):
+            a = rng.uniform(0, 3600)
+            raw.append((base + timedelta(seconds=a), base + timedelta(seconds=a + rng.uniform(0.1, 60))))
+        spans = merge_spans(raw)
+        index = meet_talk._Spans(spans)
+        for _ in range(20):
+            a = rng.uniform(-60, 3660)
+            lo, hi = base + timedelta(seconds=a), base + timedelta(seconds=a + rng.uniform(0.1, 120))
+            assert abs(index.overlap(lo, hi) - meet_talk._overlap(lo, hi, spans)) < 1e-6
