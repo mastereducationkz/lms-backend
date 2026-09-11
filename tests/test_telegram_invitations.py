@@ -282,3 +282,53 @@ def test_the_screen_still_works_when_support_is_down(linking, monkeypatch):
     monkeypatch.setattr(telegram_links.support_client, "call", down)
     response = telegram_links.list_links(db=linking["db"], current_user=linking["admin"])
     assert response["chats_error"] and response["groups"]
+
+
+# ── every group can be linked (owner, 2026-09-11) ────────────────────────────────────────
+
+def test_every_group_is_listed_with_what_state_it_is_in(linking):
+    db = linking["db"]
+    not_started = telegram_links.Group(name="September 10 SAT - Мадина", teacher_id=linking["sat"].teacher_id,
+                                       is_active=True, is_over=False, is_special=False)
+    stopped = telegram_links.Group(name="Gulzada - Сопровождение", teacher_id=linking["sat"].teacher_id,
+                                   is_active=False, is_over=False, is_special=False)
+    finished = telegram_links.Group(name="June 20 SAT - Gulzada", teacher_id=linking["sat"].teacher_id,
+                                    is_active=True, is_over=True, is_special=False)
+    db.add_all([not_started, stopped, finished])
+    db.flush()
+
+    groups = _groups(telegram_links.list_links(db=db, current_user=linking["admin"]))
+
+    assert groups[linking["sat"].id]["status"] == "running"
+    assert groups[not_started.id]["status"] == "not_started", "a new group's chat can be linked before day one"
+    assert groups[stopped.id]["status"] == "stopped"
+    assert groups[finished.id]["status"] == "finished"
+
+
+def test_a_new_group_gets_a_suggestion_and_a_finished_one_does_not(linking, monkeypatch):
+    db = linking["db"]
+    chats = [{"id": 20, "title": "SAT September 10 2026", "status": "approved", "is_active": True},
+             {"id": 21, "title": "SAT June 20 2026", "status": "approved", "is_active": True}]
+    monkeypatch.setattr(telegram_links.support_client, "call", lambda *a, **k: chats)
+    new = telegram_links.Group(name="September 10 SAT - Мадина", teacher_id=linking["sat"].teacher_id,
+                               is_active=True, is_over=False, is_special=False)
+    old = telegram_links.Group(name="June 20 SAT - Gulzada", teacher_id=linking["sat"].teacher_id,
+                               is_active=True, is_over=True, is_special=False)
+    db.add_all([new, old])
+    db.flush()
+
+    groups = _groups(telegram_links.list_links(db=db, current_user=linking["admin"]))
+
+    assert groups[new.id]["suggestion"]["chat_id"] == 20
+    assert groups[old.id]["suggestion"] is None, "two hundred finished groups would bury the real suggestions"
+
+
+def test_any_group_can_be_linked_and_stays_listed_with_its_chat(linking):
+    db = linking["db"]
+    finished = telegram_links.Group(name="June 20 SAT - Gulzada", teacher_id=linking["sat"].teacher_id,
+                                    is_active=True, is_over=True, is_special=False)
+    db.add(finished)
+    db.flush()
+    telegram_links.set_link(finished.id, telegram_links.LinkBody(support_group_id=11), db=db, current_user=linking["admin"])
+    row = _groups(telegram_links.list_links(db=db, current_user=linking["admin"]))[finished.id]
+    assert row["status"] == "finished" and row["link"]["chat_id"] == 11

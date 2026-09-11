@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.announcements.models import TelegramGroupLink, TelegramLessonInvitation
@@ -39,16 +39,40 @@ def _approved_chats(current_user: UserInDB) -> list:
     ]
 
 
+GROUP_RUNNING, GROUP_NOT_STARTED, GROUP_STOPPED, GROUP_FINISHED = "running", "not_started", "stopped", "finished"
+
+# Only these get name suggestions: a finished group has no lessons left to announce, and there
+# are two hundred of them, each with an old chat of a matching name.
+SUGGESTABLE = {GROUP_RUNNING, GROUP_NOT_STARTED}
+
+
+def _group_statuses(db: Session, groups: list) -> dict:
+    """Each group's state, with "running" decided by the calendar's own rule.
+
+    Every group can be linked (owner, 2026-09-11): a new group before its first student is
+    enrolled — so its chat is ready on day one — and an old one, if anyone wants it. Invitations
+    still go only to lessons of running groups in LMS Meet rooms; the label says why a linked
+    group may not be getting any yet.
+    """
+    running = {gid for (gid,) in db.query(Group.id).filter(operational_group_clause())}
+    out = {}
+    for g in groups:
+        if g.id in running:
+            out[g.id] = GROUP_RUNNING
+        elif g.is_over:
+            out[g.id] = GROUP_FINISHED
+        elif g.is_active is False:
+            out[g.id] = GROUP_STOPPED
+        else:
+            out[g.id] = GROUP_NOT_STARTED  # switched on, not finished, nobody enrolled yet
+    return out
+
+
 @router.get("")
 def list_links(db: Session = Depends(get_db), current_user: UserInDB = Depends(require_role(LINKER_ROLES))):
     links = {link.lms_group_id: link for link in db.query(TelegramGroupLink).all()}
-    groups = (
-        db.query(Group.id, Group.name)
-        # Running groups, plus any already linked (so a stopped group's link can be removed).
-        .filter(or_(operational_group_clause(), Group.id.in_(list(links) or [-1])))
-        .order_by(Group.name)
-        .all()
-    )
+    groups = db.query(Group.id, Group.name, Group.is_active, Group.is_over).order_by(Group.name).all()
+    status = _group_statuses(db, groups)
 
     chats, chats_error = [], None
     try:
@@ -58,7 +82,7 @@ def list_links(db: Session = Depends(get_db), current_user: UserInDB = Depends(r
     titles = {c["id"]: c["title"] for c in chats}
 
     suggestions = telegram_invitations.suggest_links(
-        [(g.id, g.name) for g in groups], [(c["id"], c["title"]) for c in chats],
+        [(g.id, g.name) for g in groups if status[g.id] in SUGGESTABLE], [(c["id"], c["title"]) for c in chats],
         taken_groups=set(links), taken_chats={link.support_group_id for link in links.values()},
     )
 
@@ -82,6 +106,7 @@ def list_links(db: Session = Depends(get_db), current_user: UserInDB = Depends(r
             {
                 "id": g.id,
                 "name": g.name,
+                "status": status[g.id],
                 "link": ({
                     "chat_id": links[g.id].support_group_id,
                     "chat_title": titles.get(links[g.id].support_group_id) or links[g.id].chat_title,
