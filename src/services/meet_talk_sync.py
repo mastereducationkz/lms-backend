@@ -514,10 +514,10 @@ def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, cl
     return len(tried)
 
 
-def transcribe_lessons(db, event_ids: list, key: Optional[str]) -> dict:
+def transcribe_lessons(db, event_ids: list, key: Optional[str], again: bool = False) -> dict:
     """Transcribe chosen lessons now, speech timing or not — for lessons taught before talk time
     was on (owner, 2026-09-11). Their voices are then named from who was in the room. A lesson
-    already transcribed is left alone; one that failed is tried afresh."""
+    already transcribed is left alone unless ``again`` says to do it over (a better model)."""
     out = {}
     for event_id in event_ids:
         recording = (db.query(LessonRecording)
@@ -529,7 +529,7 @@ def transcribe_lessons(db, event_ids: list, key: Optional[str]) -> dict:
             out[event_id] = "no ready recording"
             continue
         row = db.query(LessonTranscript).filter_by(event_id=event_id).first()
-        if row is not None and row.status == "ready":
+        if row is not None and row.status == "ready" and not again:
             out[event_id] = "already transcribed"
             continue
         if row is not None:
@@ -546,6 +546,7 @@ def transcribe_lessons(db, event_ids: list, key: Optional[str]) -> dict:
 def main(argv: Optional[list] = None) -> None:
     parser = argparse.ArgumentParser(description="Transcribe chosen lessons now (e.g. from before talk time was on).")
     parser.add_argument("event_ids", type=int, nargs="+")
+    parser.add_argument("--again", action="store_true", help="do a finished transcript over")
     args = parser.parse_args(argv)
     key = talk_settings.deepgram_key()
     if not key and not talk_settings.openai_key():
@@ -554,7 +555,7 @@ def main(argv: Optional[list] = None) -> None:
 
     db = SessionLocal()
     try:
-        for event_id, result in transcribe_lessons(db, args.event_ids, key).items():
+        for event_id, result in transcribe_lessons(db, args.event_ids, key, again=args.again).items():
             print(f"lesson {event_id}: {result}")
     finally:
         db.close()
