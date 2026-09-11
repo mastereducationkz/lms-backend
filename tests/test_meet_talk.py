@@ -427,3 +427,32 @@ def test_the_video_can_be_followed_without_a_transcript(talk):
     t = _talk(talk)
     assert t["recording_offset_seconds"] == 600, "the call opened 10 minutes before the lesson"
     assert meet_talk.public_talk(t)["recording_offset_seconds"] == 600
+
+
+# ── echo: a student's speakers playing the teacher back into their microphone ─────────────
+
+def test_speech_two_people_seem_to_say_at_once_belongs_to_whoever_started(talk):
+    """Owner, 2026-09-11: the teacher's share came out at 50% because students' microphones
+    echoed her. Meet reported 73 minutes of speech in a 60-minute lesson (15883)."""
+    teacher, aya, eldana, _s = _classroom(talk)
+    talk["spoke"](
+        (teacher, 0, 10),        # the teacher talks
+        (aya, 2, 9),             # …and Aya's speakers echo her back
+        (eldana, 8, 14),         # Eldana starts while the teacher is still going: only her tail counts
+        (aya, 20, 25),           # Aya answers on her own
+        (teacher, 22, 24),       # the teacher's own speakers echo Aya
+    )
+    t = _talk(talk)
+    assert _person(t, "Гульзада Сапарова")["seconds"] == 10 * 60
+    assert _person(t, "Елдана Нұрлан")["seconds"] == 4 * 60, "only the part after the teacher stopped"
+    assert _person(t, "Аяулым Сейтова")["seconds"] == 5 * 60, "her echo is gone, her own answer is not"
+    assert t["speech_seconds"] == 19 * 60, "no more speech than the lesson can hold"
+    assert t["teacher_share"] == 0.526
+
+
+def test_the_words_follow_the_same_rule(talk):
+    teacher, aya, *_ = _classroom(talk)
+    talk["spoke"]((teacher, 0, 10), (aya, 2, 9))
+    talk["words"]((3, 4, 0, "Значит, смотрим на пятый вопрос."))
+    lines = _talk(talk)["transcript"]["lines"]
+    assert [n["speaker_label"] for n in lines] == ["Гульзада Сапарова"]

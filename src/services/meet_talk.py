@@ -100,6 +100,7 @@ def _speakers(event, batch, record: dict, rows: list) -> dict:
     by_name = {p.participant_name: p for p in batch.participants.get(event.id, [])}
     students = {s["user_id"] for s in record.get("students") or []}
     people: dict = {}
+    entries: list = []
     for row in rows:
         if row.state != "saved" or not row.entries or row.origin is None:
             continue
@@ -121,12 +122,33 @@ def _speakers(event, batch, record: dict, rows: list) -> dict:
                     key, label = f"u{user_id}", user.name if user else f"User {user_id}"
                     role = ("teacher" if user_id == event.teacher_id
                             else "student" if user_id in students else "other")
-            person = people.setdefault(key, {"user_id": user_id, "name": label, "role": role, "spans": []})
-            person["spans"].append((row.origin + timedelta(milliseconds=start_ms),
-                                    row.origin + timedelta(milliseconds=end_ms)))
+            people.setdefault(key, {"user_id": user_id, "name": label, "role": role, "spans": []})
+            entries.append((row.origin + timedelta(milliseconds=start_ms),
+                            row.origin + timedelta(milliseconds=end_ms), key))
+    for start, end, key in without_echo(entries):
+        people[key]["spans"].append((start, end))
     for person in people.values():
         person["spans"] = merge_spans(person["spans"])
     return people
+
+
+def without_echo(entries: list) -> list:
+    """Meet's entries with the overlaps given to whoever started speaking.
+
+    A student listening on speakers has the teacher's voice coming out of them and back into
+    their microphone, and Meet marks that student as speaking. On 11.09 lesson 15883 this handed
+    away a third of the teacher's words: Meet reported 73 minutes of speech in a 60-minute lesson,
+    and every student's "speech" was 85–96% inside somebody else's. Echo always starts after the
+    voice it copies, so the overlap belongs to whoever began first; what is left of the later
+    entry (a real answer after the teacher stops) is kept.
+    """
+    out, cursor = [], None
+    for start, end, key in sorted(entries):
+        begins = max(start, cursor) if cursor else start
+        if end > begins:
+            out.append((begins, end, key))
+            cursor = end if cursor is None or end > cursor else cursor
+    return out
 
 
 def _moment(value: Optional[str]) -> Optional[datetime]:
