@@ -378,3 +378,15 @@ def test_the_list_filters_by_group_and_respects_access(room):
                for i in _list(db, _user(db, "admin"), group_id=other.id))
     assert _list(db, room["aya"]) == []
     assert _list(db, _user(db, "curator")) == []
+
+
+def test_teachers_and_curators_list_their_own_lessons_and_nobody_elses(room):
+    """The page opened to teachers and curators on 2026-09-11; the backend scope is what keeps
+    it theirs — the teacher who taught or owns the group, the group's curator."""
+    db = room["db"]
+    curator = _user(db, "curator")
+    room["group"].curator_id = curator.id
+    db.flush()
+    for viewer in (room["teacher"], curator):
+        assert room["lesson"].id in {i["event_id"] for i in _list(db, viewer)}
+    assert _list(db, _user(db, "teacher")) == [], "another teacher's lessons stay theirs"
