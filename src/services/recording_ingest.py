@@ -31,6 +31,19 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_TIMEOUT = 3600
 MAX_ATTEMPTS = 3
 
+# A lesson passes through the disk twice — the download and the HLS beside it — and several
+# lessons end at once (21 at the same minute on a Sunday). With less than this free, the work
+# waits for the next tick instead of half-writing a recording onto a full disk.
+MIN_FREE_BYTES = 6 * 1024 ** 3
+
+
+def room_on_disk(path: str = "/tmp") -> bool:
+    free = shutil.disk_usage(path).free
+    if free >= MIN_FREE_BYTES:
+        return True
+    logger.error("only %.1f GB free on %s: holding recordings until there is room", free / 1024 ** 3, path)
+    return False
+
 
 def _download_drive_file(file_id: str, workdir: Path) -> Path:
     """Stream a Drive file to disk.

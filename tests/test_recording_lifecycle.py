@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.services import recording_retention, recordings_worker
+from src.services import recording_ingest, recording_retention, recordings_worker
 
 
 # --- fakes -------------------------------------------------------------------
@@ -481,3 +481,18 @@ def test_a_failed_tombstone_cancels_the_purge(monkeypatch):
     assert deleted == [], "nothing may be deleted without a breadcrumb"
     assert result["errors"] == 1
     assert rec.hls_url is not None, "the lesson stays findable"
+
+
+def test_recordings_wait_when_the_disk_is_nearly_full(monkeypatch):
+    """A lesson passes through the disk twice, and 21 can end at the same minute (14.09)."""
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(recording_ingest.shutil, "disk_usage", lambda path: usage(1, 1, 2 * 1024 ** 3))
+    assert recording_ingest.room_on_disk() is False
+    monkeypatch.setattr(recordings_worker, "ingest_one_pending",
+                        lambda *a, **k: pytest.fail("nothing may be downloaded onto a full disk"))
+    assert recordings_worker.ingest_pending(_DB()) == 0
+
+    monkeypatch.setattr(recording_ingest.shutil, "disk_usage", lambda path: usage(1, 1, 50 * 1024 ** 3))
+    assert recording_ingest.room_on_disk() is True

@@ -229,6 +229,8 @@ def ingest_pending(db, budget_seconds: float = INGEST_BUDGET_SECONDS, clock=time
     minutes. Each recording is tried at most once per tick — a failing one waits for the
     next tick rather than spending its three attempts back to back.
     """
+    if not recording_ingest.room_on_disk():
+        return 0
     started, tried, done = clock(), set(), 0
     while clock() - started < budget_seconds and ingest_one_pending(db, exclude=tried):
         done += 1

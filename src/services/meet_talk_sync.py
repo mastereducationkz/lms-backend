@@ -502,6 +502,10 @@ def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, cl
     """Transcribe lessons until none are left or the budget is spent. Returns lessons tried."""
     if not talk_settings.transcripts_enabled(db):
         return 0
+    from src.services.recording_ingest import room_on_disk
+
+    if not room_on_disk():
+        return 0
     key, openai_key = talk_settings.deepgram_key(), talk_settings.openai_key()
     now = now or _now()
     started, tried = clock(), set()
