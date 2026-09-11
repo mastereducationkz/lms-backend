@@ -10,10 +10,14 @@ playback URL, so a shared cache entry would hand one viewer's token to everyone.
 
 Paging is keyset on (lesson start, event id), descending: stable while recordings arrive,
 unlike OFFSET, which would repeat or skip a card whenever a new lesson lands at the top.
+
+Days are Almaty days: a lesson at 23:30 in Almaty belongs to that date, not to the UTC one.
 """
 import base64
 import binascii
-from datetime import datetime, timedelta, timezone
+import re
+from collections import Counter
+from datetime import date as Date, datetime, time, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -30,6 +34,9 @@ router = APIRouter()
 
 PAGE_MAX = 48
 PERIOD_DAYS = {"7d": 7, "30d": 30}
+# Kazakhstan: one UTC+5 zone all year, no DST. Lessons are stored as naive UTC.
+ALMATY = timedelta(hours=5)
+MONTH = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 
 
 def _utc(value: Optional[datetime]) -> Optional[str]:
@@ -65,6 +72,16 @@ def _in_group(group_id: int):
     return exists().where(and_(link.event_id == Event.id, link.group_id == group_id)).correlate(Event)
 
 
+def _almaty_day_starts(first: Date, days: int) -> tuple:
+    """The naive-UTC instants that open and close `days` Almaty days from `first`."""
+    start = datetime.combine(first, time.min) - ALMATY
+    return start, start + timedelta(days=days)
+
+
+def _almaty_today() -> Date:
+    return (datetime.now(timezone.utc).replace(tzinfo=None) + ALMATY).date()
+
+
 def _matches(term: str):
     link, group = aliased(EventGroup), aliased(Group)
     pattern = _like(term)
@@ -77,6 +94,36 @@ def _matches(term: str):
     )
 
 
+def _scope(db: Session, current_user):
+    """Every recording this viewer may see — the one access rule both the list and the calendar read."""
+    scoped = (
+        db.query(LessonRecording, Event)
+        .join(Event, Event.id == LessonRecording.event_id)
+        .filter(watchable_event_clause(current_user))
+    )
+    if current_user.role == "student":
+        # A student has nothing to do with a recording that is not watchable yet.
+        scoped = scoped.filter(LessonRecording.status == "ready", LessonRecording.hls_url.isnot(None))
+    return scoped
+
+
+def _narrow(query, current_user, *, q, group_id, teacher_id, status):
+    """The filter menus and the search box — everything but the time range."""
+    if current_user.role == "student":
+        status = None  # already only the finished ones
+    if status == "ready":
+        query = query.filter(LessonRecording.status == "ready", LessonRecording.hls_url.isnot(None))
+    elif status:
+        query = query.filter(LessonRecording.status == status)
+    if group_id is not None:
+        query = query.filter(_in_group(group_id))
+    if teacher_id is not None:
+        query = query.filter(Event.teacher_id == teacher_id)
+    if q and q.strip():
+        query = query.filter(_matches(q.strip()))
+    return query
+
+
 @router.get("")
 def list_recordings(
     limit: int = Query(24, ge=1, le=PAGE_MAX),
@@ -86,33 +133,18 @@ def list_recordings(
     teacher_id: Optional[int] = None,
     period: Literal["7d", "30d", "all"] = "all",
     status: Optional[Literal["ready", "pending", "failed"]] = None,
+    day: Optional[Date] = Query(None, alias="date", description="One Almaty day, YYYY-MM-DD; wins over period"),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
-    scoped = (
-        db.query(LessonRecording, Event)
-        .join(Event, Event.id == LessonRecording.event_id)
-        .filter(watchable_event_clause(current_user))
-    )
-    if current_user.role == "student":
-        # A student has nothing to do with a recording that is not watchable yet.
-        scoped = scoped.filter(LessonRecording.status == "ready", LessonRecording.hls_url.isnot(None))
-        status = None
-
-    filtered = scoped
-    if status == "ready":
-        filtered = filtered.filter(LessonRecording.status == "ready", LessonRecording.hls_url.isnot(None))
-    elif status:
-        filtered = filtered.filter(LessonRecording.status == status)
-    if period in PERIOD_DAYS:
+    scoped = _scope(db, current_user)
+    filtered = _narrow(scoped, current_user, q=q, group_id=group_id, teacher_id=teacher_id, status=status)
+    if day is not None:
+        start, end = _almaty_day_starts(day, 1)
+        filtered = filtered.filter(Event.start_datetime >= start, Event.start_datetime < end)
+    elif period in PERIOD_DAYS:
         since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=PERIOD_DAYS[period])
         filtered = filtered.filter(Event.start_datetime >= since)
-    if group_id is not None:
-        filtered = filtered.filter(_in_group(group_id))
-    if teacher_id is not None:
-        filtered = filtered.filter(Event.teacher_id == teacher_id)
-    if q and q.strip():
-        filtered = filtered.filter(_matches(q.strip()))
 
     page = filtered
     if cursor:
@@ -167,6 +199,39 @@ def list_recordings(
         response["total"] = filtered.count()
         response["facets"] = _facets(db, scoped)
     return response
+
+
+@router.get("/days")
+def recording_days(
+    month: Optional[str] = Query(None, max_length=7, description="YYYY-MM; default this Almaty month"),
+    q: Optional[str] = Query(None, max_length=100),
+    group_id: Optional[int] = None,
+    teacher_id: Optional[int] = None,
+    status: Optional[Literal["ready", "pending", "failed"]] = None,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """How many recordings each Almaty day of a month holds, under the list's own filters — the
+    Recordings calendar marks those days. Days without any are left out."""
+    if month is None:
+        first = _almaty_today().replace(day=1)
+    else:
+        found = MONTH.match(month)
+        if not found:
+            raise HTTPException(status_code=422, detail="month must be YYYY-MM")
+        first = Date(int(found.group(1)), int(found.group(2)), 1)
+    following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    start, end = _almaty_day_starts(first, (following - first).days)
+
+    starts = (
+        _narrow(_scope(db, current_user), current_user, q=q, group_id=group_id,
+                teacher_id=teacher_id, status=status)
+        .filter(Event.start_datetime >= start, Event.start_datetime < end)
+        .with_entities(Event.start_datetime)
+        .all()
+    )
+    days = Counter((moment + ALMATY).date().isoformat() for (moment,) in starts)
+    return {"month": first.strftime("%Y-%m"), "days": dict(sorted(days.items())), "total": sum(days.values())}
 
 
 def _facets(db: Session, scoped) -> dict:

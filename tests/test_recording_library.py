@@ -3,12 +3,12 @@
 Run against a real database: the scope is an SQL clause, and the thing to prove is that the
 listing, its filters, its paging and its facets all stay inside it.
 """
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
 
-from src.events.routes.recording_library import list_recordings
+from src.events.routes.recording_library import list_recordings, recording_days
 from src.schemas.models import LessonRecording
 from tests.test_operational_groups import _user, db, world  # noqa: F401 - fixtures
 
@@ -16,9 +16,15 @@ from tests.test_operational_groups import _user, db, world  # noqa: F401 - fixtu
 def _list(db, user, **kw):
     """Call the route as FastAPI would, every parameter explicit (Query defaults are objects)."""
     params = dict(limit=24, cursor=None, q=None, group_id=None, teacher_id=None,
-                  period="all", status=None)
+                  period="all", status=None, day=None)
     params.update(kw)
     return list_recordings(db=db, current_user=user, **params)
+
+
+def _days(db, user, **kw):
+    params = dict(month=None, q=None, group_id=None, teacher_id=None, status=None)
+    params.update(kw)
+    return recording_days(db=db, current_user=user, **params)
 
 
 @pytest.fixture
@@ -30,8 +36,11 @@ def library(world):
     sat_student = world["enrol"](sat)
     ielts_student = world["enrol"](ielts)
 
-    def recorded(group, days_ago, status="ready", poster=True, title=None):
-        ev = world["lesson"](group, days_ahead=-days_ago, **({"title": title} if title else {}))
+    def recorded(group, days_ago=0, status="ready", poster=True, title=None, start=None):
+        fields = {"title": title} if title else {}
+        if start is not None:  # a fixed UTC instant, for the Almaty-day tests
+            fields.update(start_datetime=start, end_datetime=start + timedelta(hours=1))
+        ev = world["lesson"](group, days_ahead=-days_ago, **fields)
         rec = LessonRecording(
             event_id=ev.id, status=status, drive_file_id=f"drive-{ev.id}",
             hls_url=f"/uploads/videos/recordings/{ev.id}/master.m3u8" if status == "ready" else None,
@@ -50,7 +59,7 @@ def library(world):
         "ielts_failed": recorded(ielts, 4, status="failed"),
     }
     return {"db": db, "world": world, "sat": sat, "ielts": ielts, "lessons": lessons,
-            "sat_student": sat_student, "ielts_student": ielts_student}
+            "sat_student": sat_student, "ielts_student": ielts_student, "recorded": recorded}
 
 
 def _ids(response):
@@ -164,3 +173,65 @@ def test_a_forged_cursor_is_a_400(library):
     with pytest.raises(HTTPException) as bad:
         _list(library["db"], _user(library["db"], "admin"), cursor="not-a-cursor")
     assert bad.value.status_code == 400
+
+
+# ── the calendar: Almaty days (owner, 2026-09-11) ────────────────────────────────────────
+
+@pytest.fixture
+def around_midnight(library):
+    """Lessons either side of Almaty midnight on 14 → 15 August 2025 (Almaty is UTC+5)."""
+    recorded, sat = library["recorded"], library["sat"]
+    return {
+        "midnight": recorded(sat, start=datetime(2025, 8, 13, 19, 0)),         # 00:00 on the 14th
+        "late_evening": recorded(sat, start=datetime(2025, 8, 14, 18, 30)),   # 23:30 on the 14th
+        "after_midnight": recorded(sat, start=datetime(2025, 8, 14, 19, 30)),  # 00:30 on the 15th
+        "other_group": recorded(library["ielts"], start=datetime(2025, 8, 20, 9, 0)),
+    }
+
+
+def test_a_day_is_an_almaty_day(library, around_midnight):
+    db, admin = library["db"], _user(library["db"], "admin")
+    assert set(_ids(_list(db, admin, day=date(2025, 8, 14)))) == {
+        around_midnight["midnight"].id, around_midnight["late_evening"].id}
+    assert _ids(_list(db, admin, day=date(2025, 8, 15))) == [around_midnight["after_midnight"].id]
+    assert _list(db, admin, day=date(2025, 8, 15))["total"] == 1
+
+
+def test_a_day_wins_over_the_period(library, around_midnight):
+    db, admin = library["db"], _user(library["db"], "admin")
+    assert _ids(_list(db, admin, day=date(2025, 8, 15), period="7d")) == [around_midnight["after_midnight"].id]
+
+
+def test_the_month_counts_recordings_per_almaty_day(library, around_midnight):
+    db, admin = library["db"], _user(library["db"], "admin")
+    month = _days(db, admin, month="2025-08")
+    assert month == {"month": "2025-08", "days": {"2025-08-14": 2, "2025-08-15": 1, "2025-08-20": 1}, "total": 4}
+    assert _days(db, admin, month="2025-08", group_id=library["ielts"].id)["days"] == {"2025-08-20": 1}
+    assert _days(db, admin, month="2025-07")["days"] == {}, "the 00:00 lesson of 14 Aug is not July's"
+
+
+def test_the_month_is_the_viewers_own(library, around_midnight):
+    db = library["db"]
+    assert _days(db, _user(db, "teacher"), month="2025-08")["days"] == {}, "another teacher's lessons stay theirs"
+    assert _days(db, library["ielts_student"], month="2025-08")["days"] == {"2025-08-20": 1}
+    assert _days(db, library["world"]["teacher"], month="2025-08")["total"] == 4
+
+
+def test_a_student_counts_only_what_they_can_watch(library):
+    db = library["db"]
+    this_month = _days(db, library["sat_student"])
+    processing = library["lessons"]["sat_processing"]
+    assert sum(this_month["days"].values()) == this_month["total"]
+    staff = _days(db, library["world"]["teacher"], month=this_month["month"])
+    assert staff["total"] - this_month["total"] >= 1, "the processing one is staff-only"
+    assert processing.id not in _ids(_list(db, library["sat_student"], day=date.fromisoformat(
+        (processing.start_datetime + timedelta(hours=5)).date().isoformat())))
+
+
+def test_the_month_defaults_to_this_one_and_refuses_garbage(library):
+    db, admin = library["db"], _user(library["db"], "admin")
+    assert _days(db, admin)["month"] == (datetime.utcnow() + timedelta(hours=5)).strftime("%Y-%m")
+    for bad in ("2025-13", "2025-8", "August", "2025-08-01"):
+        with pytest.raises(HTTPException) as err:
+            _days(db, admin, month=bad)
+        assert err.value.status_code == 422, bad
