@@ -311,6 +311,32 @@ class MeetParticipantSession(Base):
     participant = relationship("MeetParticipant", back_populates="sessions")
 
 
+class MeetFlagReview(Base):
+    """Somebody looked at a Meet attendance flag and gave the reason — so it stops asking.
+
+    One row per (lesson, person, flag). The flag itself is never stored; it is recomputed from
+    the Meet record each time, and a review applies while the flag it names still exists. A
+    reason is required where the mark contradicts the room (owner, 2026-09-11: «отмечен, но не
+    заходил» must say why — «отпросился», another device, …) and optional for lateness.
+    """
+
+    __tablename__ = "meet_flag_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)  # whose flag
+    code = Column(String(40), nullable=False)
+    reason_code = Column(String(40), nullable=True)  # a preset key, "other", or NULL (optional flags)
+    reason_text = Column(Text, nullable=True)
+    reviewed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+                         server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "user_id", "code", name="uq_meet_flag_review"),
+    )
+
+
 class GoogleAccountLink(Base):
     """Which LMS person a Google account belongs to — confirmed once by a person, then used
     for every lesson, past and future.

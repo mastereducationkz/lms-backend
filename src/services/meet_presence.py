@@ -31,6 +31,7 @@ from src.schemas.models import (
     Group,
     GroupStudent,
     MeetConference,
+    MeetFlagReview,
     MeetParticipant,
     UserInDB,
 )
@@ -62,6 +63,42 @@ GIVE_UP_WAITING_AFTER = timedelta(hours=6)
 GOOGLE_KEEPS = timedelta(days=30)
 
 MISMATCH_CODES = frozenset({"marked_present_not_joined", "marked_absent_was_in_room", "teacher_not_joined"})
+
+# ── reviewing a flag (owner, 2026-09-11) ─────────────────────────────────────────────────
+# A flag looked at by a person, with the reason, stops asking. A reason is required where the
+# mark contradicts the room, optional for lateness. «Другое» (free text) is always offered.
+_TIMING = [("warned", "Предупредил заранее"), ("tech", "Технические проблемы"), ("valid", "Уважительная причина")]
+_TEACHER_TIMING = [("tech", "Технические проблемы"), ("agreed", "Согласовано с руководством"),
+                   ("moved", "Урок перенесён или продлён")]
+REVIEW_REASONS = {
+    "marked_present_not_joined": [("excused", "Отпросился"), ("other_device", "С другого аккаунта или устройства"),
+                                  ("outside_meet", "Занимался вне Meet")],
+    "marked_absent_was_in_room": [("not_participating", "Был, но не участвовал")],
+    "late": _TIMING,
+    "left_early": _TIMING,
+    "teacher_late": _TEACHER_TIMING,
+    "ended_early": _TEACHER_TIMING,
+    "teacher_not_joined": [("substitute", "Урок провёл другой преподаватель"), ("moved", "Урок перенесён или отменён"),
+                           ("tech", "Технические проблемы")],
+}
+OTHER_REASON = ("other", "Другое")
+REASON_REQUIRED = frozenset({"marked_present_not_joined", "marked_absent_was_in_room", "teacher_not_joined"})
+TEACHER_FLAGS = frozenset({"teacher_late", "ended_early", "teacher_not_joined"})
+# A teacher's own flags are cleared by admins and heads, never by the teacher (owner, 2026-09-11).
+TEACHER_FLAG_REVIEWERS = frozenset({"admin", "head_curator", "head_teacher"})
+
+
+def reason_label(code: str, reason_code: Optional[str]) -> Optional[str]:
+    if not reason_code:
+        return None
+    return dict(REVIEW_REASONS.get(code, []) + [OTHER_REASON]).get(reason_code)
+
+
+def review_options() -> dict:
+    """What a review form offers, per flag: the reasons, and whether one is required."""
+    return {code: {"required": code in REASON_REQUIRED,
+                   "reasons": [{"key": k, "label": l} for k, l in reasons + [OTHER_REASON]]}
+            for code, reasons in REVIEW_REASONS.items()}
 
 # Who reads the record: the Recordings rule, without students (owner, 2026-09-11).
 RECORD_ROLES = frozenset({"admin", "head_curator", "head_teacher", "teacher", "curator"})
@@ -228,7 +265,10 @@ class _Batch:
         for event_id, user_id, status in (db.query(Attendance.event_id, Attendance.user_id, Attendance.status)
                                           .filter(Attendance.event_id.in_(ids))):
             self.marks.setdefault(event_id, {})[user_id] = mark_of(status)
+        self.reviews = {(r.event_id, r.user_id, r.code): r
+                        for r in db.query(MeetFlagReview).filter(MeetFlagReview.event_id.in_(ids))}
         user_ids = ({e.teacher_id for e in events if e.teacher_id}
+                    | {r.reviewed_by for r in self.reviews.values() if r.reviewed_by}
                     | {u for r in self.roster.values() for u in r}
                     | {u for m in self.marks.values() for u in m}
                     | {link.user_id for link in self.links.values() if link.user_id}
@@ -359,6 +399,18 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
         for u in sorted(unknown, key=lambda u: min(s[0] for s in u["_spans"]))
     ]
 
+    def review_of(uid: int, code: str) -> Optional[dict]:
+        r = batch.reviews.get((event.id, uid, code))
+        if r is None:
+            return None
+        by = batch.users.get(r.reviewed_by) if r.reviewed_by else None
+        return {"reason_code": r.reason_code, "reason_label": reason_label(code, r.reason_code),
+                "text": r.reason_text, "by": by.name if by else None, "at": utc_z(r.reviewed_at)}
+
+    for p in ([teacher] if teacher else []) + students:
+        for f in p["flags"]:
+            f["review"] = review_of(p["user_id"], f["code"])
+
     flags = [{**f, "user_id": p["user_id"], "name": p["name"], "role": p["role"]}
              for p in ([teacher] if teacher else []) + students for f in p["flags"]]
     return {
@@ -374,7 +426,10 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
         "not_tracked": not_tracked,
         "held_back": unconfirmed,
         "flags": flags,
-        "mismatches": sum(1 for f in flags if f["code"] in MISMATCH_CODES),
+        # Open ones only: a reviewed flag has been answered and stops asking for attention.
+        "mismatches": sum(1 for f in flags if f["code"] in MISMATCH_CODES and not f.get("review")),
+        "reviewed": sum(1 for f in flags if f.get("review")),
+        "review_options": review_options(),
         "candidates": sorted(candidates, key=lambda c: (c["role"] != "teacher", c["name"].lower())),
     }
 
@@ -411,8 +466,13 @@ def public_participants(record: dict) -> dict:
         return {"first_join": p.get("first_join"), "last_leave": p.get("last_leave"),
                 "minutes_in_lesson": p.get("minutes_in_lesson", 0), "joins": p.get("joins", 0)}
 
+    def flag(f: dict) -> dict:
+        review = f.get("review")
+        return {"code": f["code"], "minutes": f.get("minutes"),
+                "review": {"reason_label": review.get("reason_label"), "text": review.get("text")} if review else None}
+
     def person(p: dict) -> dict:
-        return {"name": p["name"], "mark": p.get("mark"), **presence(p), "flags": p.get("flags", [])}
+        return {"name": p["name"], "mark": p.get("mark"), **presence(p), "flags": [flag(f) for f in p.get("flags", [])]}
 
     if record.get("state") != "ready":
         return {

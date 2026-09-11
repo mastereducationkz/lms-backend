@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, exists
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ from src.schemas.models import (
     GoogleAccountLink,
     Group,
     MeetConference,
+    MeetFlagReview,
     MeetParticipant,
     UserInDB,
 )
@@ -106,6 +107,112 @@ def confirm_identity(
     return meet_presence.lesson(db, event)
 
 
+class ReviewIn(BaseModel):
+    """Mark one flag reviewed: with a reason, or — for a mark that contradicts the room — by
+    correcting the mark itself (then the flag is gone and there is nothing left to review)."""
+    user_id: int
+    code: str = Field(max_length=40)
+    reason_code: Optional[str] = Field(None, max_length=40)
+    reason_text: Optional[str] = Field(None, max_length=500)
+    fix_mark: bool = False
+
+
+# The journal's own marking rule (/leaderboard/curator/attendance/bulk): curators read marks but
+# never write them; a teacher writes their own groups'; a head teacher the groups they oversee.
+def _can_mark(db, user, event: Event) -> bool:
+    if user.role in ("admin", "head_curator"):
+        return True
+    group_ids = [gid for (gid,) in db.query(EventGroup.group_id).filter(EventGroup.event_id == event.id)]
+    if user.role == "teacher":
+        return db.query(Group.id).filter(Group.id.in_(group_ids or [-1]), Group.teacher_id == user.id).first() is not None
+    if user.role == "head_teacher":
+        from src.gamification.routes.leaderboard import head_teacher_can_access_group
+
+        return any(head_teacher_can_access_group(db, user.id, gid) for gid in group_ids)
+    return False
+
+
+def _flag_on(record: dict, user_id: int, code: str) -> Optional[dict]:
+    return next((f for f in record.get("flags") or [] if f["user_id"] == user_id and f["code"] == code), None)
+
+
+def _may_review(user, code: str) -> None:
+    if code in meet_presence.TEACHER_FLAGS and user.role not in meet_presence.TEACHER_FLAG_REVIEWERS:
+        raise HTTPException(status_code=403, detail="Only admins and heads can review a teacher's own flags")
+
+
+@router.put("/lessons/{event_id}/reviews")
+def review_flag(
+    event_id: int,
+    body: ReviewIn,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """Take one flag out of «Needs attention». Returns the lesson's record as it now reads."""
+    event = _visible_lesson(db, current_user, event_id)
+    record = meet_presence.lesson(db, event)
+    if record["state"] != "ready":
+        raise HTTPException(status_code=409, detail="This lesson's Meet record is not complete yet")
+    flag = _flag_on(record, body.user_id, body.code)
+    if flag is None:
+        raise HTTPException(status_code=404, detail="That flag is not on this lesson any more")
+    _may_review(current_user, body.code)
+
+    if body.fix_mark:
+        if body.code not in ("marked_present_not_joined", "marked_absent_was_in_room"):
+            raise HTTPException(status_code=422, detail="Only a mark that contradicts the room can be corrected here")
+        if not _can_mark(db, current_user, event):
+            raise HTTPException(status_code=403, detail="You cannot change marks on this lesson")
+        from src.services.attendance_service import AttendanceService
+
+        if body.code == "marked_present_not_joined":
+            status, score = "absent", 0
+        else:
+            late = _flag_on(record, body.user_id, "late")
+            status, score = ("late" if late else "present"), 1
+        # The journal's own write: the same row, the same status vocabulary, the same billing.
+        AttendanceService.upsert_for_event(db=db, event_id=event.id, user_id=body.user_id, status=status, score=score)
+        db.commit()
+        return meet_presence.lesson(db, event)
+
+    allowed = {key for key, _ in meet_presence.REVIEW_REASONS.get(body.code, [])} | {meet_presence.OTHER_REASON[0]}
+    text = (body.reason_text or "").strip() or None
+    if body.reason_code is None and body.code in meet_presence.REASON_REQUIRED:
+        raise HTTPException(status_code=422, detail="Choose a reason: this mark contradicts the room")
+    if body.reason_code is not None and body.reason_code not in allowed:
+        raise HTTPException(status_code=422, detail="Unknown reason")
+    if body.reason_code == meet_presence.OTHER_REASON[0] and not text:
+        raise HTTPException(status_code=422, detail="Describe the reason")
+
+    review = (db.query(MeetFlagReview)
+              .filter_by(event_id=event.id, user_id=body.user_id, code=body.code).first())
+    if review is None:
+        review = MeetFlagReview(event_id=event.id, user_id=body.user_id, code=body.code)
+        db.add(review)
+    review.reason_code = body.reason_code
+    review.reason_text = text
+    review.reviewed_by = current_user.id
+    review.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    return meet_presence.lesson(db, event)
+
+
+@router.delete("/lessons/{event_id}/reviews")
+def restore_flag(
+    event_id: int,
+    user_id: int,
+    code: str,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """Put a reviewed flag back into «Needs attention» (the «Показать отмеченные» undo)."""
+    event = _visible_lesson(db, current_user, event_id)
+    _may_review(current_user, code)
+    db.query(MeetFlagReview).filter_by(event_id=event.id, user_id=user_id, code=code).delete()
+    db.commit()
+    return meet_presence.lesson(db, event)
+
+
 @router.get("/lessons")
 def list_lesson_records(
     date_from: Optional[datetime] = Query(None, description="UTC; default 30 days before date_to"),
@@ -163,6 +270,8 @@ def list_lesson_records(
             "unknown": len(record.get("unknown") or []),
             "held_back": record.get("held_back", False),
             "mismatches": record.get("mismatches", 0),
+            "reviewed": record.get("reviewed", 0),
             "flags": record.get("flags") or [],
         })
-    return {"items": items, "from": utc_z(date_from), "to": utc_z(date_to)}
+    return {"items": items, "from": utc_z(date_from), "to": utc_z(date_to),
+            "review_options": meet_presence.review_options()}

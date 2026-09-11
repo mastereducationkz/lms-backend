@@ -40,7 +40,7 @@ from src.events.models import (
     MissedAttendanceLog, LessonSchedule, Attendance,
     LessonRecording, MissingRecordingLog,
     MeetConference, MeetParticipant, MeetParticipantSession, GoogleAccountLink,
-    RecordingWatchLink,
+    RecordingWatchLink, MeetFlagReview,
 )
 from src.messages.models import Message, Notification
 from src.messages.group_models import GroupConversation, GroupConversationMember, GroupMessage
@@ -85,7 +85,7 @@ __all__ = [
     "MissedAttendanceLog", "LessonSchedule", "Attendance",
     "LessonRecording", "MissingRecordingLog",
     "MeetConference", "MeetParticipant", "MeetParticipantSession", "GoogleAccountLink",
-    "RecordingWatchLink",
+    "RecordingWatchLink", "MeetFlagReview",
     "Message", "Notification",
     "GroupConversation", "GroupConversationMember", "GroupMessage",
     "LeaderboardEntry", "LeaderboardConfig", "CuratorRating",
