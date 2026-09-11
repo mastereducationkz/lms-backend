@@ -221,6 +221,31 @@ class MissingRecordingLog(Base):
     )
 
 
+class RecordingWatchLink(Base):
+    """A login-free link to one lesson's recording, issued through the CRM.
+
+    Accountants check recordings in the CRM and have no LMS account. The CRM decides who may
+    watch (whoever sees the lesson on that screen) and asks for a link over its service
+    channel; the link opens only this lesson, stops working after three hours, and every link
+    records who asked for it and whether it was opened. Only a hash of the key is stored — the
+    key itself lives in the URL and nowhere else.
+    """
+
+    __tablename__ = "recording_watch_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    issued_to = Column(String, nullable=True)  # the CRM user who asked, as the CRM names them
+    issued_role = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+                        server_default=func.now())
+    expires_at = Column(DateTime, nullable=False)
+    first_opened_at = Column(DateTime, nullable=True)
+    last_opened_at = Column(DateTime, nullable=True)
+    open_count = Column(Integer, nullable=False, default=0, server_default="0")
+
+
 class MeetConference(Base):
     """One call held in a lesson's Meet room.
 
