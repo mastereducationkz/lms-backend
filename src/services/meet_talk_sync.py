@@ -307,8 +307,12 @@ def transcribe_one(db, recording, key: str) -> None:
         row = LessonTranscript(event_id=event_id, status="pending", attempts=0)
         db.add(row)
     row.attempts += 1
+    db.flush()
+    row_id, attempt = row.id, row.attempts
+    # Read everything first: touching a row after commit reloads it, which opens a transaction
+    # that then sits idle through minutes of download and Deepgram — and pgbouncer kills it at
+    # 60 s (lesson 15883, 2026-09-11: transcribed, then lost at the save).
     db.commit()
-    row_id = row.id
 
     # Google and Deepgram only: no transaction is open, so a failure here leaves nothing to undo.
     workdir = Path(tempfile.mkdtemp(prefix=f"talk_{event_id}_"))
@@ -317,22 +321,37 @@ def transcribe_one(db, recording, key: str) -> None:
         audio = _audio_from_drive(file_id, workdir)
         utterances, languages, duration = compact_utterances(deepgram(audio, key))
     except Exception as e:
-        row = db.get(LessonTranscript, row_id)
-        row.error = str(e)[:1900]
-        row.status = "failed" if row.attempts >= TRANSCRIBE_MAX_ATTEMPTS else "pending"
-        db.commit()
-        logger.warning("lesson %s: transcript failed (attempt %s): %s", event_id, row.attempts, str(e)[:300])
+        _save(db, row_id, error=str(e)[:1900],
+              status="failed" if attempt >= TRANSCRIBE_MAX_ATTEMPTS else "pending")
+        logger.warning("lesson %s: transcript failed (attempt %s): %s", event_id, attempt, str(e)[:300])
         return
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    row = db.get(LessonTranscript, row_id)
-    row.status, row.error = "ready", None
-    row.recording_started_at, row.audio_seconds = started, duration
-    row.utterances, row.languages, row.completed_at = utterances, languages, _now()
-    db.commit()
+    _save(db, row_id, status="ready", error=None, recording_started_at=started, audio_seconds=duration,
+          utterances=utterances, languages=languages, completed_at=_now())
     logger.info("lesson %s: transcript ready (%s utterances, %.0f min of audio)",
                 event_id, len(utterances), duration / 60)
+
+
+def _save(db, row_id: int, **fields) -> None:
+    """Write the transcript row, once more on a fresh connection if the old one was dropped:
+    a paid transcript is not lost to a closed socket."""
+    from sqlalchemy.exc import OperationalError
+
+    for attempt in (1, 2):
+        try:
+            row = db.get(LessonTranscript, row_id)
+            for name, value in fields.items():
+                setattr(row, name, value)
+            db.commit()
+            return
+        except OperationalError as e:
+            db.rollback()
+            if attempt == 2:
+                raise
+            logger.warning("transcript %s: database connection dropped, saving again: %s",
+                           row_id, str(e).splitlines()[0][:200])
 
 
 def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, clock=time.monotonic,
