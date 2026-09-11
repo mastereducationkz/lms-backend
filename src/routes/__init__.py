@@ -13,8 +13,8 @@ def register_routes(app: FastAPI):
     from src.assignments.routes import assignments_router, assignment_zero_router
     from src.progress.routes import progress_router, admin_progress_router
     from src.events.routes import (
-        events_router, lesson_recordings_router, meet_attendance_router, recording_library_router,
-        watch_links_internal_router, watch_links_public_router,
+        events_router, lesson_recordings_router, meet_attendance_router, meet_talk_router,
+        recording_library_router, watch_links_internal_router, watch_links_public_router,
     )
     from src.messages.routes import messages_router, notifications_router, group_messages_router
     from src.parents.routes import router as parents_router
@@ -61,6 +61,8 @@ def register_routes(app: FastAPI):
     app.include_router(recording_library_router, prefix="/recordings", tags=["Recordings"])
     # Its own prefix for the same reason: who was in each lesson's Meet room.
     app.include_router(meet_attendance_router, prefix="/meet-attendance", tags=["Meet attendance"])
+    # Talk time reads the same lessons, so it lives beside them.
+    app.include_router(meet_talk_router, prefix="/meet-attendance", tags=["Meet attendance"])
     # A login-free, three-hour link to one lesson's recording: the CRM asks for it over the
     # service channel; whoever holds it (an accountant with no LMS account) opens it.
     app.include_router(watch_links_internal_router, prefix="/internal/crm", tags=["CRM Internal"])

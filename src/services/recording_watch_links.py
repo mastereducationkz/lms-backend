@@ -115,6 +115,9 @@ def redeem(db, token: str, now: Optional[datetime] = None) -> dict:
 def _participants(db, event) -> Optional[dict]:
     if event is None:
         return None
-    from src.services import meet_presence
+    from src.services import meet_presence, meet_talk
 
-    return meet_presence.public_participants(meet_presence.lesson(db, event))
+    view = meet_presence.public_participants(meet_presence.lesson(db, event))
+    # Talk time and its timeline, never the words (owner, 2026-09-11). None while it is off.
+    view["talk"] = meet_talk.public_talk(meet_talk.lesson_talk(db, event))
+    return view

@@ -19,6 +19,7 @@ from src.config import get_db
 from src.routes.auth import get_current_user_dependency
 from src.schemas.models import UserInDB
 from src.utils.permissions import check_student_access
+from src.services import meet_talk_stats
 from src.reports.services import build_student_report, build_submission_detail
 from src.reports.external import fetch_weekly_tests
 from src.reports.pdf import render_student_report_pdf
@@ -42,6 +43,8 @@ async def _full_report(db: Session, student_id: int) -> dict:
     report = build_student_report(db, student_id)
     student = db.query(UserInDB).filter(UserInDB.id == student_id).first()
     report["weekly_tests"] = await fetch_weekly_tests(db, student)
+    # How much the student speaks in lessons; None while talk time is switched off.
+    report["talk"] = meet_talk_stats.student_talk(db, student_id)
     return report
 
 

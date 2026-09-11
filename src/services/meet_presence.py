@@ -435,9 +435,14 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
 
 
 def records(db, events: list, now: Optional[datetime] = None) -> list:
+    return records_with_batch(db, events, now)[0]
+
+
+def records_with_batch(db, events: list, now: Optional[datetime] = None) -> tuple:
+    """The records, and the batch they were read from — talk time names speech with it."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     batch = _Batch(db, events)
-    return [lesson_record(e, batch, now) for e in events]
+    return [lesson_record(e, batch, now) for e in events], batch
 
 
 def lesson(db, event: Event, now: Optional[datetime] = None) -> dict:

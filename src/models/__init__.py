@@ -42,6 +42,7 @@ from src.events.models import (
     MeetConference, MeetParticipant, MeetParticipantSession, GoogleAccountLink,
     RecordingWatchLink, MeetFlagReview,
 )
+from src.events.talk_models import AppSetting, MeetRoomTranscription, MeetSpeech, LessonTranscript
 from src.messages.models import Message, Notification
 from src.messages.group_models import GroupConversation, GroupConversationMember, GroupMessage
 from src.gamification.models import (
@@ -86,6 +87,7 @@ __all__ = [
     "LessonRecording", "MissingRecordingLog",
     "MeetConference", "MeetParticipant", "MeetParticipantSession", "GoogleAccountLink",
     "RecordingWatchLink", "MeetFlagReview",
+    "AppSetting", "MeetRoomTranscription", "MeetSpeech", "LessonTranscript",
     "Message", "Notification",
     "GroupConversation", "GroupConversationMember", "GroupMessage",
     "LeaderboardEntry", "LeaderboardConfig", "CuratorRating",

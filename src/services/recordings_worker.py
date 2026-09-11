@@ -30,6 +30,7 @@ from src.services import (
     meet_recordings,
     meet_room_closer,
     meet_scheduling,
+    meet_talk_sync,
     recording_alerts,
     recording_ingest,
 )
@@ -262,15 +263,22 @@ class RecordingsWorker:
     def tick(self) -> dict:
         """One pass. Returns a summary, which makes it directly testable and callable by hand."""
         db = SessionLocal()
-        summary = {"links": 0, "closed": 0, "claimed": 0, "attendance": 0, "ingested": 0, "missing": 0}
+        summary = {"links": 0, "rooms": 0, "closed": 0, "claimed": 0, "attendance": 0, "speech": 0,
+                   "ingested": 0, "transcribed": 0, "missing": 0}
         try:
             for key, fn in (
                 ("links", ensure_upcoming_meet_links),
+                # Talk time's switch reaches the rooms before their lessons start.
+                ("rooms", meet_talk_sync.sync_rooms),
                 # Before the pollers: a room left open by a student holds up both of them.
                 ("closed", meet_room_closer.close_lingering_rooms),
                 ("claimed", poll_for_recordings),
                 ("attendance", meet_attendance.sync_if_enabled),
+                # After attendance: speech is named through the people it just saved.
+                ("speech", meet_talk_sync.sync_speech),
                 ("ingested", ingest_pending),
+                # After ingest: the words come from the recording it just made ready.
+                ("transcribed", meet_talk_sync.transcribe_pending),
                 ("missing", recording_alerts.sweep_missing_recordings),
             ):
                 try:

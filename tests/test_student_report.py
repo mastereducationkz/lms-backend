@@ -315,3 +315,27 @@ def test_submission_detail_pairs_tasks_with_answers(db, seeded):
     with pytest.raises(HTTPException) as exc:
         build_submission_detail(db, seeded["other_student"].id, submission.id)
     assert exc.value.status_code == 404
+
+
+def test_talk_time_goes_into_the_pdf_only_when_ticked(db, seeded):
+    """Owner, 2026-09-11: on screen always, in a PDF (sometimes sent to parents) only on request."""
+    from src.reports import pdf
+
+    report = build_student_report(db, seeded["student"].id)
+    report["weekly_tests"] = {"sat": [], "ielts": [], "nuet": [], "errors": []}
+    report["talk"] = {
+        "lessons": [{"event_id": 1, "start": "2026-09-10T19:30:00Z", "title": "Lesson 7",
+                     "group_name": "August 19 SAT", "seconds": 312, "share_of_students": 0.21,
+                     "in_room": True, "questions": 2},
+                    {"event_id": 2, "start": "2026-09-08T14:00:00Z", "title": "Lesson 6",
+                     "group_name": None, "seconds": 0, "share_of_students": 0.0, "in_room": False,
+                     "questions": None}],
+        "totals": {"lessons": 2, "lessons_spoke": 1, "total_seconds": 312, "avg_seconds": 312, "questions": 2},
+    }
+    assert "talk" not in pdf.DEFAULT_SECTIONS and "talk" in pdf.SECTION_KEYS
+    assert pdf._almaty_day("2026-09-10T19:30:00Z") == "2026-09-11", "00:30 in Almaty is the next day"
+    without = render_student_report_pdf(report).getvalue()
+    with_talk = render_student_report_pdf(report, sections=set(pdf.DEFAULT_SECTIONS) | {"talk"}).getvalue()
+    assert with_talk.startswith(b"%PDF") and len(with_talk) > len(without)
+    report["talk"] = None
+    assert render_student_report_pdf(report, sections={"talk"}).getvalue().startswith(b"%PDF")

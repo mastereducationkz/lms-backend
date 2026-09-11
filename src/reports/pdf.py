@@ -8,7 +8,7 @@ the UI lets staff choose); ``include_feedback`` gates the long platform-feedback
 texts, which multiply the page count.
 """
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Set
 
@@ -52,8 +52,11 @@ _FONT_CANDIDATES = [
 # All report sections, in render order. "summary" is the header card and always on.
 SECTION_KEYS = (
     "homework", "weekly", "ielts", "bluebook", "quizzes",
-    "courses", "attendance", "activity",
+    "courses", "attendance", "talk", "activity",
 )
+# What an export without a choice includes: everything but talk time, which goes into a PDF
+# only when someone ticks it (owner, 2026-09-11 — the PDF is sometimes sent to parents).
+DEFAULT_SECTIONS = tuple(key for key in SECTION_KEYS if key != "talk")
 
 
 def _register_fonts() -> None:
@@ -456,6 +459,39 @@ def _attendance_flowables(report, styles) -> List[Any]:
     return story
 
 
+def _almaty_day(iso: str) -> str:
+    """A lesson's UTC start as its date in Almaty (UTC+5): a 00:30 lesson is the next day there."""
+    moment = datetime.fromisoformat(iso.replace("Z", "+00:00")).replace(tzinfo=None)
+    return (moment + timedelta(hours=5)).date().isoformat()
+
+
+def _minutes(seconds: Optional[float]) -> str:
+    minutes = int(round((seconds or 0) / 60))
+    return f"{minutes} мин" if minutes or not seconds else "< 1 мин"
+
+
+def _talk_flowables(report, styles) -> List[Any]:
+    talk = report.get("talk")
+    story: List[Any] = [Paragraph("Активность на уроках: сколько говорил(а)", styles["h2"])]
+    if not talk or not talk["lessons"]:
+        story.append(Paragraph("Данных о речи на уроках нет.", styles["body"]))
+        return story
+    totals = talk["totals"]
+    line = (f"Уроков с данными: <b>{totals['lessons']}</b> · Говорил(а) на <b>{totals['lessons_spoke']}</b> · "
+            f"Всего: <b>{_minutes(totals['total_seconds'])}</b> · В среднем за урок: <b>{_minutes(totals['avg_seconds'])}</b>")
+    if totals.get("questions") is not None:
+        line += f" · Вопросов задал(а): <b>{totals['questions']}</b>"
+    story.append(Paragraph(line, styles["body"]))
+    story.append(Spacer(0, 1.5 * mm))
+    story.append(_table(
+        ["Дата", "Урок", "Говорил(а)", "Доля среди учеников"],
+        [[_ru_date(_almaty_day(x["start"])), x["group_name"] or x["title"], _minutes(x["seconds"]) if x["in_room"] else "не был(а)",
+          _pct(x["share_of_students"] * 100) if x["in_room"] else "—"] for x in talk["lessons"][:40]],
+        styles, col_widths=[26 * mm, 80 * mm, 26 * mm, 32 * mm], numeric_cols={2, 3},
+    ))
+    return story
+
+
 def _activity_flowables(report, styles) -> List[Any]:
     act = report["activity"]
     story: List[Any] = [Paragraph("Дополнительная активность", styles["h2"])]
@@ -482,7 +518,7 @@ def render_student_report_pdf(report: Dict[str, Any],
                               include_feedback: bool = True) -> BytesIO:
     _register_fonts()
     styles = _styles()
-    chosen = set(SECTION_KEYS) if not sections else {s for s in sections if s in SECTION_KEYS}
+    chosen = set(DEFAULT_SECTIONS) if not sections else {s for s in sections if s in SECTION_KEYS}
 
     story: List[Any] = []
     story.extend(_summary_block(report, styles))
@@ -495,6 +531,7 @@ def render_student_report_pdf(report: Dict[str, Any],
         "quizzes": lambda: _quiz_flowables(report, styles),
         "courses": lambda: _course_flowables(report, styles),
         "attendance": lambda: _attendance_flowables(report, styles),
+        "talk": lambda: _talk_flowables(report, styles),
         "activity": lambda: _activity_flowables(report, styles),
     }
     for key in SECTION_KEYS:

@@ -25,7 +25,7 @@ from src.schemas.models import (
     MeetParticipant,
     UserInDB,
 )
-from src.services import meet_presence
+from src.services import meet_presence, meet_talk, talk_settings
 from src.utils.utc_json import utc_z
 
 router = APIRouter()
@@ -252,8 +252,11 @@ def list_lesson_records(
                                 .filter(EventGroup.event_id.in_([e.id for e in events] or [-1]))):
         groups.setdefault(event_id, []).append({"id": gid, "name": name})
 
+    records, batch = meet_presence.records_with_batch(db, events, now)
+    talk_on = talk_settings.enabled(db)
+    talk = meet_talk.summaries(db, events, records, batch, now) if talk_on else {}
     items = []
-    for record in meet_presence.records(db, events, now):
+    for record in records:
         teacher = record.get("teacher")
         students = record.get("students") or []
         items.append({
@@ -272,6 +275,7 @@ def list_lesson_records(
             "mismatches": record.get("mismatches", 0),
             "reviewed": record.get("reviewed", 0),
             "flags": record.get("flags") or [],
+            "talk": talk.get(record["event_id"]),
         })
     return {"items": items, "from": utc_z(date_from), "to": utc_z(date_to),
-            "review_options": meet_presence.review_options()}
+            "review_options": meet_presence.review_options(), "talk_enabled": talk_on}
