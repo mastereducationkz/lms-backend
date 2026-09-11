@@ -298,3 +298,40 @@ def test_one_students_lessons_for_the_report(talk):
     assert out["lessons"][0]["share_of_students"] == 1.0 and out["lessons"][0]["in_room"] is True
     talk_settings.update(talk["db"], talk["admin"], enabled=False)
     assert meet_talk_stats.student_talk(talk["db"], talk["aya"].id) is None
+
+
+# ── a lesson from before talk time: the transcript's voices stand in for Meet's timing ────
+
+def test_without_meets_timing_voices_are_named_where_the_room_leaves_one_choice(talk):
+    for account, person, span in (("Gulzada", "teacher", (0, 60)), ("Aya", "aya", (0, 60)),
+                                  ("Eldana", "eldana", (30, 60))):
+        talk["link"](talk["joined"](account, span), talk[person])
+    talk["words"](
+        (1, 9, 0, "Сегодня разбираем модуль два."),
+        (10, 11, 1, "Можно вопрос?"),          # only Aya was in the room then
+        (40, 41, 2, "Я не понял."),            # Aya or Eldana: stays a voice
+        (41, 50, 0, "Давайте ещё раз."),
+    )
+    t = _talk(talk)
+    assert t["state"] == "ready" and t["source"] == "voices"
+    assert _person(t, "Гульзада Сапарова")["seconds"] == 17 * 60
+    assert _person(t, "Аяулым Сейтова")["seconds"] == 60 and _person(t, "Аяулым Сейтова")["questions"] == 1
+    assert _person(t, "Голос 3")["role"] == "unknown" and t["held_back"] is True
+    assert t["silent_students"] == [], "an unnamed voice may be the 'silent' one"
+    assert [n["speaker_label"] for n in t["transcript"]["lines"]] == [
+        "Гульзада Сапарова", "Аяулым Сейтова", "Голос 3", "Гульзада Сапарова"]
+
+    listing = list_lesson_records(date_from=None, date_to=None, teacher_id=None, group_id=None,
+                                  db=talk["db"], current_user=talk["admin"])
+    item = next(i for i in listing["items"] if i["event_id"] == talk["lesson"].id)
+    assert item["talk"]["seconds"][str(talk["aya"].id)] == 60
+    out = get_group_talk(talk["group"].id, date_from=None, date_to=None, db=talk["db"], current_user=talk["admin"])
+    assert out["totals"]["lessons"] == 1
+    assert meet_talk.public_talk(t)["source"] == "voices"
+
+
+def test_a_transcript_still_being_made_is_not_talk_yet(talk):
+    talk["link"](talk["joined"]("Gulzada", (0, 60)), talk["teacher"])
+    talk["words"](status="failed")
+    later = talk["lesson"].end_datetime + meet_talk.SPEECH_EXPECTED_WITHIN + timedelta(minutes=1)
+    assert meet_talk.lesson_talk(talk["db"], talk["lesson"], now=later)["state"] == "none"

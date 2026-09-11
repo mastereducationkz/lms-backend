@@ -15,6 +15,7 @@ Postgres kill a transaction idle for 60 s.
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import shutil
 import tempfile
@@ -369,3 +370,54 @@ def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, cl
         tried.add(found[0].event_id)
         transcribe_one(db, found[0], key)
     return len(tried)
+
+
+def transcribe_lessons(db, event_ids: list, key: str) -> dict:
+    """Transcribe chosen lessons now, speech timing or not — for lessons taught before talk time
+    was on (owner, 2026-09-11). Their voices are then named from who was in the room. A lesson
+    already transcribed is left alone; one that failed is tried afresh."""
+    out = {}
+    for event_id in event_ids:
+        recording = (db.query(LessonRecording)
+                     .filter(LessonRecording.event_id == event_id, LessonRecording.status == "ready",
+                             or_(LessonRecording.drive_file_id.isnot(None),
+                                 LessonRecording.shared_drive_file_id.isnot(None)))
+                     .first())
+        if recording is None:
+            out[event_id] = "no ready recording"
+            continue
+        row = db.query(LessonTranscript).filter_by(event_id=event_id).first()
+        if row is not None and row.status == "ready":
+            out[event_id] = "already transcribed"
+            continue
+        if row is not None:
+            row.attempts, row.status = 0, "pending"
+            db.commit()
+            recording = db.query(LessonRecording).filter_by(event_id=event_id).first()
+        transcribe_one(db, recording, key)
+        row = db.query(LessonTranscript).filter_by(event_id=event_id).first()
+        out[event_id] = row.status if row.status == "ready" else f"{row.status}: {(row.error or '')[:200]}"
+        db.commit()
+    return out
+
+
+def main(argv: Optional[list] = None) -> None:
+    parser = argparse.ArgumentParser(description="Transcribe chosen lessons now (e.g. from before talk time was on).")
+    parser.add_argument("event_ids", type=int, nargs="+")
+    args = parser.parse_args(argv)
+    key = talk_settings.deepgram_key()
+    if not key:
+        raise SystemExit("DEEPGRAM_API_KEY is not set")
+    from src.config import SessionLocal
+
+    db = SessionLocal()
+    try:
+        for event_id, result in transcribe_lessons(db, args.event_ids, key).items():
+            print(f"lesson {event_id}: {result}")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    main()

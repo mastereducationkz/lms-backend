@@ -284,3 +284,16 @@ def test_no_words_without_both_switches_and_a_key(ready_lesson, monkeypatch, swi
     else:
         monkeypatch.delenv("DEEPGRAM_API_KEY")
     assert meet_talk_sync.transcribe_pending(db) == 0
+
+
+def test_lessons_from_before_talk_time_can_be_transcribed_on_request(ready_lesson, monkeypatch):
+    db = ready_lesson["db"]
+    lesson = ready_lesson["lesson"]
+    db.query(MeetSpeech).filter_by(event_id=lesson.id).delete()  # taught while Meet was not transcribing
+    db.add(LessonTranscript(event_id=lesson.id, status="failed", attempts=3, error="old"))
+    db.flush()
+    monkeypatch.setattr(meet_talk_sync, "deepgram", lambda audio, key: DEEPGRAM_ANSWER)
+    assert meet_talk_sync.transcribe_pending(db) == 0, "the worker only takes lessons Meet was transcribing"
+    assert meet_talk_sync.transcribe_lessons(db, [lesson.id, 999999], "k") == {
+        lesson.id: "ready", 999999: "no ready recording"}
+    assert meet_talk_sync.transcribe_lessons(db, [lesson.id], "k") == {lesson.id: "already transcribed"}

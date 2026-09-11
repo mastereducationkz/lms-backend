@@ -30,6 +30,7 @@ STRETCH_BREAK = 30.0    # s: silence this long ends a teacher's stretch
 SILENT_IN_ROOM = 10     # min in the room, never a word: "didn't speak"
 MATCH_SHARE = 0.3       # a line is someone's if their speech covers this much of it
 VOICE_MAJORITY = 0.6    # a voice is someone's if this much of its matched time is theirs
+COVERAGE = 0.98         # without Meet's timing: a voice may be someone's only if they were in the room ~always it spoke
 # Speech timing arrives a little after attendance; a lesson without it for this long had
 # transcription off.
 SPEECH_EXPECTED_WITHIN = timedelta(hours=7)
@@ -107,6 +108,58 @@ def _speakers(event, batch, record: dict, rows: list) -> dict:
     return people
 
 
+def _moment(value: Optional[str]) -> Optional[datetime]:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None) if value else None
+
+
+def _present(person: dict) -> list:
+    return merge_spans([(_moment(s["joined_at"]), _moment(s["left_at"]))
+                        for s in person.get("sessions") or [] if s.get("joined_at") and s.get("left_at")])
+
+
+def _voice_speakers(record: dict, transcript) -> dict:
+    """The same people dict as ``_speakers``, for a lesson Meet was not transcribing (talk time
+    was off): each of Deepgram's voices is a person only where who was in the room leaves one
+    choice — the teacher for the most talkative voice they could be, a student for a voice only
+    they were in the room for. Every other voice stays «Голос N», counted with the students."""
+    started = transcript.recording_started_at
+    voices: dict = {}
+    for a, b, voice, _text in transcript.utterances or []:
+        voices.setdefault(voice, []).append((started + timedelta(seconds=a), started + timedelta(seconds=b)))
+    seconds = {v: _total(spans) for v, spans in voices.items()}
+
+    def could_be(person: dict, spans: list) -> bool:
+        present = _present(person)
+        return sum(_overlap(a, b, present) for a, b in spans) >= COVERAGE * max(0.1, _total(spans))
+
+    owner = {}
+    teacher = record.get("teacher")
+    if teacher:
+        for voice in sorted(voices, key=lambda v: -seconds[v]):
+            if could_be(teacher, voices[voice]):
+                owner[voice] = ("teacher", teacher)
+                break
+    for voice, spans in voices.items():
+        if voice not in owner:
+            fits = [s for s in record.get("students") or [] if could_be(s, spans)]
+            if len(fits) == 1:
+                owner[voice] = ("student", fits[0])
+
+    people: dict = {}
+    for voice, spans in voices.items():
+        if voice in owner:
+            role, person = owner[voice]
+            entry = people.setdefault(f"u{person['user_id']}", {"user_id": person["user_id"], "name": person["name"],
+                                                               "role": role, "spans": []})
+        else:
+            entry = people.setdefault(f"v{voice}", {"user_id": None, "name": f"Голос {voice + 1}",
+                                                    "role": "unknown", "spans": []})
+        entry["spans"].extend(spans)
+    for person in people.values():
+        person["spans"] = merge_spans(person["spans"])
+    return people
+
+
 def _name_lines(utterances: list, started: Optional[datetime], people: dict) -> list:
     """Deepgram's utterances as turns, each named by Meet's timing where it can be."""
     if not utterances:
@@ -168,6 +221,16 @@ def _insights(lines: list) -> dict:
 
 # ── one lesson ───────────────────────────────────────────────────────────────────────────
 
+def _has_words(transcript) -> bool:
+    """A transcript that can stand in for Meet's timing: ready, and placed on the clock."""
+    return bool(transcript is not None and transcript.status == "ready" and transcript.recording_started_at
+                and transcript.utterances)
+
+
+def has_talk(rows: list, transcript) -> bool:
+    return any(r.state == "saved" for r in rows) or _has_words(transcript)
+
+
 def compute(event, batch, record: dict, rows: list, *, transcript=None, recording=None,
             with_transcript: bool = False, viewer_role: Optional[str] = None, now: Optional[datetime] = None,
             transcripts_on: bool = True) -> dict:
@@ -175,7 +238,10 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
     now = now or _now()
     start, end = event.start_datetime, event.end_datetime or event.start_datetime + timedelta(hours=1)
     lo, hi = start - LESSON_MARGIN, end + LESSON_MARGIN
-    people = _speakers(event, batch, record, rows)
+    # Meet's speaker timing when the lesson had it; otherwise the transcript's voices.
+    source = "meet" if any(r.state == "saved" for r in rows) else "voices"
+    people = (_speakers(event, batch, record, rows) if source == "meet"
+              else _voice_speakers(record, transcript) if _has_words(transcript) else {})
 
     in_room = {}
     teacher = record.get("teacher")
@@ -246,12 +312,16 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
         else:
             run_start = run_end = None
 
+    held_back = any(r["role"] == "unknown" and r["seconds"] > 0 for r in rows_out)
     silent = [{"user_id": r["user_id"], "name": r["name"]} for r in rows_out
               if r["role"] == "student" and r["seconds"] == 0
               and (in_room.get(r["key"], (False, 0))[1] or 0) >= SILENT_IN_ROOM]
+    if source == "voices" and held_back:
+        silent = []  # an unnamed voice may be any of them
 
     out = {
         "state": "ready",
+        "source": source,
         "lesson_seconds": round(lesson_seconds),
         "speech_seconds": round(_total(everyone)),
         "silence_seconds": round(silence),
@@ -263,7 +333,7 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
         "buckets": buckets,
         "longest_teacher_stretch_seconds": round(longest),
         "speaker_changes_per_10_min": round(changes / (lesson_seconds / 600), 1),
-        "held_back": any(r["role"] == "unknown" and r["seconds"] > 0 for r in rows_out),
+        "held_back": held_back,
         "insights": _insights(lines) if lines else None,
     }
     if with_transcript:
@@ -322,9 +392,9 @@ def lesson_talk(db, event, *, viewer_role: Optional[str] = None, now: Optional[d
     if record["state"] != "ready":
         return {**base, "state": record["state"]}
     rows = db.query(MeetSpeech).filter(MeetSpeech.event_id == event.id).all()
-    if not any(r.state == "saved" for r in rows):
-        return {**base, "state": _state_without_speech(event, batch, rows, now)}
     transcript = db.query(LessonTranscript).filter(LessonTranscript.event_id == event.id).first()
+    if not has_talk(rows, transcript):
+        return {**base, "state": _state_without_speech(event, batch, rows, now)}
     recording = db.query(LessonRecording).filter(LessonRecording.event_id == event.id).first()
     transcripts_on = bool(settings["transcripts"] and talk_settings.deepgram_key())
     return {**base, **compute(event, batch, record, rows, transcript=transcript, recording=recording,
@@ -363,13 +433,15 @@ def summaries(db, events: list, records: list, batch, now: Optional[datetime] = 
     now = now or _now()
     ready = {r["event_id"]: r for r in records if r.get("state") == "ready"}
     speech = speech_by_event(db, list(ready))
+    # Words only where there is no Meet timing: then they are what names the voices.
+    wordy = transcripts_by_event(db, [eid for eid in ready if not any(r.state == "saved" for r in speech.get(eid, []))])
     out = {}
     for event in events:
         rows = speech.get(event.id) or []
-        if event.id not in ready or not any(r.state == "saved" for r in rows):
+        if event.id not in ready or not has_talk(rows, wordy.get(event.id)):
             out[event.id] = None
             continue
-        out[event.id] = summary(compute(event, batch, ready[event.id], rows, now=now))
+        out[event.id] = summary(compute(event, batch, ready[event.id], rows, transcript=wordy.get(event.id), now=now))
     return out
 
 
@@ -380,6 +452,7 @@ def public_talk(talk: dict) -> Optional[dict]:
         return None
     return {
         "state": "ready",
+        "source": talk.get("source", "meet"),
         "lesson_seconds": talk["lesson_seconds"],
         "speech_seconds": talk["speech_seconds"],
         "silence_seconds": talk["silence_seconds"],

@@ -1,8 +1,8 @@
 """Talk time over many lessons: one group's students side by side, and one student's lessons.
 
 Both read lesson by lesson through ``meet_talk.compute`` — the same numbers the lesson panel
-shows, added up. Only lessons whose speech was saved count: a lesson taught while talk time
-was off says nothing about anyone's talking.
+shows, added up. Only lessons with talk count: Meet's speaker timing, or for a lesson taught
+before talk time was on, a transcript made afterwards whose voices stand in for it.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Optional
 
 from sqlalchemy import and_, exists, or_
 
-from src.schemas.models import Attendance, Event, EventGroup, Group, GroupStudent, MeetSpeech
+from src.schemas.models import Attendance, Event, EventGroup, Group, GroupStudent, LessonTranscript, MeetSpeech
 from src.services import meet_presence, meet_talk, talk_settings
 from src.utils.utc_json import utc_z
 
@@ -24,8 +24,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _has_speech():
-    return exists().where(and_(MeetSpeech.event_id == Event.id, MeetSpeech.state == "saved")).correlate(Event)
+def _has_talk():
+    """Meet's speaker timing, or failing that a transcript whose voices stand in for it."""
+    speech = exists().where(and_(MeetSpeech.event_id == Event.id, MeetSpeech.state == "saved")).correlate(Event)
+    words = exists().where(and_(LessonTranscript.event_id == Event.id, LessonTranscript.status == "ready")).correlate(Event)
+    return or_(speech, words)
 
 
 def _talks(db, events: list, now: datetime) -> list:
@@ -39,7 +42,7 @@ def _talks(db, events: list, now: datetime) -> list:
     out = []
     for event, record in zip(events, records):
         rows = speech.get(event.id) or []
-        if record.get("state") != "ready" or not any(r.state == "saved" for r in rows):
+        if record.get("state") != "ready" or not meet_talk.has_talk(rows, transcripts.get(event.id)):
             continue
         out.append((event, record, meet_talk.compute(event, batch, record, rows,
                                                      transcript=transcripts.get(event.id), now=now)))
@@ -63,7 +66,7 @@ def group_talk(db, viewer, group: Group, date_from: datetime, date_to: datetime,
     now = now or _now()
     in_group = exists().where(and_(EventGroup.event_id == Event.id, EventGroup.group_id == group.id)).correlate(Event)
     events = (db.query(Event)
-              .filter(meet_presence.visible_lessons_clause(viewer), in_group, _has_speech(),
+              .filter(meet_presence.visible_lessons_clause(viewer), in_group, _has_talk(),
                       Event.start_datetime >= date_from, Event.start_datetime < date_to)
               .order_by(Event.start_datetime.desc()).limit(MAX_LESSONS).all())
     talks = _talks(db, events, now)
@@ -137,7 +140,7 @@ def student_talk(db, student_id: int, date_from: Optional[datetime] = None, date
     )).correlate(Event)
     marked = exists().where(and_(Attendance.event_id == Event.id, Attendance.user_id == student_id)).correlate(Event)
     events = (db.query(Event)
-              .filter(or_(in_their_group, marked), _has_speech(),
+              .filter(or_(in_their_group, marked), _has_talk(),
                       Event.start_datetime >= date_from, Event.start_datetime < date_to)
               .order_by(Event.start_datetime.desc()).limit(limit).all())
     group_names = {}
