@@ -14,6 +14,7 @@ from src.routes.crm_internal import _require_crm_internal_key
 from src.schemas.models import LessonRecording, RecordingWatchLink
 from src.services import recording_watch_links as links
 from src.services.media_tokens import verify_media_token
+from src.schemas import models as meet_presence_models
 from tests.test_operational_groups import db, world  # noqa: F401 - fixtures
 
 
@@ -109,3 +110,14 @@ def test_only_the_crm_can_ask_for_a_link(monkeypatch):
             _require_crm_internal_key(wrong)
         assert err.value.status_code == 401
     _require_crm_internal_key("the-real-key")
+
+
+def test_the_page_lists_the_class_beside_the_recording(recorded):
+    db, world, lesson = recorded["db"], recorded["world"], recorded["lesson"]
+    student = db.query(meet_presence_models.GroupStudent).filter_by(group_id=recorded["group"].id).first()
+    page = links.redeem(db, _token(links.issue(db, lesson.id, issued_to=None, issued_role=None)["url"]))
+    participants = page["participants"]
+    assert participants["state"] in ("none", "no_room", "unavailable")
+    assert [s["name"] for s in participants["students"]] == ["student"]
+    assert "user_id" not in repr(participants), "a page outside the LMS names people, not accounts"
+    assert student is not None

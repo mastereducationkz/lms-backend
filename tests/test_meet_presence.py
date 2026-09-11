@@ -390,3 +390,35 @@ def test_teachers_and_curators_list_their_own_lessons_and_nobody_elses(room):
     for viewer in (room["teacher"], curator):
         assert room["lesson"].id in {i["event_id"] for i in _list(db, viewer)}
     assert _list(db, _user(db, "teacher")) == [], "another teacher's lessons stay theirs"
+
+
+# ── the class list, with or without Meet data (watch pages, 2026-09-11) ──────────────────
+
+def test_without_a_meet_record_the_class_list_and_marks_are_still_there(room):
+    db, world = room["db"], room["world"]
+    quiet = world["lesson"](room["group"], days_ahead=-2)
+    db.add(meet_presence.Attendance(event_id=quiet.id, user_id=room["aya"].id, status="present"))
+    db.add(meet_presence.Attendance(event_id=quiet.id, user_id=room["shyngys"].id, status="removed"))
+    db.flush()
+    record = meet_presence.lesson(db, quiet, quiet.end_datetime + timedelta(hours=1))
+    assert record["state"] == "no_room"
+    assert [(r["name"], r["mark"]) for r in record["roster"]] == [
+        ("Аяулым Сейтова", "present"), ("Елдана Нұрлан", None)], "taken-off students and the teacher are not the class"
+
+
+def test_the_public_view_shows_people_and_times_and_nothing_to_act_on(room):
+    room["link"](room["joined"]("Gulzada", (4, 60)), room["teacher"])
+    room["link"](room["joined"]("Aya", (7, 60)), room["aya"])
+    room["joined"]("iPhone 13", (1, 60))
+    room["mark"](room["eldana"], "present")
+
+    view = meet_presence.public_participants(_record(room))
+    assert view["state"] == "ready" and view["held_back"] is True
+    assert view["teacher"]["name"] == "Гульзада Сапарова"
+    assert {f["code"] for f in view["teacher"]["flags"]} == {"teacher_late"}
+    aya = next(s for s in view["students"] if s["name"] == "Аяулым Сейтова")
+    assert aya["first_join"].endswith("Z") and aya["minutes_in_lesson"] == 53
+    assert [u["display_name"] for u in view["unknown"]] == ["iPhone 13"]
+    flat = repr(view)
+    for private in ("participant_id", "user_id", "google_user", "candidates", "suggestion", "users/"):
+        assert private not in flat, private

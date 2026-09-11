@@ -269,21 +269,43 @@ def _presence(spans: list, start: datetime, end: datetime) -> dict:
     }
 
 
+def _student_ids(event, batch: _Batch, end: datetime) -> set:
+    """The lesson's students: enrolled by the time it ended, plus anyone with a mark on it —
+    minus anyone taken off it, and never its own teacher."""
+    marks = batch.marks.get(event.id, {})
+    enrolled = batch.roster.get(event.id, {})
+    ids = ({uid for uid, since in enrolled.items() if since is None or since <= end}
+           | {uid for uid, mark in marks.items() if mark is not None})
+    ids -= {uid for uid, mark in marks.items() if mark == "removed"}
+    ids.discard(event.teacher_id)
+    return ids
+
+
+def _roster(event, batch: _Batch, end: datetime) -> list:
+    """The whole class list with each student's mark — what there is to show without Meet data."""
+    marks = batch.marks.get(event.id, {})
+    rows = [{"user_id": uid, "name": batch.users[uid].name if uid in batch.users else f"User {uid}",
+             "mark": marks.get(uid)} for uid in _student_ids(event, batch, end)]
+    return sorted(rows, key=lambda r: r["name"].lower())
+
+
 def lesson_record(event, batch: _Batch, now: datetime) -> dict:
     start = event.start_datetime
     end = event.end_datetime or start + timedelta(hours=1)
     conferences = batch.conferences.get(event.id, [])
     base = {"event_id": event.id, "title": event.title, "start": utc_z(start), "end": utc_z(end)}
+    # Without a Meet record there is still a class to list: who was expected, and their marks.
+    unjudged = {**base, "roster": _roster(event, batch, end)}
 
     waiting_for_google = any(c.synced_at is None for c in conferences)
     if now < start:
-        return {**base, "state": "not_started"}
+        return {**unjudged, "state": "not_started"}
     if not conferences and (event.id not in batch.lms_rooms or not meet_code(event.meeting_url)):
-        return {**base, "state": "no_room"}  # nothing we could ever have read: say nothing
+        return {**unjudged, "state": "no_room"}  # nothing we could ever have read
     if now < end + COMPLETE_AFTER or (waiting_for_google and now < end + GIVE_UP_WAITING_AFTER):
-        return {**base, "state": "waiting"}
+        return {**unjudged, "state": "waiting"}
     if not any(c.synced_at for c in conferences):
-        return {**base, "state": "unavailable" if now > end + GOOGLE_KEEPS else "none"}
+        return {**unjudged, "state": "unavailable" if now > end + GOOGLE_KEEPS else "none"}
 
     lo, hi = start - LESSON_MARGIN, end + LESSON_MARGIN
     ended_at = {c.id: c.ended_at or now for c in conferences}
@@ -306,11 +328,7 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
             accounts_of.setdefault(user_id, []).append(account)
 
     marks = batch.marks.get(event.id, {})
-    enrolled = batch.roster.get(event.id, {})
-    student_ids = ({uid for uid, since in enrolled.items() if since is None or since <= end}
-                   | {uid for uid, mark in marks.items() if mark is not None})
-    student_ids -= {uid for uid, mark in marks.items() if mark == "removed"}
-    student_ids.discard(event.teacher_id)
+    student_ids = _student_ids(event, batch, end)
     unconfirmed = bool(unknown)
 
     def person(uid: int, role: str, flags: list) -> dict:
@@ -380,3 +398,38 @@ def candidate_ids(db, event: Event) -> set:
             .filter(EventGroup.event_id == event.id)}
     ids |= {uid for (uid,) in db.query(Attendance.user_id).filter(Attendance.event_id == event.id)}
     return ids
+
+
+def public_participants(record: dict) -> dict:
+    """What a page outside the LMS may show about who was there: names, marks, times, flags.
+
+    For the watch-link page (accountants, no LMS account). Nothing that lets anyone act — no
+    account ids, no "who is this" candidates, no Google identities — only what was read.
+    Without a Meet record it is still the whole class list with marks.
+    """
+    def presence(p: dict) -> dict:
+        return {"first_join": p.get("first_join"), "last_leave": p.get("last_leave"),
+                "minutes_in_lesson": p.get("minutes_in_lesson", 0), "joins": p.get("joins", 0)}
+
+    def person(p: dict) -> dict:
+        return {"name": p["name"], "mark": p.get("mark"), **presence(p), "flags": p.get("flags", [])}
+
+    if record.get("state") != "ready":
+        return {
+            "state": record.get("state"),
+            "teacher": None,
+            "students": [{"name": r["name"], "mark": r["mark"], "first_join": None, "last_leave": None,
+                          "minutes_in_lesson": 0, "joins": 0, "flags": []} for r in record.get("roster", [])],
+            "unknown": [], "others": [], "held_back": False, "partial": False,
+        }
+    teacher = record.get("teacher")
+    return {
+        "state": "ready",
+        "teacher": person(teacher) if teacher else None,
+        "students": [person(s) for s in record.get("students", [])],
+        "unknown": [{"display_name": u.get("display_name"), "kind": u.get("kind"), **presence(u)}
+                    for u in record.get("unknown", [])],
+        "others": [{**person(o), "role": o.get("role")} for o in record.get("others", [])],
+        "held_back": bool(record.get("held_back")),
+        "partial": bool(record.get("partial")),
+    }

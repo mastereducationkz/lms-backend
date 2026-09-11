@@ -106,4 +106,15 @@ def redeem(db, token: str, now: Optional[datetime] = None) -> dict:
         "url": signed_hls_url(recording.hls_url, WATCH_LINK_VIEWER_ID),
         "poster_url": signed_hls_url(recording.poster_url, WATCH_LINK_VIEWER_ID),
         "expires_at": utc_z(link.expires_at),
+        # Who was there: asked for by the owner (2026-09-11) so the person checking the recording
+        # sees the class beside it. The key already opens this lesson; this adds no other one.
+        "participants": _participants(db, event),
     }
+
+
+def _participants(db, event) -> Optional[dict]:
+    if event is None:
+        return None
+    from src.services import meet_presence
+
+    return meet_presence.public_participants(meet_presence.lesson(db, event))
