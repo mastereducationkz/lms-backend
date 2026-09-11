@@ -297,3 +297,32 @@ def test_lessons_from_before_talk_time_can_be_transcribed_on_request(ready_lesso
     assert meet_talk_sync.transcribe_lessons(db, [lesson.id, 999999], "k") == {
         lesson.id: "ready", 999999: "no ready recording"}
     assert meet_talk_sync.transcribe_lessons(db, [lesson.id], "k") == {lesson.id: "already transcribed"}
+
+
+# ── the words: only the speech goes to Whisper (owner, 2026-09-12) ────────────────────────
+
+def test_speech_is_grouped_into_pieces_with_the_silence_cut_out():
+    regions = [(10, 14), (15, 20), (40, 45), (46, 300)]
+    chunks = meet_talk_sync.speech_chunks(regions, longest=110)
+    assert chunks[:2] == [(10, 20), (40, 45)], "the 20 s silence between them is cut out"
+    assert chunks[2:] == [(46, 156), (156, 266), (266, 300)], "a long stretch is cut into sendable pieces"
+    assert meet_talk_sync.speech_chunks([(0, 60), (61, 100)]) == [(0, 100)], "a 1 s gap is kept"
+
+
+def test_punctuation_comes_back_onto_the_timed_words():
+    text = "Какой ответ правильный? Думаю, B."
+    words = [{"word": "Какой", "start": 0, "end": 0.3}, {"word": "ответ", "start": 0.3, "end": 0.6},
+             {"word": "правильный", "start": 0.6, "end": 1.0}, {"word": "Думаю", "start": 1.4, "end": 1.8},
+             {"word": "B", "start": 1.8, "end": 2.0}]
+    assert [w for _s, _e, w in meet_talk_sync._with_punctuation(text, words)] == [
+        "Какой", "ответ", "правильный?", "Думаю,", "B."]
+
+
+@pytest.mark.parametrize("text, hallucinated", [
+    ("Продолжение следует...", True),
+    ("Спасибо за внимание, подписывайтесь на канал!", True),
+    ("Хорошо. Хорошо. Хорошо. Хорошо.", True),
+    ("Хорошо, давайте посмотрим на пятый вопрос.", False),
+])
+def test_whispers_stock_phrases_over_silence_are_dropped(text, hallucinated):
+    assert meet_talk_sync._looks_hallucinated(text) is hallucinated

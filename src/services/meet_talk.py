@@ -203,6 +203,64 @@ def _voice_speakers(record: dict, transcript) -> dict:
     return people
 
 
+class _Timeline:
+    """Who was speaking at any moment: the echo-cleaned stretches of everyone, end to end."""
+
+    def __init__(self, people: dict):
+        self.spans = sorted((a, b, key) for key, person in people.items() for a, b in person["spans"])
+        self.starts = [a for a, _b, _k in self.spans]
+
+    def at(self, moment: datetime, reach: float = 1.0) -> Optional[str]:
+        """Whoever was speaking then — or, in a gap, whoever spoke within ``reach`` seconds."""
+        i = bisect_right(self.starts, moment)
+        best, distance = None, reach
+        for a, b, key in self.spans[max(0, i - 2):i + 2]:
+            if a <= moment <= b:
+                return key
+            gap = _secs(a - moment) if a > moment else _secs(moment - b)
+            if 0 <= gap < distance:
+                best, distance = key, gap
+        return best
+
+
+LINE_MAX = 40.0   # seconds: a very long turn is cut so the transcript stays readable
+
+
+def _word_lines(words: list, started: Optional[datetime], people: dict) -> list:
+    """Whisper's words, cut into lines wherever Meet says the speaker changed.
+
+    Deepgram's own chunks could hold two people — a student's answer and the teacher's reply came
+    out under one name (owner, 2026-09-11). A word belongs to whoever was speaking at its middle.
+    """
+    if not words or started is None:
+        return []
+    timeline = _Timeline(people)
+    placed = []
+    for start, end, text in words:
+        middle = started + timedelta(seconds=(start + end) / 2)
+        placed.append([start, end, text, timeline.at(middle)])
+
+    # A single word between two runs of one other person is a boundary wobble, not a turn.
+    for i in range(1, len(placed) - 1):
+        before, word, after = placed[i - 1], placed[i], placed[i + 1]
+        if (before[3] == after[3] != word[3] and word[1] - word[0] < 1.2
+                and word[0] - before[1] < 0.4 and after[0] - word[1] < 0.4):
+            word[3] = before[3]
+
+    lines: list = []
+    for start, end, text, key in placed:
+        last = lines[-1] if lines else None
+        if (last and last["speaker_key"] == key and start - last["end"] < TURN_GAP
+                and last["end"] - last["at"] < LINE_MAX):
+            last["end"], last["text"] = end, f'{last["text"]} {text}'
+            continue
+        person = people.get(key) if key else None
+        lines.append({"_who": key or "?", "at": start, "end": end, "speaker_key": key,
+                      "speaker_label": person["name"] if person else "Кто-то",
+                      "role": person["role"] if person else None, "text": text})
+    return lines
+
+
 def _name_lines(utterances: list, started: Optional[datetime], people: dict) -> list:
     """Deepgram's utterances as turns, each named by Meet's timing where it can be."""
     if not utterances:
@@ -285,7 +343,11 @@ def _recording_start(event, batch, recording) -> Optional[datetime]:
 
 
 def _has_words(transcript) -> bool:
-    """A transcript that can stand in for Meet's timing: ready, and placed on the clock."""
+    """A transcript that can stand in for Meet's timing: ready, placed on the clock, with voices.
+
+    Only Deepgram's voices can stand in — Whisper hears words, not people, and it is used exactly
+    where Meet's timing already says who spoke.
+    """
     return bool(transcript is not None and transcript.status == "ready" and transcript.recording_started_at
                 and transcript.utterances)
 
@@ -320,7 +382,8 @@ def compute(event, batch, record: dict, rows: list, *, transcript=None, recordin
     lines, started = [], None
     if transcript is not None and transcript.status == "ready":
         started = transcript.recording_started_at
-        lines = _name_lines(transcript.utterances or [], started, people)
+        lines = (_word_lines(transcript.words, started, people) if transcript.words
+                 else _name_lines(transcript.utterances or [], started, people))
     # Where the lesson starts inside the recording: video second = lesson second + this. Known
     # even without a transcript — the call the recording came from began at a known moment — so
     # the watch page can follow the video too.

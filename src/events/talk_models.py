@@ -90,6 +90,10 @@ class LessonTranscript(Base):
     recording_started_at = Column(DateTime, nullable=True)
     audio_seconds = Column(Float, nullable=True)
     utterances = Column(_JSON, nullable=True)
+    # Words with their times, punctuation kept: [[start, end, "text"], …]. The speaker is not
+    # stored — Meet's timing names them when the lesson is read, so a confirmed account renames
+    # every line at once.
+    words = Column(_JSON, nullable=True)
     languages = Column(_JSON, nullable=True)
     error = Column(Text, nullable=True)
     attempts = Column(Integer, nullable=False, default=0)

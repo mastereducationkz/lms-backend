@@ -20,9 +20,9 @@ from src.utils.utc_json import utc_z
 KEY = "talk_time"
 DEFAULTS = {"enabled": False, "transcripts": True, "enabled_at": None}
 
-# Deepgram Nova-3 multilingual, pre-recorded: $0.0052 a minute (2026-09). An estimate for the
-# admin's eye, not an invoice.
-USD_PER_AUDIO_HOUR = 0.0052 * 60
+# Whisper is $0.006 a minute and hears only the speech; Deepgram Nova-3 multilingual is $0.0052
+# a minute of the whole lesson. An estimate for the admin's eye, not an invoice.
+USD_PER_AUDIO_HOUR = 0.006 * 60
 
 # Who may see the switch; only admins may flip it.
 READERS = frozenset({"admin", "head_curator", "head_teacher"})
@@ -30,7 +30,16 @@ WRITERS = frozenset({"admin"})
 
 
 def deepgram_key() -> Optional[str]:
-    value = os.getenv("DEEPGRAM_API_KEY")
+    return _key("DEEPGRAM_API_KEY")
+
+
+def openai_key() -> Optional[str]:
+    """Whisper writes the words for lessons Meet timed; Deepgram is the fallback."""
+    return _key("OPENAI_API_KEY")
+
+
+def _key(name: str) -> Optional[str]:
+    value = os.getenv(name)
     return value.strip() if value and value.strip() else None
 
 
@@ -50,7 +59,7 @@ def enabled(db) -> bool:
 def transcripts_enabled(db) -> bool:
     """Deepgram runs only while talk time is on, its own switch is on, and there is a key."""
     value = current(db)
-    return bool(value["enabled"] and value["transcripts"] and deepgram_key())
+    return bool(value["enabled"] and value["transcripts"] and (openai_key() or deepgram_key()))
 
 
 def update(db, user, *, enabled: Optional[bool] = None, transcripts: Optional[bool] = None) -> dict:
@@ -101,7 +110,7 @@ def describe(db) -> dict:
         "transcripts": bool(value["transcripts"]),
         "enabled_at": value.get("enabled_at"),
         "updated_by": by.name if by else None,
-        "deepgram_configured": deepgram_key() is not None,
+        "deepgram_configured": (openai_key() or deepgram_key()) is not None,
         "usage": usage(db),
         "last_error": last_error(db),
     }

@@ -58,6 +58,22 @@ TRANSCRIBE_MAX_ATTEMPTS = 3
 # worth a download that may no longer exist.
 TRANSCRIBE_WITHIN = timedelta(days=7)
 
+# The words: Whisper hears Russian better than Deepgram, and the audio it is given is only the
+# speech — Meet says when that is — so it never hallucinates through a silent test. Deepgram stays
+# for lessons Meet was not transcribing: there, its voices are the only way to tell people apart.
+WHISPER_URL = "https://api.openai.com/v1/audio/transcriptions"
+WHISPER_MODEL = "whisper-1"
+WHISPER_WORKERS = 4
+CHUNK_MAX_SECONDS = 110      # one request; long enough to give Whisper context
+CHUNK_JOIN_GAP = 3.0         # silence longer than this is cut out
+CHUNK_PAD = 0.4              # a moment either side so no word is clipped
+GLOSSARY = ("Урок SAT: русская речь с английскими терминами (main idea, inference, evidence, "
+            "transition, passage).")
+# Whisper's stock phrases when it is given near-silence; none of them belong in a lesson.
+HALLUCINATIONS = ("продолжение следует", "субтитры делал", "субтитры создавал", "редактор субтитров",
+                  "спасибо за внимание", "ставьте лайк", "подписывайтесь на канал", "thanks for watching",
+                  "amara.org", "dimatorzok")
+
 DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 DEEPGRAM_PARAMS = {"model": "nova-3", "language": "multi", "diarize": "true", "smart_format": "true",
                    "punctuate": "true", "utterances": "true"}
@@ -244,6 +260,120 @@ def _recording_started_at(conference_record: str, drive_file_id: Optional[str]) 
     return min(starts) if starts else None
 
 
+def speech_chunks(regions: list, *, gap: float = CHUNK_JOIN_GAP, longest: float = CHUNK_MAX_SECONDS) -> list:
+    """Stretches of speech grouped into pieces to transcribe: short gaps kept, long silence cut."""
+    chunks = []
+    for start, end in sorted(regions):
+        if chunks and start - chunks[-1][1] < gap and end - chunks[-1][0] < longest:
+            chunks[-1][1] = max(chunks[-1][1], end)
+        else:
+            chunks.append([start, max(end, start)])
+    out = []
+    for start, end in chunks:
+        while end - start > longest:   # one long stretch of talking, cut into sendable pieces
+            out.append((start, start + longest))
+            start += longest
+        if end > start:
+            out.append((start, end))
+    return out
+
+
+def speech_intervals(db, event_id: int) -> list:
+    """When anyone was speaking, as moments — Meet's entries, echo and all (it is the same audio
+    either way; who said it is worked out when the lesson is read)."""
+    out = []
+    for row in db.query(MeetSpeech).filter(MeetSpeech.event_id == event_id, MeetSpeech.state == "saved"):
+        if not row.entries or row.origin is None:
+            continue
+        for _index, a_ms, b_ms in row.entries:
+            out.append((row.origin + timedelta(milliseconds=a_ms), row.origin + timedelta(milliseconds=b_ms)))
+    return sorted(out)
+
+
+def regions_in_recording(speech: list, started: datetime) -> list:
+    """Those moments as seconds from the recording's first frame."""
+    seconds = [((a - started).total_seconds(), (b - started).total_seconds()) for a, b in speech]
+    return [(max(0.0, a), b) for a, b in seconds if b > 0]
+
+
+def _with_punctuation(text: str, words: list) -> list:
+    """Whisper's word times carry no punctuation; its text does. Walk one along the other."""
+    out, cursor = [], 0
+    for word in words:
+        plain = (word.get("word") or "").strip()
+        if not plain:
+            continue
+        at = text.lower().find(plain.lower(), cursor)
+        if at == -1:
+            out.append((word["start"], word["end"], plain))
+            continue
+        end = at + len(plain)
+        while end < len(text) and text[end] in ".,!?…:;»\"')":
+            end += 1
+        out.append((word["start"], word["end"], text[at:end].strip()))
+        cursor = end
+    return out
+
+
+def _looks_hallucinated(text: str) -> bool:
+    low = text.lower()
+    if any(phrase in low for phrase in HALLUCINATIONS):
+        return True
+    parts = [p.strip() for p in low.replace("!", ".").replace("?", ".").split(".") if p.strip()]
+    return len(parts) >= 4 and len(set(parts)) == 1   # the same sentence over and over
+
+
+def whisper_chunk(audio: Path, start: float, end: float, key: str, context: str, workdir: Path) -> tuple:
+    """One piece of audio → [(start, end, word)] on the recording's clock, and its text."""
+    import httpx
+
+    clip = workdir / f"chunk_{int(start)}.ogg"
+    from src.services import video_ingest
+
+    video_ingest._run(["ffmpeg", "-y", "-v", "error", "-ss", str(max(0.0, start - CHUNK_PAD)),
+                       "-t", str(end - start + 2 * CHUNK_PAD), "-i", str(audio), "-c", "copy", str(clip)],
+                      timeout=120)
+    try:
+        with httpx.Client(timeout=300) as client:
+            response = client.post(
+                WHISPER_URL, headers={"Authorization": f"Bearer {key}"},
+                data={"model": WHISPER_MODEL, "response_format": "verbose_json",
+                      "timestamp_granularities[]": "word", "prompt": (GLOSSARY + " " + context)[-400:]},
+                files={"file": (clip.name, clip.read_bytes(), "audio/ogg")})
+        response.raise_for_status()
+        body = response.json()
+    finally:
+        clip.unlink(missing_ok=True)
+    text = (body.get("text") or "").strip()
+    if not text or _looks_hallucinated(text):
+        return [], ""
+    base = max(0.0, start - CHUNK_PAD)
+    words = [(round(base + a, 2), round(base + b, 2), w)
+             for a, b, w in _with_punctuation(text, body.get("words") or [])]
+    return words, text
+
+
+def whisper_words(audio: Path, chunks: list, key: str, workdir: Path) -> tuple:
+    """Every chunk through Whisper, in parallel, in order. Returns (words, languages, seconds)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Context comes from the piece before, so the pieces are done in order within each worker's turn.
+    results: list = [None] * len(chunks)
+    with ThreadPoolExecutor(max_workers=WHISPER_WORKERS) as pool:
+        futures = {pool.submit(whisper_chunk, audio, a, b, key, "", workdir): i
+                   for i, (a, b) in enumerate(chunks)}
+        for future in futures:
+            index = futures[future]
+            try:
+                results[index] = future.result()
+            except Exception as e:
+                logger.warning("whisper chunk %s failed: %s", index, str(e)[:200])
+                results[index] = ([], "")
+    words = [w for chunk in results if chunk for w in chunk[0]]
+    seconds = sum(b - a for a, b in chunks)
+    return words, {"ru": sum(1 for _s, _e, w in words if any("а" <= c <= "я" for c in w.lower()))}, seconds
+
+
 def _audio_from_drive(file_id: str, workdir: Path) -> Path:
     from src.services import video_ingest
     from src.services.recording_ingest import _download_drive_file
@@ -298,11 +428,14 @@ def lessons_to_transcribe(db, now: datetime, exclude: set) -> list:
     return query.order_by(LessonRecording.ingested_at).limit(1).all()
 
 
-def transcribe_one(db, recording, key: str) -> None:
+def transcribe_one(db, recording, key: Optional[str], openai_key: Optional[str] = None) -> None:
+    """One lesson's words. With Meet's speaker timing, only the speech is sent to Whisper; without
+    it (a lesson from before talk time), Deepgram's voices are the only way to tell people apart."""
     event_id = recording.event_id
     conference_record = recording.conference_record
     file_id = recording.shared_drive_file_id or recording.drive_file_id
     original = recording.drive_file_id
+    speech = speech_intervals(db, event_id)
     row = db.query(LessonTranscript).filter_by(event_id=event_id).first()
     if row is None:
         row = LessonTranscript(event_id=event_id, status="pending", attempts=0)
@@ -320,7 +453,16 @@ def transcribe_one(db, recording, key: str) -> None:
     try:
         started = _recording_started_at(conference_record, original) if conference_record else None
         audio = _audio_from_drive(file_id, workdir)
-        utterances, languages, duration = compact_utterances(deepgram(audio, key))
+        words, utterances, provider = [], [], "deepgram"
+        if openai_key and speech and started:
+            chunks = speech_chunks(regions_in_recording(speech, started))
+            words, languages, duration = whisper_words(audio, chunks, openai_key, workdir)
+            provider = "whisper"
+        if not words:
+            if not key:
+                raise RuntimeError("no words came back and there is no Deepgram key to fall back on")
+            utterances, languages, duration = compact_utterances(deepgram(audio, key))
+            provider = "deepgram"
     except Exception as e:
         _save(db, row_id, error=str(e)[:1900],
               status="failed" if attempt >= TRANSCRIBE_MAX_ATTEMPTS else "pending")
@@ -330,9 +472,9 @@ def transcribe_one(db, recording, key: str) -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
     _save(db, row_id, status="ready", error=None, recording_started_at=started, audio_seconds=duration,
-          utterances=utterances, languages=languages, completed_at=_now())
-    logger.info("lesson %s: transcript ready (%s utterances, %.0f min of audio)",
-                event_id, len(utterances), duration / 60)
+          utterances=utterances, words=words, languages=languages, provider=provider, completed_at=_now())
+    logger.info("lesson %s: transcript ready by %s (%s words, %s utterances, %.0f min of audio)",
+                event_id, provider, len(words), len(utterances), duration / 60)
 
 
 def _save(db, row_id: int, **fields) -> None:
@@ -360,7 +502,7 @@ def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, cl
     """Transcribe lessons until none are left or the budget is spent. Returns lessons tried."""
     if not talk_settings.transcripts_enabled(db):
         return 0
-    key = talk_settings.deepgram_key()
+    key, openai_key = talk_settings.deepgram_key(), talk_settings.openai_key()
     now = now or _now()
     started, tried = clock(), set()
     while clock() - started < budget_seconds:
@@ -368,11 +510,11 @@ def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, cl
         if not found:
             break
         tried.add(found[0].event_id)
-        transcribe_one(db, found[0], key)
+        transcribe_one(db, found[0], key, openai_key)
     return len(tried)
 
 
-def transcribe_lessons(db, event_ids: list, key: str) -> dict:
+def transcribe_lessons(db, event_ids: list, key: Optional[str]) -> dict:
     """Transcribe chosen lessons now, speech timing or not — for lessons taught before talk time
     was on (owner, 2026-09-11). Their voices are then named from who was in the room. A lesson
     already transcribed is left alone; one that failed is tried afresh."""
@@ -394,7 +536,7 @@ def transcribe_lessons(db, event_ids: list, key: str) -> dict:
             row.attempts, row.status = 0, "pending"
             db.commit()
             recording = db.query(LessonRecording).filter_by(event_id=event_id).first()
-        transcribe_one(db, recording, key)
+        transcribe_one(db, recording, key, talk_settings.openai_key())
         row = db.query(LessonTranscript).filter_by(event_id=event_id).first()
         out[event_id] = row.status if row.status == "ready" else f"{row.status}: {(row.error or '')[:200]}"
         db.commit()
@@ -406,8 +548,8 @@ def main(argv: Optional[list] = None) -> None:
     parser.add_argument("event_ids", type=int, nargs="+")
     args = parser.parse_args(argv)
     key = talk_settings.deepgram_key()
-    if not key:
-        raise SystemExit("DEEPGRAM_API_KEY is not set")
+    if not key and not talk_settings.openai_key():
+        raise SystemExit("neither DEEPGRAM_API_KEY nor OPENAI_API_KEY is set")
     from src.config import SessionLocal
 
     db = SessionLocal()

@@ -47,6 +47,14 @@ def talk(room):
                           origin=start - timedelta(minutes=10), participants=names, entries=entries))
         db.flush()
 
+    def said(*words_in, started_min=-10, status="ready"):
+        """words: (from_min, to_min, text) — Whisper's words on the recording's clock."""
+        db.add(LessonTranscript(
+            event_id=room["lesson"].id, status=status, attempts=1, provider="whisper",
+            recording_started_at=start + timedelta(minutes=started_min),
+            words=[[(a - started_min) * 60, (b - started_min) * 60, text] for a, b, text in words_in]))
+        db.flush()
+
     def words(*utterances, started_min=-10, status="ready"):
         """utterances: (from_min, to_min, voice, text) — recording seconds from its start."""
         db.add(LessonTranscript(
@@ -56,7 +64,7 @@ def talk(room):
             error="Deepgram said 402" if status == "failed" else None))
         db.flush()
 
-    room.update(admin=admin, spoke=spoke, words=words)
+    room.update(admin=admin, spoke=spoke, words=words, said=said)
     return room
 
 
@@ -456,3 +464,35 @@ def test_the_words_follow_the_same_rule(talk):
     talk["words"]((3, 4, 0, "Значит, смотрим на пятый вопрос."))
     lines = _talk(talk)["transcript"]["lines"]
     assert [n["speaker_label"] for n in lines] == ["Гульзада Сапарова"]
+
+
+
+# ── the words, cut where the speaker changes (owner, 2026-09-11) ──────────────────────────
+
+def test_a_line_breaks_where_meet_says_the_speaker_changed(talk):
+    """Deepgram's chunks could hold two people; Whisper's words are cut by Meet's timing."""
+    teacher, aya, *_ = _classroom(talk)
+    talk["spoke"]((teacher, 0, 10), (aya, 10, 11), (teacher, 11, 20))
+    talk["said"](
+        (5, 9.9, "Какой ответ правильный?"),
+        (10.1, 10.4, "Думаю,"),
+        (10.4, 10.8, "B."),
+        (11.2, 12, "Верно!"),
+    )
+    t = _talk(talk)
+    lines = t["transcript"]["lines"]
+    assert [(n["speaker_label"], n["text"]) for n in lines] == [
+        ("Гульзада Сапарова", "Какой ответ правильный?"),
+        ("Аяулым Сейтова", "Думаю, B."),
+        ("Гульзада Сапарова", "Верно!")]
+    assert t["insights"]["teacher_questions"] == 1 and t["insights"]["answered"] == 1
+    assert _person(t, "Аяулым Сейтова")["answers"] == 1
+
+
+def test_one_word_that_lands_in_the_wrong_mouth_is_put_back(talk):
+    teacher, aya, *_ = _classroom(talk)
+    talk["spoke"]((teacher, 0, 10), (aya, 5, 5.1), (teacher, 5.1, 10))
+    talk["said"]((4.9, 5.05, "мы"), (5.05, 5.2, "сейчас"), (5.2, 6, "посмотрим."))
+    lines = _talk(talk)["transcript"]["lines"]
+    assert [n["speaker_label"] for n in lines] == ["Гульзада Сапарова"]
+    assert lines[0]["text"] == "мы сейчас посмотрим."
