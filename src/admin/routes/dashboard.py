@@ -3035,7 +3035,16 @@ def get_teacher_salary_breakdown(
     event_rows = conducted_q.filter(marked_attendance_clause()).all()
     # Completed, taught by this teacher, but nobody took the register: real work, not yet
     # payable. Shown as its own section instead of silently vanishing from the total.
-    unmarked_rows = conducted_q.filter(~marked_attendance_clause()).all()
+    #
+    # Only lessons of groups that are still running, the same `actionable` rule as the
+    # unmarked-attendance queue on the dashboard. A switched-off or finished group, or one
+    # nobody is enrolled in any more, keeps generating lessons on the schedule; asking the
+    # teacher to mark those listed phantoms (reported 2026-09-11: «Gulzada - Сопровождение»,
+    # «K_Aldiyar SAT 2026», the old Indi groups — 29 "lessons" in one payslip). The paid list
+    # above is untouched: a lesson that *was* marked is paid whatever became of its group.
+    from src.services.operational_groups import actionable_group_clause
+
+    unmarked_rows = conducted_q.filter(~marked_attendance_clause(), actionable_group_clause()).all()
 
     # Rates the CRM computed for this teacher (level × lesson kind × group count). An
     # explicit `lesson_rate` still wins — a manager recalculating an old period needs to be
