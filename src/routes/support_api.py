@@ -12,6 +12,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -297,3 +298,49 @@ def get_student_context(email: str, db: Session = Depends(get_db)):
             "last_active": student.last_activity_date.isoformat() if student.last_activity_date else None,
         },
     }
+
+
+class GroupQuestionAsker(BaseModel):
+    telegram_user_id: Optional[int] = None
+    username: Optional[str] = None
+    name: Optional[str] = None
+
+
+class GroupQuestionIn(BaseModel):
+    """One message from a group chat that mentioned the bot."""
+
+    support_group_id: int
+    text: str = Field(min_length=1, max_length=2000)
+    telegram_chat_id: Optional[int] = None
+    chat_title: Optional[str] = None
+    message_id: Optional[int] = None
+    asker: Optional[GroupQuestionAsker] = None
+
+
+@router.post("/telegram/group-question", dependencies=[Depends(verify_support_api_key)])
+def answer_group_question(body: GroupQuestionIn, db: Session = Depends(get_db)):
+    """What the bot should say in a group's chat (owner, 2026-09-12).
+
+    Support decides when the bot speaks — only when it is tagged, and within its rate limits.
+    The LMS decides what it says, from that group's own lessons, homework and recordings, and
+    never anything about a named student: see :mod:`src.services.group_bot`.
+
+    404 — the chat belongs to no LMS group. 409 — the bot is off, or the group is not in the
+    pilot. Support stays silent on both: that chat simply has no bot.
+    """
+    from src.services import group_bot
+
+    try:
+        return group_bot.answer(
+            db,
+            support_group_id=body.support_group_id,
+            text=body.text,
+            chat_title=body.chat_title,
+            telegram_chat_id=body.telegram_chat_id,
+            message_id=body.message_id,
+            asker=body.asker.model_dump() if body.asker else None,
+        )
+    except group_bot.NotLinked:
+        raise HTTPException(status_code=404, detail="This chat is not linked to an LMS group")
+    except group_bot.SwitchedOff:
+        raise HTTPException(status_code=409, detail="The group bot is off for this group")

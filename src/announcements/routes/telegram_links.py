@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from src.announcements.models import TelegramGroupLink, TelegramLessonInvitation
 from src.config import get_db
 from src.schemas.models import Group, UserInDB
-from src.services import support_client, telegram_invitations
+from src.services import group_bot_settings, support_client, telegram_invitations
 from src.services.operational_groups import operational_group_clause
 from src.utils.permissions import require_role
 
@@ -194,3 +194,29 @@ def confirm_links(body: ConfirmBody, db: Session = Depends(get_db),
         _upsert(db, p.lms_group_id, p.support_group_id, titles[p.support_group_id], current_user.id)
     db.commit()
     return {"linked": len(body.pairs)}
+
+
+class GroupBotSettingsBody(BaseModel):
+    enabled: Optional[bool] = None
+    #: "pilot" — only the chats of teachers with a Workspace account; "all" — every linked chat.
+    scope: Optional[str] = None
+
+
+@router.get("/group-bot/settings")
+def get_group_bot_settings(db: Session = Depends(get_db),
+                           current_user: UserInDB = Depends(require_role(sorted(group_bot_settings.READERS)))):
+    """The switch behind the bot that answers in group chats. The same people who link the chats
+    read it; only an admin flips it."""
+    return group_bot_settings.describe(db)
+
+
+@router.put("/group-bot/settings")
+def put_group_bot_settings(body: GroupBotSettingsBody, db: Session = Depends(get_db),
+                           current_user: UserInDB = Depends(require_role(sorted(group_bot_settings.WRITERS)))):
+    """On: the bot answers when a student tags it in a linked chat — by default only in the
+    chats of the recording pilot's teachers. Off: it says nothing anywhere."""
+    try:
+        group_bot_settings.update(db, current_user, enabled=body.enabled, scope=body.scope)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return group_bot_settings.describe(db)

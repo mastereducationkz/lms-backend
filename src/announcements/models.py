@@ -7,7 +7,9 @@ name). The invitation job reads it every minute; Support only carries the messag
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint,
+)
 
 from src.models.base import Base
 
@@ -57,3 +59,35 @@ class TelegramLessonInvitation(Base):
     __table_args__ = (
         UniqueConstraint("event_id", "lms_group_id", name="uq_lesson_invitation_event_group"),
     )
+
+
+class TelegramGroupQuestion(Base):
+    """One question asked of the bot in a group's chat, and what it answered.
+
+    Every request is written here, answered or not: it is the only place a person can read what
+    the bot has been telling students, and the only record when a question is handed to a curator.
+    The question text is kept as it was typed — including a personal one, which is answered with
+    "ask me in private" and never with any data.
+    """
+
+    __tablename__ = "telegram_group_questions"
+
+    id = Column(Integer, primary_key=True)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    support_group_id = Column(Integer, nullable=False)
+    # Telegram's own ids, which outgrow a 32-bit integer: a supergroup is -100…
+    telegram_chat_id = Column(BigInteger, nullable=True)
+    chat_title = Column(String, nullable=True)
+    message_id = Column(Integer, nullable=True)
+    asker_telegram_id = Column(BigInteger, nullable=True)
+    asker_username = Column(String, nullable=True)
+    asker_name = Column(String, nullable=True)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=True)
+    #: The question was personal, so the answer only pointed at the bot's private chat.
+    private_hint = Column(Boolean, nullable=False, default=False)
+    #: The facts did not cover it; the group's curator was notified.
+    handed_to_curator = Column(Boolean, nullable=False, default=False)
+    #: Which model wrote the answer, or "facts" when the plain template did.
+    model = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
