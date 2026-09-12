@@ -138,6 +138,35 @@ def test_a_model_that_does_not_answer_falls_back_to_the_facts(chat, monkeypatch)
     assert _rows(chat["db"])[0].model == "facts"
 
 
+def test_a_capabilities_question_describes_scope_instead_of_the_next_lesson(chat):
+    chat["lesson"](chat["linked"], days_ahead=1)
+
+    out = chat["ask"]("что ты умеешь?")
+
+    assert "расписанием" in out["answer"]
+    assert "Ближайший урок" not in out["answer"]
+    assert _rows(chat["db"])[0].model == "facts"
+
+
+def test_a_thank_you_reply_is_silent(chat):
+    chat["lesson"](chat["linked"], days_ahead=1)
+
+    out = chat["ask"]("Пасыба")
+
+    assert out["silent"] is True and out["answer"] is None
+    row = _rows(chat["db"])[0]
+    assert row.answer is None and row.handed_to_curator is False
+
+
+def test_a_weekly_mock_question_is_handed_to_the_curator_not_answered_as_a_lesson(chat):
+    chat["lesson"](chat["linked"], days_ahead=1)
+
+    out = chat["ask"]("когда будет следующий викли мок тест?")
+
+    assert out["handed_to_curator"] is True
+    assert out["answer"] == group_bot.CURATOR_REPLY
+
+
 # ── what it refuses ──────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("question", [
@@ -177,11 +206,11 @@ def test_a_question_the_facts_do_not_answer_goes_to_the_curator(chat):
     assert "перенести урок" in note.content and note.related_id == out["question_id"]
 
 
-def test_a_group_with_lessons_answers_instead_of_handing_over(chat):
+def test_an_unrelated_question_with_lessons_still_goes_to_the_curator(chat):
     chat["lesson"](chat["linked"], days_ahead=1)
     out = chat["ask"]("а можно перенести урок на другой день?")
-    assert out["handed_to_curator"] is False
-    assert "Ближайший урок" in out["answer"]
+    assert out["handed_to_curator"] is True
+    assert out["answer"] == group_bot.CURATOR_REPLY
 
 
 # ── who it answers at all ────────────────────────────────────────────────────────────────

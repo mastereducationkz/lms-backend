@@ -1808,6 +1808,25 @@ class AttendanceInputSchema(BaseModel):
 class BulkAttendanceInputSchema(BaseModel):
     updates: List[AttendanceInputSchema]
 
+
+_CANCELLATION_IS_LESSON_LEVEL = (
+    "Отмена относится ко всему уроку. Создайте запрос на отмену урока, "
+    "а не меняйте посещаемость отдельного ученика."
+)
+
+
+def _reject_individual_cancellation(status: Optional[str]) -> None:
+    """Keep the attendance register from impersonating a lesson cancellation.
+
+    ``Attendance.status`` has a historical ``cancelled`` value so an actually
+    cancelled lesson can still be rendered in old registers.  It is not a
+    per-student mark: a real cancellation deactivates ``Event`` through the
+    approved lesson-request flow and marks the whole roster atomically.
+    """
+    if (status or "").strip().lower() == "cancelled":
+        raise HTTPException(status_code=400, detail=_CANCELLATION_IS_LESSON_LEVEL)
+
+
 @router.post("/curator/attendance/bulk")
 def update_attendance_bulk(
     data: BulkAttendanceInputSchema,
@@ -1824,6 +1843,12 @@ def update_attendance_bulk(
     # (tests/test_curator_grading_removed.py). head_curator deliberately keeps it.
     if current_user.role not in ["admin", "teacher", "head_teacher", "head_curator"]:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    # Validate the complete batch before changing its first row.  Otherwise a
+    # bad "cancelled" cell late in a save could leave the preceding cells
+    # changed while the browser sees an error.
+    for item in data.updates:
+        _reject_individual_cancellation(item.status)
 
     from src.services.event_service import EventService
 
@@ -1853,18 +1878,16 @@ def update_attendance_bulk(
             att_status = ep_status_to_attendance_status(item.status)
             # Reported, never silently dropped: this loop already `continue`s past rows it
             # cannot write, and a grid that says «сохранено» while quietly discarding half a
-            # column is how people stop trusting the screen. Cancelling stays allowed — you
-            # call a lesson off before it happens, not after.
-            if att_status != "cancelled":
-                future_reason = AttendanceService.event_is_unmarkable_because_future(
-                    db, real_event_id
+            # column is how people stop trusting the screen.
+            future_reason = AttendanceService.event_is_unmarkable_because_future(
+                db, real_event_id
+            )
+            if future_reason:
+                skipped_future.append(
+                    {"event_id": real_event_id, "student_id": item.student_id,
+                     "reason": future_reason}
                 )
-                if future_reason:
-                    skipped_future.append(
-                        {"event_id": real_event_id, "student_id": item.student_id,
-                         "reason": future_reason}
-                    )
-                    continue
+                continue
             AttendanceService.upsert_for_event(
                 db=db,
                 event_id=real_event_id,
@@ -2005,6 +2028,8 @@ def update_attendance(
     # Curators are READ-ONLY on attendance - see update_attendance_bulk.
     if current_user.role not in ["admin", "head_curator", "teacher", "head_teacher"]:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    _reject_individual_cancellation(data.status)
         
     group = db.query(Group).filter(Group.id == data.group_id).first()
     if not group:
@@ -2027,7 +2052,7 @@ def update_attendance(
         if not real_event_id:
             raise HTTPException(status_code=404, detail="Event could not be resolved/materialized")
 
-        # Honor an explicit UI status (late / cancelled / missed / attended) when
+        # Honor an explicit UI status (late / missed / attended) when
         # provided; fall back to score-based present/absent for legacy callers
         # that only send a score with the default "present" status.
         if data.status and data.status != "present":
@@ -2037,14 +2062,12 @@ def update_attendance(
             att_status = "present" if data.score > 0 else "absent"
             att_score = data.score
         # A lesson that has not happened cannot have a register — see
-        # AttendanceService.event_is_unmarkable_because_future. Cancelling is exempt:
-        # calling off a future lesson is exactly what you do ahead of time.
-        if att_status != "cancelled":
-            future_reason = AttendanceService.event_is_unmarkable_because_future(
-                db, real_event_id
-            )
-            if future_reason:
-                raise HTTPException(status_code=400, detail=future_reason)
+        # AttendanceService.event_is_unmarkable_because_future.
+        future_reason = AttendanceService.event_is_unmarkable_because_future(
+            db, real_event_id
+        )
+        if future_reason:
+            raise HTTPException(status_code=400, detail=future_reason)
         AttendanceService.upsert_for_event(
             db=db,
             event_id=real_event_id,

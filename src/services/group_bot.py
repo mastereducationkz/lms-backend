@@ -89,6 +89,43 @@ PRIVATE_REPLY = (
 CURATOR_REPLY = "Не могу ответить на это здесь — передал куратору группы, с вами свяжутся."
 NOTHING_YET = "Пока нечего показать по этой группе — расписание и задания появятся здесь."
 
+# A reply to one of the bot's announcements is deliberately an invocation, but
+# it is not necessarily a question.  These messages should leave the room
+# quiet: a bot replying to «спасибо» is more intrusive than helpful.
+_COURTESY = re.compile(
+    r"^\s*(?:спасибо|спс|пас\w*|рахмет|рақмет|thanks|thx|ok|okay|понятно|ясно|"
+    r"👍|🙏|❤|❤️|\+)\s*[!.…]*\s*$",
+    re.IGNORECASE,
+)
+_CAPABILITIES = re.compile(
+    r"(?:что|ч[её])\s+(?:ты\s+)?умеешь|(?:на\s+какие\s+)?вопросы\s+"
+    r"(?:ты\s+)?(?:можешь\s+)?отвечать|what\s+can\s+you\s+do|"
+    r"сен\s+не\s+істей\s+аласың|не\s+істей\s+аласың",
+    re.IGNORECASE,
+)
+# Weekly mocks/tests are not in the facts supplied to this bot.  Naming one
+# must never accidentally fall through to the next ordinary lesson.
+_UNSUPPORTED_TOPIC = re.compile(
+    r"\b(?:мок|mock|викл\w*|weekly|пробн\w*|тест\w*|exam\w*|экзам\w*)",
+    re.IGNORECASE,
+)
+_OUT_OF_SCOPE_REQUEST = re.compile(
+    r"перенес\w*|отмен\w*|замен\w*|reschedul\w*|cancel\w*|change\s+(?:the\s+)?lesson",
+    re.IGNORECASE,
+)
+_SCHEDULE_TOPIC = re.compile(
+    r"(?:урок\w*|занят\w*|расписани\w*|встреч\w*|созвон\w*|meet|"
+    r"сабақ\w*|кесте\w*|lesson\w*|schedule\w*)|"
+    r"(?:(?:когда|во\s+сколько|қашан|қай\s+кезде|when|what\s+time).{0,40}"
+    r"(?:следующ|ближайш|next|upcoming|келесі))",
+    re.IGNORECASE,
+)
+_HOMEWORK_TOPIC = re.compile(
+    r"дз|домашк\w*|домашн\w*|задани\w*|дедлайн\w*|homework|үй\s+тапсырма",
+    re.IGNORECASE,
+)
+_RECORDING_TOPIC = re.compile(r"запис\w*|recording\w*|видео|жазба", re.IGNORECASE)
+
 SYSTEM_PROMPT = (
     "Ты — помощник учебного центра Master Education в групповом чате учеников.\n"
     "Отвечай ТОЛЬКО по данным из блока ФАКТЫ. Ничего не придумывай: ни дат, ни ссылок, ни имён.\n"
@@ -209,23 +246,57 @@ def _has_anything(facts: dict) -> bool:
 
 # ── the answer ───────────────────────────────────────────────────────────────────────────
 
+def is_courtesy(text: str) -> bool:
+    """A thank-you / acknowledgement should not restart a group conversation."""
+    return bool(_COURTESY.fullmatch(text or ""))
+
+
+def capabilities_reply(question: str) -> str:
+    """Describe the deliberately small, safe group-chat scope without an LLM."""
+    text = (question or "").lower()
+    if any(char in text for char in "әіңғқұүө"):
+        return (
+            "Топтың кестесі, үй тапсырмасы мен мерзімдері және сабақ жазбалары туралы "
+            "көмектесе аламын. Жеке сұрақтар бойынша маған жеке жазыңыз."
+        )
+    if re.search(r"\b(?:what|can|you|do)\b", text):
+        return (
+            "I can help with this group's schedule, homework and deadlines, and lesson recordings. "
+            "For personal questions, please message me privately."
+        )
+    return (
+        "Могу помочь с расписанием группы, домашними заданиями и сроками, а также с записями уроков. "
+        "По личным вопросам напишите мне в личные сообщения."
+    )
+
+
+def has_supported_topic(question: str) -> bool:
+    """Whether the fact bundle can answer this question without guessing."""
+    if _UNSUPPORTED_TOPIC.search(question or "") or _OUT_OF_SCOPE_REQUEST.search(question or ""):
+        return False
+    return bool(
+        _SCHEDULE_TOPIC.search(question or "")
+        or _HOMEWORK_TOPIC.search(question or "")
+        or _RECORDING_TOPIC.search(question or "")
+    )
+
 def _plain_answer(facts: dict, question: str) -> Optional[str]:
     """The answer without a model: the part of the facts the question is about.
 
     Used when the model is unreachable or unconfigured — a bot that says "ближайший урок: …"
     is worth more than one that says nothing at all.
     """
-    text = (question or "").lower()
-    wants_homework = any(word in text for word in ("дз", "домашк", "домашн", "задани", "дедлайн",
-                                                   "homework", "үй тапсырма"))
-    wants_recording = any(word in text for word in ("запис", "recording", "видео", "жазба"))
+    text = question or ""
+    wants_homework = bool(_HOMEWORK_TOPIC.search(text))
+    wants_recording = bool(_RECORDING_TOPIC.search(text))
+    wants_schedule = bool(_SCHEDULE_TOPIC.search(text))
     if wants_homework and facts["домашние_задания"]:
         items = "; ".join(f"{t['название']} — до {t['срок']}" for t in facts["домашние_задания"][:3])
         return f"Домашние задания: {items}."
     if wants_recording and facts["записи_уроков"]:
         last = facts["записи_уроков"][0]
         return f"Запись последнего урока ({last['урок']}): {last['ссылка']} — нужен вход в LMS."
-    if facts["ближайшие_уроки"]:
+    if wants_schedule and facts["ближайшие_уроки"]:
         lesson = facts["ближайшие_уроки"][0]
         link = f" Ссылка: {lesson['ссылка_meet']}" if lesson["ссылка_meet"] else ""
         return f"Ближайший урок — {lesson['когда']} (время Алматы).{link}"
@@ -300,9 +371,29 @@ def answer(db, *, support_group_id: int, text: str, chat_title: Optional[str] = 
         return {"answer": PRIVATE_REPLY, "private_hint": True, "handed_to_curator": False,
                 "question_id": row.id}
 
+    if is_courtesy(question):
+        # It was addressed to us because it replied to a bot message, but it is
+        # not a question.  Keep an audit row without posting or bothering the
+        # curator, and let Support leave the chat silent.
+        db.add(row)
+        db.commit()
+        return {"answer": None, "silent": True, "private_hint": False,
+                "handed_to_curator": False, "question_id": row.id}
+
+    if _CAPABILITIES.search(question):
+        reply = capabilities_reply(question)
+        row.answer, row.model = reply, "facts"
+        db.add(row)
+        db.commit()
+        return {"answer": reply, "private_hint": False, "handed_to_curator": False,
+                "question_id": row.id}
+
     facts = group_facts(db, group, now)
     reply, model_used = None, None
-    if _has_anything(facts):
+    # The model has no tools and only this fact bundle.  Do not ask it to turn
+    # an unrelated sentence into a timetable answer: unanswered things go to
+    # the curator, exactly as the group-chat policy promises.
+    if has_supported_topic(question) and _has_anything(facts):
         key = model_key()
         if key:
             reply, answered = _ask_model(facts, question, key)

@@ -67,7 +67,6 @@ def get_my_events(
         
         # Get courses accessible via user's groups
         if user_group_ids:
-            from src.schemas.models import CourseGroupAccess
             group_access = db.query(CourseGroupAccess).filter(
                 CourseGroupAccess.group_id.in_(user_group_ids),
                 CourseGroupAccess.is_active == True
@@ -318,7 +317,6 @@ def get_my_events(
         # Mapping course_id -> group_ids for current context
         course_to_groups = {}
         if schedule_group_ids:
-            from src.schemas.models import CourseGroupAccess
             accesses = db.query(CourseGroupAccess).filter(
                 CourseGroupAccess.group_id.in_(schedule_group_ids),
                 CourseGroupAccess.is_active == True
@@ -421,7 +419,6 @@ def get_calendar_events(
         
         # Get courses accessible via user's groups
         if user_group_ids:
-            from src.schemas.models import CourseGroupAccess
             group_access = db.query(CourseGroupAccess).filter(
                 CourseGroupAccess.group_id.in_(user_group_ids),
                 CourseGroupAccess.is_active == True
@@ -614,7 +611,6 @@ def get_calendar_events(
         # Mapping course_id -> group_ids for current context
         course_to_groups = {}
         if user_group_ids:
-            from src.schemas.models import CourseGroupAccess
             accesses = db.query(CourseGroupAccess).filter(
                 CourseGroupAccess.group_id.in_(user_group_ids),
                 CourseGroupAccess.is_active == True
@@ -824,7 +820,6 @@ def get_upcoming_events(
         
         # Get courses accessible via user's groups
         if user_group_ids:
-            from src.schemas.models import CourseGroupAccess
             group_access = db.query(CourseGroupAccess).filter(
                 CourseGroupAccess.group_id.in_(user_group_ids),
                 CourseGroupAccess.is_active == True
@@ -896,7 +891,6 @@ def get_upcoming_events(
     # Mapping course_id -> group_ids for current context
     course_to_groups = {}
     if user_group_ids:
-        from src.schemas.models import CourseGroupAccess
         accesses = db.query(CourseGroupAccess).filter(
             CourseGroupAccess.group_id.in_(user_group_ids),
             CourseGroupAccess.is_active == True
