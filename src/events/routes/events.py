@@ -385,10 +385,14 @@ def get_my_events(
     return result[:limit]
 
 @router.get("/calendar", response_model=List[EventSchema])
-@cached(namespace="events:calendar", ttl=30, key_args=("year", "month"))
+@cached(namespace="events:calendar", ttl=30, key_args=("year", "month", "include_finished"))
 def get_calendar_events(
     year: int = Query(..., ge=2020, le=2030),
     month: int = Query(..., ge=1, le=12),
+    # Default hides a finished group everywhere, past lessons included — recordings now
+    # live on their own calendar (/recordings), so this one no longer has to double as
+    # the archive. The toggle is the opt-in "show archived/finished groups too" view.
+    include_finished: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency)
 ):
@@ -492,9 +496,9 @@ def get_calendar_events(
         Event.start_datetime >= start_date,
         Event.start_datetime <= end_date,
         Event.is_recurring == False, # Only non-recurring instances
-        # The CRM's rule for what is still being taught, applied to lessons still ahead.
-        # Past lessons stay: this calendar is also where students find their recordings.
-        event_belongs_on_calendar_clause(now),
+        # The CRM's rule for what is still being taught. Past lessons stay unless the
+        # viewer asked to see finished groups too — see event_belongs_on_calendar_clause.
+        event_belongs_on_calendar_clause(now, include_past=include_finished),
     ).distinct().options(
         joinedload(Event.creator),
         joinedload(Event.event_groups).joinedload(EventGroup.group),
@@ -575,12 +579,13 @@ def get_calendar_events(
             joinedload(LessonSchedule.lesson)
         ).order_by(LessonSchedule.scheduled_at).all()
 
-        # Same rule as the events above: a planned lesson still ahead needs a running group.
-        # Planned lessons last an hour (see ``end_dt`` below).
-        ahead = {s.id: s.group_id for s in schedules if s.scheduled_at + timedelta(minutes=60) > now}
-        if ahead:
-            running = operational_group_ids(db, within=set(ahead.values()))
-            schedules = [s for s in schedules if s.id not in ahead or s.group_id in running]
+        # Same rule as the events above: a planned lesson needs a running group. Unlike a
+        # real Event row, a schedule has no "it already happened" carve-out to fall back
+        # on, so include_finished is a plain on/off here rather than a past/future split.
+        if not include_finished:
+            group_ids_in_range = {s.group_id for s in schedules}
+            running = operational_group_ids(db, within=group_ids_in_range) if group_ids_in_range else set()
+            schedules = [s for s in schedules if s.group_id in running]
 
         # Pre-calculate lesson numbers for each group
         all_group_schedules = db.query(LessonSchedule).filter(

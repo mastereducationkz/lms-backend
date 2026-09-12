@@ -53,6 +53,40 @@ def test_the_calendar_drops_a_stopped_groups_next_lesson_and_keeps_its_past(worl
     assert taught.id in _calendar(world, taught), "a lesson that happened stays on the calendar"
 
 
+def test_include_finished_false_drops_a_stopped_groups_past_lesson_too(world, two_groups):
+    """The calendar's own opt-out (2026-09-12): recordings have their own calendar now, so
+    the default HTTP behaviour — ``include_finished=False`` — no longer keeps the archive."""
+    from src.events.routes.events import get_calendar_events
+
+    _, stopped = two_groups
+    taught = world["lesson"](stopped, days_ahead=-3)
+
+    when = taught.start_datetime
+    shown = {
+        e.id for e in get_calendar_events.__wrapped__(
+            year=when.year, month=when.month, include_finished=False,
+            db=world["db"], current_user=world["teacher"],
+        )
+    }
+    assert taught.id not in shown
+
+
+def test_include_finished_true_restores_it(world, two_groups):
+    from src.events.routes.events import get_calendar_events
+
+    _, stopped = two_groups
+    taught = world["lesson"](stopped, days_ahead=-3)
+
+    when = taught.start_datetime
+    shown = {
+        e.id for e in get_calendar_events.__wrapped__(
+            year=when.year, month=when.month, include_finished=True,
+            db=world["db"], current_user=world["teacher"],
+        )
+    }
+    assert taught.id in shown
+
+
 def test_the_dashboards_upcoming_list_drops_it_too(world, two_groups):
     from src.events.routes.events import get_my_events
 

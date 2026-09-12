@@ -139,7 +139,7 @@ def event_has_operational_group_clause():
     )
 
 
-def event_belongs_on_calendar_clause(now: datetime):
+def event_belongs_on_calendar_clause(now: datetime, *, include_past: bool = True):
     """What an LMS calendar draws: the whole past, and only a future that is still running.
 
     The CRM's calendars are operational screens and apply
@@ -155,6 +155,11 @@ def event_belongs_on_calendar_clause(now: datetime):
     attached to no group has no group to ask — both are left alone rather than guessed at.
 
     ``now`` is naive UTC, like every stored event time.
+
+    Pass ``include_past=False`` for a view that wants a finished group gone entirely, its past
+    lessons included — the main calendar's default since 2026-09-12, now that recordings have
+    their own dedicated calendar (``/recordings``) and no longer need this one to stay reachable.
+    Every other caller keeps the archive behaviour above; only that one view opts out.
     """
     from sqlalchemy.orm import aliased
 
@@ -162,12 +167,10 @@ def event_belongs_on_calendar_clause(now: datetime):
 
     any_link = aliased(EventGroup)
     has_no_group = ~exists().where(any_link.event_id == Event.id).correlate(Event)
-    return or_(
-        Event.event_type != "class",
-        Event.end_datetime <= now,
-        has_no_group,
-        event_has_operational_group_clause(),
-    )
+    clauses = [Event.event_type != "class", has_no_group, event_has_operational_group_clause()]
+    if include_past:
+        clauses.insert(1, Event.end_datetime <= now)
+    return or_(*clauses)
 
 
 def operational_group_ids(
