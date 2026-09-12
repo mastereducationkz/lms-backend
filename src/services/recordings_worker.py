@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 # trail of abandoned conferences.
 SCHEDULE_HORIZON_DAYS = 3
 
+# A breath between new rooms: Meet allows 100 a minute per account, and a burst of them also
+# starves the space patches that follow each one.
+ROOM_CREATE_PAUSE = 0.5
+
 POLL_INTERVAL_SECONDS = 300
 
 # How long one tick keeps starting new ingests before handing back to links and polling.
@@ -94,11 +98,23 @@ def ensure_upcoming_meet_links(db, limit: int = 50) -> int:
         try:
             if meet_scheduling.ensure_meet_link(db, lesson):
                 created += 1
+                time.sleep(ROOM_CREATE_PAUSE)
         except Exception as e:
             # One lesson failing (a deleted teacher, a quota blip) must not stop the rest.
             db.rollback()
+            if rate_limited(e):
+                # Google allows so many new rooms a minute (100 per user). Four teachers joining
+                # the pilot at once asked for 27 at once; the rest are made on the next ticks,
+                # long before their lessons.
+                logger.info("Meet's room quota is spent for now — %s made, the rest next tick", created)
+                break
             logger.warning("lesson %s: could not create Meet link: %s", lesson.id, e)
     return created
+
+
+def rate_limited(error: Exception) -> bool:
+    """Google saying "too many, too fast" — the one failure worth pausing the whole loop for."""
+    return getattr(getattr(error, "resp", None), "status", None) == 429 or "429" in str(error)[:120]
 
 
 def poll_for_recordings(db) -> int:

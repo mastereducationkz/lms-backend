@@ -44,7 +44,9 @@ logger = logging.getLogger(__name__)
 # Rooms are created three days ahead (recordings_worker.SCHEDULE_HORIZON_DAYS); the switch
 # reaches all of them.
 ROOM_HORIZON = timedelta(days=3)
-ROOMS_PER_TICK = 200
+# Each room is a get and a patch against the same per-minute Meet quota the room *creation*
+# spends, so this stays modest: the rooms are set days before their lessons.
+ROOMS_PER_TICK = 40
 
 SPEECH_LOOKBACK = timedelta(hours=72)
 # Meet lists a call's transcript a little after the call; with none by then, there was none.
@@ -165,6 +167,9 @@ def sync_rooms(db, now: Optional[datetime] = None) -> int:
             set_room_transcription(meeting_url, want)
             changed += 1
         except Exception as e:
+            if _http_status(e) == 429:
+                logger.info("Meet's quota is spent for now — %s room(s) set, the rest next tick", changed)
+                break
             if _http_status(e) not in (403, 404) and not isinstance(e, ValueError):
                 logger.warning("lesson %s: could not switch transcription %s, will retry: %s",
                                event_id, "on" if want else "off", e)

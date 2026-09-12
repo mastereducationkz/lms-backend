@@ -496,3 +496,47 @@ def test_recordings_wait_when_the_disk_is_nearly_full(monkeypatch):
 
     monkeypatch.setattr(recording_ingest.shutil, "disk_usage", lambda path: usage(1, 1, 50 * 1024 ** 3))
     assert recording_ingest.room_on_disk() is True
+
+
+def test_meets_room_quota_pauses_the_round_instead_of_burning_it(monkeypatch):
+    """Google allows 100 new rooms a minute. Four teachers joining the pilot at once asked for
+    27 (2026-09-12) and the rest came back 429 — those lessons are days away, so the loop stops
+    and takes them next tick instead of hammering a spent quota."""
+    class _Quota(Exception):
+        resp = type("R", (), {"status": 429})()
+
+    made = []
+    monkeypatch.setattr(recordings_worker, "ROOM_CREATE_PAUSE", 0)
+
+    def ensure(_db, lesson):
+        if len(made) >= 2:
+            raise _Quota("Quota exceeded for quota metric 'Meeting space create'")
+        made.append(lesson.id)
+        return "https://meet.google.com/abc-defg-hij"
+
+    monkeypatch.setattr(recordings_worker.meet_scheduling, "ensure_meet_link", ensure)
+    lessons = [type("L", (), {"id": i})() for i in range(6)]
+
+    class _Lessons(_DB):
+        def query(self, *args, **kwargs):
+            return self
+
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def order_by(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def all(self):
+            return lessons
+
+    assert recordings_worker.ensure_upcoming_meet_links(_Lessons()) == 2
+    assert made == [0, 1], "it stopped at the quota rather than trying every remaining lesson"
+    assert recordings_worker.rate_limited(_Quota("429")) is True
+    assert recordings_worker.rate_limited(RuntimeError("teacher was deleted")) is False
