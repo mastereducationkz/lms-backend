@@ -124,6 +124,22 @@ def _narrow(query, current_user, *, q, group_id, teacher_id, status):
     return query
 
 
+def _time_narrow(query, *, period, day):
+    """Apply the library's date range once, so every recording view agrees.
+
+    The folder browser is navigation metadata, not a second authority about which lessons
+    exist. Keeping this beside ``_narrow`` prevents a completed group from appearing in one
+    view and silently disappearing in the other.
+    """
+    if day is not None:
+        start, end = _almaty_day_starts(day, 1)
+        return query.filter(Event.start_datetime >= start, Event.start_datetime < end)
+    if period in PERIOD_DAYS:
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=PERIOD_DAYS[period])
+        return query.filter(Event.start_datetime >= since)
+    return query
+
+
 @router.get("")
 def list_recordings(
     limit: int = Query(24, ge=1, le=PAGE_MAX),
@@ -139,12 +155,7 @@ def list_recordings(
 ):
     scoped = _scope(db, current_user)
     filtered = _narrow(scoped, current_user, q=q, group_id=group_id, teacher_id=teacher_id, status=status)
-    if day is not None:
-        start, end = _almaty_day_starts(day, 1)
-        filtered = filtered.filter(Event.start_datetime >= start, Event.start_datetime < end)
-    elif period in PERIOD_DAYS:
-        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=PERIOD_DAYS[period])
-        filtered = filtered.filter(Event.start_datetime >= since)
+    filtered = _time_narrow(filtered, period=period, day=day)
 
     page = filtered
     if cursor:
@@ -201,6 +212,101 @@ def list_recordings(
     return response
 
 
+def _group_state(*, is_active, is_over) -> str:
+    """Lifecycle labels for recording history; neither stopped state removes a folder."""
+    if is_over:
+        return "finished"
+    if is_active is False:
+        return "archived"
+    return "active"
+
+
+@router.get("/folders")
+def recording_folders(
+    q: Optional[str] = Query(None, max_length=100),
+    group_id: Optional[int] = None,
+    teacher_id: Optional[int] = None,
+    period: Literal["7d", "30d", "all"] = "all",
+    status: Optional[Literal["ready", "pending", "failed"]] = None,
+    day: Optional[Date] = Query(None, alias="date", description="One Almaty day, YYYY-MM-DD; wins over period"),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """A compact, access-controlled Teacher → Group index for the folders view.
+
+    It intentionally has no media URLs. Opening a group still asks the existing paged
+    ``GET /recordings`` endpoint, which is the one place that creates a viewer-scoped preview
+    token. The teacher is the instructor who actually taught the occurrence; the group's
+    regular teacher accompanies any substituted recordings so the history stays auditable.
+    """
+    filtered = _time_narrow(
+        _narrow(_scope(db, current_user), current_user,
+                q=q, group_id=group_id, teacher_id=teacher_id, status=status),
+        period=period, day=day,
+    )
+    taught_by = aliased(UserInDB)
+    regular_teacher = aliased(UserInDB)
+    rows = (
+        filtered
+        .join(EventGroup, EventGroup.event_id == Event.id)
+        .join(Group, Group.id == EventGroup.group_id)
+        .outerjoin(taught_by, taught_by.id == Event.teacher_id)
+        .outerjoin(regular_teacher, regular_teacher.id == Group.teacher_id)
+        .with_entities(
+            Event.id,
+            Event.teacher_id, taught_by.name,
+            Group.id, Group.name, Group.is_active, Group.is_over,
+            Group.teacher_id, regular_teacher.name,
+        )
+        .all()
+    )
+
+    # There is one row per recording/group association. Aggregate in Python rather than
+    # relying on database-specific boolean SUM semantics; this keeps it just as portable as
+    # the current library queries and correctly preserves multi-group lessons.
+    teachers: dict = {}
+    for (_event_id, taught_id, taught_name, gid, group_name, is_active, is_over,
+         regular_id, regular_name) in rows:
+        teacher_key = taught_id if taught_id is not None else "unassigned"
+        teacher = teachers.setdefault(teacher_key, {
+            "id": taught_id,
+            "name": taught_name,
+            "video_count": 0,
+            "groups": {},
+        })
+        teacher["video_count"] += 1
+        group = teacher["groups"].setdefault(gid, {
+            "id": gid,
+            "name": group_name,
+            "state": _group_state(is_active=is_active, is_over=is_over),
+            "video_count": 0,
+            "substitution_count": 0,
+            "regular_teacher": (
+                {"id": regular_id, "name": regular_name} if regular_id is not None else None
+            ),
+        })
+        group["video_count"] += 1
+        if taught_id is not None and regular_id is not None and taught_id != regular_id:
+            group["substitution_count"] += 1
+
+    state_order = {"active": 0, "finished": 1, "archived": 2}
+    result = []
+    for teacher in teachers.values():
+        groups = sorted(
+            teacher["groups"].values(),
+            key=lambda group: (state_order[group["state"]], group["name"].casefold(), group["id"]),
+        )
+        result.append({
+            "id": teacher["id"],
+            "name": teacher["name"],
+            "video_count": teacher["video_count"],
+            "group_count": len(groups),
+            "groups": groups,
+        })
+    result.sort(key=lambda teacher: ((teacher["name"] or "").casefold(), teacher["id"] or -1))
+    return {"teachers": result}
+
+
 @router.get("/days")
 def recording_days(
     month: Optional[str] = Query(None, max_length=7, description="YYYY-MM; default this Almaty month"),
@@ -241,7 +347,7 @@ def _facets(db: Session, scoped) -> dict:
     """
     ids = scoped.with_entities(Event.id).subquery()
     groups = (
-        db.query(Group.id, Group.name)
+        db.query(Group.id, Group.name, Group.is_active, Group.is_over)
         .join(EventGroup, EventGroup.group_id == Group.id)
         .filter(EventGroup.event_id.in_(select(ids.c.id)))
         .distinct()
@@ -256,6 +362,9 @@ def _facets(db: Session, scoped) -> dict:
         .all()
     )
     return {
-        "groups": [{"id": gid, "name": name} for gid, name in groups],
+        "groups": [
+            {"id": gid, "name": name, "is_active": is_active, "is_over": is_over}
+            for gid, name, is_active, is_over in groups
+        ],
         "teachers": [{"id": uid, "name": name} for uid, name in teachers],
     }

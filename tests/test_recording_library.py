@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 import pytest
 from fastapi import HTTPException
 
-from src.events.routes.recording_library import list_recordings, recording_days
+from src.events.routes.recording_library import list_recordings, recording_days, recording_folders
 from src.schemas.models import LessonRecording
 from tests.test_operational_groups import _user, db, world  # noqa: F401 - fixtures
 
@@ -25,6 +25,13 @@ def _days(db, user, **kw):
     params = dict(month=None, q=None, group_id=None, teacher_id=None, status=None)
     params.update(kw)
     return recording_days(db=db, current_user=user, **params)
+
+
+def _folders(db, user, **kw):
+    """The compact Teacher → Group index used by the folder browser."""
+    params = dict(q=None, group_id=None, teacher_id=None, period="all", status=None, day=None)
+    params.update(kw)
+    return recording_folders(db=db, current_user=user, **params)
 
 
 @pytest.fixture
@@ -145,6 +152,38 @@ def test_facets_ignore_the_active_filter(library):
     admin = _user(db, "admin")
     response = _list(db, admin, group_id=library["sat"].id)
     assert len(response["facets"]["groups"]) == 2
+
+
+def test_folder_index_keeps_completed_groups_and_counts_substitutions(library):
+    """The navigation index is server-side, keeps history, and attributes a cover lesson honestly."""
+    db, world = library["db"], library["world"]
+    substitute = _user(db, "teacher")
+    library["ielts"].is_over = True
+    library["lessons"]["ielts"].teacher_id = substitute.id
+    library["lessons"]["ielts_failed"].teacher_id = substitute.id
+    db.flush()
+
+    tree = _folders(db, _user(db, "admin"))
+    covered = next(node for node in tree["teachers"] if node["id"] == substitute.id)
+    group = next(group for group in covered["groups"] if group["id"] == library["ielts"].id)
+
+    assert group["state"] == "finished"
+    assert group["video_count"] == 2
+    assert group["substitution_count"] == 2
+    assert group["regular_teacher"] == {"id": world["teacher"].id, "name": world["teacher"].name}
+
+
+def test_folder_index_uses_the_same_scope_and_filters_as_the_cards(library):
+    db, lessons = library["db"], library["lessons"]
+    student = library["sat_student"]
+
+    tree = _folders(db, student)
+    assert sum(teacher["video_count"] for teacher in tree["teachers"]) == 2
+    assert {group["id"] for teacher in tree["teachers"] for group in teacher["groups"]} == {library["sat"].id}
+
+    filtered = _folders(db, _user(db, "admin"), group_id=library["ielts"].id, status="ready")
+    assert sum(teacher["video_count"] for teacher in filtered["teachers"]) == 1
+    assert lessons["ielts"].id in _ids(_list(db, _user(db, "admin"), group_id=library["ielts"].id, status="ready"))
 
 
 def test_previews_are_signed_for_the_viewer_and_only_when_watchable(library):
