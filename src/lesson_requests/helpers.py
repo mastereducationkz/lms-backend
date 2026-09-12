@@ -361,6 +361,13 @@ def apply_substitution(db: Session, lr: LessonRequest, resolver_id: int) -> None
     )
     db.flush()
 
+    from src.services import telegram_lesson_notices
+
+    telegram_lesson_notices.queue_for_request(
+        db, lr, event, telegram_lesson_notices.SUBSTITUTED,
+        old_start=event.start_datetime, old_teacher_id=before_teacher_id, new_teacher_id=new_teacher_id,
+    )
+
 
 def apply_reschedule(db: Session, lr: LessonRequest, resolver_id: int) -> None:
     event_id = lr.event_id
@@ -377,10 +384,18 @@ def apply_reschedule(db: Session, lr: LessonRequest, resolver_id: int) -> None:
     if event_id and lr.new_datetime:
         event = db.query(Event).filter(Event.id == event_id).first()
         if event:
+            old_start = event.start_datetime
             duration = event.end_datetime - event.start_datetime
             event.start_datetime = lr.new_datetime
             event.end_datetime = lr.new_datetime + duration
             db.flush()
+
+            from src.services import telegram_lesson_notices
+
+            telegram_lesson_notices.queue_for_request(
+                db, lr, event, telegram_lesson_notices.RESCHEDULED,
+                old_start=old_start, new_start=event.start_datetime,
+            )
 
     if lr.lesson_schedule_id and lr.new_datetime:
         schedule = db.query(LessonSchedule).filter(LessonSchedule.id == lr.lesson_schedule_id).first()
@@ -614,6 +629,12 @@ def apply_cancel(db: Session, lr: LessonRequest, resolver_id: int) -> None:
     if was_active:
         event.is_active = False
         db.flush()
+
+        from src.services import telegram_lesson_notices
+
+        telegram_lesson_notices.queue_for_request(
+            db, lr, event, telegram_lesson_notices.CANCELLED, old_start=event.start_datetime,
+        )
 
     # Mark every group student's attendance for this lesson as "cancelled"
     # so it surfaces in Attendance / leaderboard grids and is excluded from

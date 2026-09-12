@@ -91,3 +91,43 @@ class TelegramGroupQuestion(Base):
     #: Which model wrote the answer, or "facts" when the plain template did.
     model = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
+
+
+class TelegramLessonChangeNotice(Base):
+    """One notice to one group's chat that an approved lesson request moved, cancelled, or
+    handed a lesson to a substitute (owner, 2026-09-12).
+
+    Queued inside the same transaction that applies the change — see
+    :mod:`src.lesson_requests.helpers` — so a notice exists if and only if the change it
+    describes was actually committed. A lesson shared by several groups (``EventGroup``) gets
+    one row per linked chat; the ``(lesson_request_id, lms_group_id)`` row is the job's memory
+    and its audit log, the same shape as :class:`TelegramLessonInvitation`.
+
+    The old time/teacher is snapshotted here because by the time this is sent the event already
+    reads as its new self — the row is the only place "what changed" still exists.
+    """
+
+    __tablename__ = "telegram_lesson_change_notices"
+
+    id = Column(Integer, primary_key=True)
+    lesson_request_id = Column(Integer, ForeignKey("lesson_requests.id", ondelete="CASCADE"), nullable=False)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    support_group_id = Column(Integer, nullable=False)
+    # "rescheduled" | "cancelled" | "substituted"
+    change_type = Column(String(16), nullable=False)
+    old_start_datetime = Column(DateTime, nullable=True)
+    new_start_datetime = Column(DateTime, nullable=True)
+    old_teacher_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    new_teacher_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # pending → sent | failed (retried while there is time) | skipped (chat not approved/unknown)
+    status = Column(String, nullable=False, default="pending")
+    telegram_message_id = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    sent_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("lesson_request_id", "lms_group_id", name="uq_lesson_change_notice_request_group"),
+    )

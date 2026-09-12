@@ -87,6 +87,7 @@ class LessonReminderScheduler:
                 now = datetime.now(timezone.utc)
                 logger.info(f"⏰ [SCHEDULER] Checking at {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
                 self._send_telegram_invitations()
+                self._send_telegram_lesson_notices()
                 self._check_and_send_reminders()
                 self._check_and_send_post_lesson_reminders()
             except Exception as e:
@@ -110,6 +111,24 @@ class LessonReminderScheduler:
         except Exception as e:
             db.rollback()
             logger.error(f"❌ [TELEGRAM] Lesson invitations failed: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _send_telegram_lesson_notices(self):
+        """Post each approved reschedule/cancel/substitution to the lesson's linked group
+        chats (src/services/telegram_lesson_notices.py). Off unless enabled."""
+        from src.services import telegram_lesson_notices
+
+        if not telegram_lesson_notices.enabled():
+            return
+        db = SessionLocal()
+        try:
+            summary = telegram_lesson_notices.send_due_notices(db)
+            if any(summary.values()):
+                logger.info(f"📨 [TELEGRAM] Lesson change notices: {summary}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ [TELEGRAM] Lesson change notices failed: {e}", exc_info=True)
         finally:
             db.close()
 
