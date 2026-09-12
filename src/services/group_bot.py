@@ -55,6 +55,12 @@ MAX_QUESTION_CHARS = 1000
 LESSONS_AHEAD = 5
 HOMEWORK_SHOWN = 6
 RECORDINGS_SHOWN = 3
+# A weekly set commonly opens early in the day and is asked about throughout
+# the weekend. Keep the current set available for a few days, then prefer the
+# next published one. This uses the platform-backed calendar event rather than
+# inferring a test from an ordinary lesson.
+WEEKLY_TESTS_AHEAD = 3
+WEEKLY_TEST_GRACE = timedelta(days=3)
 # A deadline that has just passed is still the answer to "когда дедлайн?" — the day after, it is
 # not the group's business any more.
 HOMEWORK_GRACE = timedelta(days=3)
@@ -97,29 +103,54 @@ _COURTESY = re.compile(
     r"👍|🙏|❤|❤️|\+)\s*[!.…]*\s*$",
     re.IGNORECASE,
 )
+# The support transport normally filters these before they reach this service.
+# Keep this broader, token-based defence as well: a new trigger shape must not
+# turn a natural acknowledgement under a lesson/homework notice into a public
+# curator handoff.  A question marker always wins, so "спасибо, а где ссылка?"
+# remains a real question.
+_COURTESY_WORDS = frozenset({
+    "спасибо", "спс", "пасыба", "пасиба", "рахмет", "рақмет", "thanks", "thx",
+    "отдуши", "понял", "поняла", "пон", "ясно", "ок", "окей", "okay", "жақсы",
+    "түсінікті", "круто", "супер",
+})
+_COURTESY_PHRASES = ("от души", "все понял", "всё понял", "сесе понял")
+_COURTESY_QUESTION = re.compile(
+    r"\?|\b(?:когда|где|как|какой|какая|какие|сколько|почему|зачем|можно|нужно|"
+    r"подскаж(?:и|ите)|помоги|скинь|отправ\w*|пришли|дай|перенес\w*|отмен\w*|"
+    r"замен\w*|сделай|проверь|вопрос|во\s+сколько|when|where|what|which|how|why|"
+    r"қашан|қайда|қалай|қандай|неше|неге|бола\s+ма|көмектес)\b",
+    re.IGNORECASE,
+)
 _CAPABILITIES = re.compile(
     r"(?:что|ч[её])\s+(?:ты\s+)?умеешь|(?:на\s+какие\s+)?вопросы\s+"
     r"(?:ты\s+)?(?:можешь\s+)?отвечать|what\s+can\s+you\s+do|"
     r"сен\s+не\s+істей\s+аласың|не\s+істей\s+аласың",
     re.IGNORECASE,
 )
-# Weekly mocks/tests are not in the facts supplied to this bot.  Naming one
-# must never accidentally fall through to the next ordinary lesson.
+# Published weekly mocks have their own group-linked ``weekly_test`` calendar
+# event. They are facts, not a request for an ordinary next lesson.
+_WEEKLY_TEST_TOPIC = re.compile(
+    r"\b(?:мок\w*|mock\w*|викл\w*|weekly|пробн\w*)",
+    re.IGNORECASE,
+)
 _UNSUPPORTED_TOPIC = re.compile(
-    r"\b(?:мок|mock|викл\w*|weekly|пробн\w*|тест\w*|exam\w*|экзам\w*)",
+    r"\b(?:exam\w*|экзам\w*)",
     re.IGNORECASE,
 )
 _OUT_OF_SCOPE_REQUEST = re.compile(
-    r"перенес\w*|отмен\w*|замен\w*|reschedul\w*|cancel\w*|change\s+(?:the\s+)?lesson",
+    r"перенес\w*|отмен\w*|замен\w*|не\s+(?:открыва|работа|груз)|"
+    r"reschedul\w*|cancel\w*|change\s+(?:the\s+)?lesson|"
+    r"(?:does\s+not|isn['’]t)\s+(?:open|work|load)",
     re.IGNORECASE,
 )
 _SCHEDULE_TOPIC = re.compile(
-    r"(?:урок\w*|занят\w*|расписани\w*|встреч\w*|созвон\w*|meet|"
+    r"(?:урок\w*|занят\w*|расписани\w*|встреч\w*|созвон\w*|meet|ссылк\w*|link\w*|"
     r"сабақ\w*|кесте\w*|lesson\w*|schedule\w*)|"
     r"(?:(?:когда|во\s+сколько|қашан|қай\s+кезде|when|what\s+time).{0,40}"
     r"(?:следующ|ближайш|next|upcoming|келесі))",
     re.IGNORECASE,
 )
+_SCHEDULE_LIST_TOPIC = re.compile(r"расписани\w*|кесте\w*|schedule\w*", re.IGNORECASE)
 _HOMEWORK_TOPIC = re.compile(
     r"дз|домашк\w*|домашн\w*|задани\w*|дедлайн\w*|homework|үй\s+тапсырма",
     re.IGNORECASE,
@@ -192,6 +223,17 @@ def group_facts(db, group: Group, now: Optional[datetime] = None) -> dict:
                .limit(LESSONS_AHEAD)
                .all())
 
+    weekly_tests = (db.query(Event)
+                    .join(EventGroup, EventGroup.event_id == Event.id)
+                    .filter(EventGroup.group_id == group.id,
+                            Event.is_active.is_(True),
+                            Event.event_type == "weekly_test",
+                            Event.start_datetime >= now - WEEKLY_TEST_GRACE,
+                            event_has_operational_group_clause())
+                    .order_by(Event.start_datetime)
+                    .limit(WEEKLY_TESTS_AHEAD)
+                    .all())
+
     homework = (db.query(Assignment)
                 .outerjoin(GroupAssignment, and_(GroupAssignment.assignment_id == Assignment.id,
                                                  GroupAssignment.group_id == group.id,
@@ -227,6 +269,11 @@ def group_facts(db, group: Group, now: Optional[datetime] = None) -> dict:
              "ссылка_meet": lesson.meeting_url or None}
             for lesson in lessons
         ],
+        "ближайшие_викли_тесты": [
+            {"название": test.title,
+             "ссылка": test.meeting_url or None}
+            for test in weekly_tests
+        ],
         "домашние_задания": [
             {"название": task.title,
              "срок": _date(task.due_date) if task.due_date else "без срока"}
@@ -241,14 +288,29 @@ def group_facts(db, group: Group, now: Optional[datetime] = None) -> dict:
 
 
 def _has_anything(facts: dict) -> bool:
-    return any(facts[key] for key in ("ближайшие_уроки", "домашние_задания", "записи_уроков"))
+    return any(facts[key] for key in (
+        "ближайшие_уроки", "ближайшие_викли_тесты", "домашние_задания", "записи_уроков"
+    ))
 
 
 # ── the answer ───────────────────────────────────────────────────────────────────────────
 
 def is_courtesy(text: str) -> bool:
     """A thank-you / acknowledgement should not restart a group conversation."""
-    return bool(_COURTESY.fullmatch(text or ""))
+    raw = (text or "").casefold().strip()
+    if _COURTESY.fullmatch(raw):
+        return True
+    if not raw or _COURTESY_QUESTION.search(raw):
+        return not raw
+    # A courtesy prefix never overrides an actual shared-facts request.
+    if (_SCHEDULE_TOPIC.search(raw) or _WEEKLY_TEST_TOPIC.search(raw)
+            or _HOMEWORK_TOPIC.search(raw) or _RECORDING_TOPIC.search(raw)):
+        return False
+    compact = re.sub(r"\s+", " ", raw)
+    if any(phrase in compact for phrase in _COURTESY_PHRASES):
+        return True
+    words = re.findall(r"[^\W_]+", compact, re.UNICODE)
+    return len(words) <= 7 and bool(set(words) & _COURTESY_WORDS)
 
 
 def capabilities_reply(question: str) -> str:
@@ -256,16 +318,17 @@ def capabilities_reply(question: str) -> str:
     text = (question or "").lower()
     if any(char in text for char in "әіңғқұүө"):
         return (
-            "Топтың кестесі, үй тапсырмасы мен мерзімдері және сабақ жазбалары туралы "
+            "Топтың кестесі, weekly mock-тест, үй тапсырмасы мен мерзімдері және сабақ жазбалары туралы "
             "көмектесе аламын. Жеке сұрақтар бойынша маған жеке жазыңыз."
         )
     if re.search(r"\b(?:what|can|you|do)\b", text):
         return (
-            "I can help with this group's schedule, homework and deadlines, and lesson recordings. "
+            "I can help with this group's schedule, weekly mock test, homework and deadlines, and lesson recordings. "
             "For personal questions, please message me privately."
         )
     return (
-        "Могу помочь с расписанием группы, домашними заданиями и сроками, а также с записями уроков. "
+        "Могу помочь с расписанием группы, weekly mock-тестом, домашними заданиями и сроками, "
+        "а также с записями уроков. "
         "По личным вопросам напишите мне в личные сообщения."
     )
 
@@ -276,6 +339,7 @@ def has_supported_topic(question: str) -> bool:
         return False
     return bool(
         _SCHEDULE_TOPIC.search(question or "")
+        or _WEEKLY_TEST_TOPIC.search(question or "")
         or _HOMEWORK_TOPIC.search(question or "")
         or _RECORDING_TOPIC.search(question or "")
     )
@@ -290,6 +354,11 @@ def _plain_answer(facts: dict, question: str) -> Optional[str]:
     wants_homework = bool(_HOMEWORK_TOPIC.search(text))
     wants_recording = bool(_RECORDING_TOPIC.search(text))
     wants_schedule = bool(_SCHEDULE_TOPIC.search(text))
+    wants_weekly_test = bool(_WEEKLY_TEST_TOPIC.search(text))
+    if wants_weekly_test and facts["ближайшие_викли_тесты"]:
+        weekly = facts["ближайшие_викли_тесты"][0]
+        link = f" Открыть: {weekly['ссылка']}" if weekly["ссылка"] else ""
+        return f"Ближайший weekly mock — {weekly['название']}.{link}"
     if wants_homework and facts["домашние_задания"]:
         items = "; ".join(f"{t['название']} — до {t['срок']}" for t in facts["домашние_задания"][:3])
         return f"Домашние задания: {items}."
@@ -297,6 +366,12 @@ def _plain_answer(facts: dict, question: str) -> Optional[str]:
         last = facts["записи_уроков"][0]
         return f"Запись последнего урока ({last['урок']}): {last['ссылка']} — нужен вход в LMS."
     if wants_schedule and facts["ближайшие_уроки"]:
+        if _SCHEDULE_LIST_TOPIC.search(text):
+            entries = []
+            for lesson in facts["ближайшие_уроки"][:5]:
+                link = f" — {lesson['ссылка_meet']}" if lesson["ссылка_meet"] else ""
+                entries.append(f"{lesson['когда']}{link}")
+            return f"Расписание: {'; '.join(entries)} (время Алматы)."
         lesson = facts["ближайшие_уроки"][0]
         link = f" Ссылка: {lesson['ссылка_meet']}" if lesson["ссылка_meet"] else ""
         return f"Ближайший урок — {lesson['когда']} (время Алматы).{link}"

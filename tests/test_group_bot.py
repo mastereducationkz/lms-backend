@@ -68,6 +68,27 @@ def test_it_answers_from_the_groups_own_lessons(chat):
     assert row.asker_username == "aruzhan" and row.telegram_chat_id == -1001234567890
 
 
+def test_schedule_lists_upcoming_lessons_instead_of_only_the_first_one(chat):
+    chat["lesson"](chat["linked"], days_ahead=1,
+                   meeting_url="https://meet.google.com/first-lesson-link")
+    chat["lesson"](chat["linked"], days_ahead=2,
+                   meeting_url="https://meet.google.com/second-lesson-link")
+
+    answer = chat["ask"]("какое расписание?")["answer"]
+
+    assert answer.startswith("Расписание:")
+    assert "first-lesson-link" in answer and "second-lesson-link" in answer
+
+
+def test_a_terse_link_request_returns_the_next_lesson_link(chat):
+    chat["lesson"](chat["linked"], days_ahead=1,
+                   meeting_url="https://meet.google.com/abc-defg-hij")
+
+    answer = chat["ask"]("ссылка")["answer"]
+
+    assert "https://meet.google.com/abc-defg-hij" in answer
+
+
 def test_homework_is_titles_and_deadlines_and_nobodys_name(chat):
     db = chat["db"]
     chat["lesson"](chat["linked"], days_ahead=1)
@@ -110,7 +131,8 @@ def test_the_model_writes_the_answer_when_it_can(chat, monkeypatch):
     assert _rows(chat["db"])[0].model == group_bot.MODEL
     assert seen["question"] == "келесі сабақ қашан?"
     assert set(seen["facts"]) == {"группа", "преподаватель", "куратор", "сейчас",
-                                  "ближайшие_уроки", "домашние_задания", "записи_уроков"}
+                                  "ближайшие_уроки", "ближайшие_викли_тесты",
+                                  "домашние_задания", "записи_уроков"}
 
 
 def test_the_model_is_handed_no_student_and_no_free_link(chat, monkeypatch):
@@ -148,23 +170,44 @@ def test_a_capabilities_question_describes_scope_instead_of_the_next_lesson(chat
     assert _rows(chat["db"])[0].model == "facts"
 
 
-def test_a_thank_you_reply_is_silent(chat):
+@pytest.mark.parametrize("text", ["Пасыба", "отдуши брат", "сесе , понял", "спасибо 🙌"])
+def test_a_thank_you_reply_is_silent(chat, text):
     chat["lesson"](chat["linked"], days_ahead=1)
 
-    out = chat["ask"]("Пасыба")
+    out = chat["ask"](text)
 
     assert out["silent"] is True and out["answer"] is None
     row = _rows(chat["db"])[0]
     assert row.answer is None and row.handed_to_curator is False
 
 
-def test_a_weekly_mock_question_is_handed_to_the_curator_not_answered_as_a_lesson(chat):
-    chat["lesson"](chat["linked"], days_ahead=1)
+def test_a_courtesy_prefix_does_not_hide_a_real_group_request(chat):
+    db = chat["db"]
+    taught = chat["lesson"](chat["linked"], days_ahead=-1)
+    db.add(LessonRecording(event_id=taught.id, status="ready",
+                           hls_url="videos/recordings/1/master.m3u8"))
+    db.flush()
+
+    out = chat["ask"]("спасибо, скинь запись урока")
+
+    assert out.get("silent") is not True
+    assert f"/recordings?watch={taught.id}" in out["answer"]
+
+
+def test_a_weekly_mock_question_uses_its_group_linked_calendar_event(chat):
+    chat["lesson"](
+        chat["linked"],
+        days_ahead=0,
+        event_type="weekly_test",
+        title="IELTS Weekly Test · 12.09-13.09",
+        meeting_url="https://ielts.mastereducation.kz/weekly-sets/15",
+    )
 
     out = chat["ask"]("когда будет следующий викли мок тест?")
 
-    assert out["handed_to_curator"] is True
-    assert out["answer"] == group_bot.CURATOR_REPLY
+    assert out["handed_to_curator"] is False
+    assert "IELTS Weekly Test · 12.09-13.09" in out["answer"]
+    assert "https://ielts.mastereducation.kz/weekly-sets/15" in out["answer"]
 
 
 # ── what it refuses ──────────────────────────────────────────────────────────────────────
