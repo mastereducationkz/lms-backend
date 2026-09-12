@@ -88,6 +88,7 @@ class LessonReminderScheduler:
                 logger.info(f"⏰ [SCHEDULER] Checking at {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
                 self._send_telegram_invitations()
                 self._send_telegram_lesson_notices()
+                self._send_telegram_homework_notices()
                 self._check_and_send_reminders()
                 self._check_and_send_post_lesson_reminders()
             except Exception as e:
@@ -129,6 +130,24 @@ class LessonReminderScheduler:
         except Exception as e:
             db.rollback()
             logger.error(f"❌ [TELEGRAM] Lesson change notices failed: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _send_telegram_homework_notices(self):
+        """Post each newly published assignment to its group's linked chat, with a link to
+        open it (src/services/telegram_homework_notices.py). Off unless enabled."""
+        from src.services import telegram_homework_notices
+
+        if not telegram_homework_notices.enabled():
+            return
+        db = SessionLocal()
+        try:
+            summary = telegram_homework_notices.send_due_notices(db)
+            if any(summary.values()):
+                logger.info(f"📨 [TELEGRAM] Homework notices: {summary}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ [TELEGRAM] Homework notices failed: {e}", exc_info=True)
         finally:
             db.close()
 

@@ -131,3 +131,32 @@ class TelegramLessonChangeNotice(Base):
     __table_args__ = (
         UniqueConstraint("lesson_request_id", "lms_group_id", name="uq_lesson_change_notice_request_group"),
     )
+
+
+class TelegramHomeworkNotice(Base):
+    """One notice to one group's chat that a new assignment was published, with a link to
+    open it (owner, 2026-09-12).
+
+    Queued right after the assignment's own transaction commits — see
+    :mod:`src.assignments.routes.assignments` — same best-effort convention this endpoint
+    already uses for the email notification beside it, not the stricter same-transaction
+    guarantee :class:`TelegramLessonChangeNotice` gets from the lesson-request flow.
+    """
+
+    __tablename__ = "telegram_homework_notices"
+
+    id = Column(Integer, primary_key=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    support_group_id = Column(Integer, nullable=False)
+    # pending → sent | failed (retried while there is time) | skipped (chat not approved/unknown)
+    status = Column(String, nullable=False, default="pending")
+    telegram_message_id = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    sent_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "lms_group_id", name="uq_homework_notice_assignment_group"),
+    )

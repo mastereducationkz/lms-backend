@@ -995,6 +995,16 @@ def create_assignment(
     except Exception as e:
         print(f"Failed to send email notifications: {e}")
 
+    # Telegram notice per group's linked chat, with a link to open the assignment.
+    try:
+        from src.services import telegram_homework_notices
+        for a in created_assignments:
+            telegram_homework_notices.queue_for_assignment(db, a, a.group)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Failed to queue Telegram homework notices: {e}")
+
     return result_assignment
 
 def _student_assignments(db: Session, student_id: int):
