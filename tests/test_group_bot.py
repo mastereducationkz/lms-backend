@@ -109,7 +109,10 @@ def test_a_link_to_a_lesson_never_falls_back_to_a_recording(chat, monkeypatch):
 
 def test_an_in_progress_lesson_remains_the_next_lesson_until_it_ends(chat):
     """Students joining after the start still need the Meet link for the lesson underway."""
-    current = chat["lesson"](chat["linked"], days_ahead=0,
+    now = datetime.utcnow()
+    current = chat["lesson"](chat["linked"],
+                              start_datetime=now - timedelta(minutes=30),
+                              end_datetime=now + timedelta(minutes=30),
                               meeting_url="https://meet.google.com/current-lesson")
 
     answer = chat["ask"]("ссылка на сегодняшний урок")["answer"]

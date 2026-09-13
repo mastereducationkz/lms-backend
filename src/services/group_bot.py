@@ -466,12 +466,22 @@ def answer(db, *, support_group_id: int, text: str, chat_title: Optional[str] = 
 
     facts = group_facts(db, group, now)
     reply, model_used = None, None
-    # Dates and links are operational facts, not prose.  Letting a model choose
-    # between an upcoming Meet link and a past recording made lesson-link
-    # answers unreliable and flattened schedules into a paragraph.
+    # Schedule dates and Meet links are operational facts, not prose.  Letting
+    # a model choose between an upcoming Meet link and a past recording made
+    # lesson-link answers unreliable and flattened schedules into a paragraph.
+    # Other supported topics retain the model's question-language response.
     if has_supported_topic(question) and _has_anything(facts):
-        reply = _plain_answer(facts, question)
-        model_used = "facts" if reply else None
+        if _SCHEDULE_TOPIC.search(question):
+            reply = _plain_answer(facts, question)
+            model_used = "facts" if reply else None
+        else:
+            key = model_key()
+            if key:
+                reply, answered = _ask_model(facts, question, key)
+                model_used = MODEL if answered else None
+            if reply is None:
+                reply = _plain_answer(facts, question)
+                model_used = "facts" if reply else None
 
     if reply is None:
         row.answer = CURATOR_REPLY if group.curator_id else NOTHING_YET
