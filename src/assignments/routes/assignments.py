@@ -2026,6 +2026,13 @@ def get_submission(
     
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+    # Previous attempts are immutable evidence of the student's work. They remain
+    # visible to staff, but only the current/latest attempt can affect a grade.
+    if not submission.is_current:
+        raise HTTPException(
+            status_code=409,
+            detail="Only the student's latest attempt can be graded.",
+        )
     
     # Check permissions
     if current_user.role == "student":
