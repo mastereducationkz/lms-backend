@@ -21,7 +21,9 @@ from src.utils.assignment_checker import check_assignment_answers
 from src.services.email_service import send_homework_notification
 from src.schemas.models import GroupStudent
 from src.assignments.schemas import HomeworkUpdateSchema, DraftUpsertSchema, DraftSchema
-from src.assignments.models import AssignmentDraft
+from src.assignments.models import (
+    AssignmentDraft, AssignmentAnswerKeyRelease, AssignmentAnswerKeyAcknowledgement,
+)
 from src.parents.models import ParentStudent
 from src.services.event_service import EventService
 from src.routes.gamification import award_points
@@ -29,7 +31,7 @@ from src.utils.course_access import student_can_see_homework_for_course
 from src.services import storage_service
 from src.exams.models import BLUEBOOK_MAX_TEST_NUMBER, BLUEBOOK_MIN_TEST_NUMBER
 from src.exams.projection import project_bluebook_answers
-from src.assignments.answer_keys import RELEASE_POLICIES, student_visible_answer_keys
+from src.assignments.answer_keys import RELEASE_POLICIES, student_visible_answer_keys, strip_answer_keys
 
 
 def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
@@ -1353,6 +1355,19 @@ def release_answer_key(
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
+    if current_user.role == "teacher":
+        owns_group = assignment.group_id and db.query(Group.id).filter(
+            Group.id == assignment.group_id, Group.teacher_id == current_user.id
+        ).first()
+        owns_course = False
+        if assignment.lesson_id:
+            lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
+            module = db.query(Module).filter(Module.id == lesson.module_id).first() if lesson else None
+            owns_course = bool(module and db.query(Course.id).filter(
+                Course.id == module.course_id, Course.teacher_id == current_user.id
+            ).first())
+        if not owns_group and not owns_course:
+            raise HTTPException(status_code=403, detail="Access denied to this assignment")
     task = _answer_key_task(assignment, task_id)
     key = next((item for item in task.get("answer_keys", []) if item.get("id") == answer_key_id), None)
     if not key:
@@ -2958,10 +2973,10 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
 def remove_correct_answers_from_content(content: Dict[str, Any]) -> Dict[str, Any]:
     """Remove correct answers from content when showing to students"""
     # Make a copy to avoid modifying original
-    clean_content = content.copy()
+    clean_content = strip_answer_keys(content)
     
     # Remove fields that might contain answers
-    fields_to_remove = ["correct_answer", "correct_answers", "answer_key"]
+    fields_to_remove = ["correct_answer", "correct_answers", "answer_key", "answer_keys"]
     for field in fields_to_remove:
         if field in clean_content:
             del clean_content[field]

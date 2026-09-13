@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from src.assignments.answer_keys import student_visible_answer_keys
+from src.assignments.answer_keys import student_visible_answer_keys, strip_answer_keys
 
 
 def test_after_submission_key_is_hidden_until_the_student_submits():
@@ -32,3 +32,8 @@ def test_due_date_and_manual_release_policies_are_enforced():
     keys = student_visible_answer_keys(task, submitted=False, due_date=future,
                                        manually_released_key_ids={"manual"})
     assert [key["id"] for key in keys] == ["manual"]
+
+
+def test_regular_student_assignment_payload_never_contains_answer_keys():
+    content = {"tasks": [{"id": "task-1", "answer_keys": [{"id": "hidden"}]}]}
+    assert "answer_keys" not in strip_answer_keys(content)["tasks"][0]

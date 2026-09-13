@@ -12,10 +12,25 @@ from typing import Any, Iterable
 RELEASE_POLICIES = {"immediate", "after_submission", "after_due_date", "manual"}
 
 
+def strip_answer_keys(content: dict[str, Any]) -> dict[str, Any]:
+    """Return a student-safe copy with task answer keys removed."""
+    clean = content.copy()
+    clean.pop("answer_keys", None)
+    if isinstance(clean.get("tasks"), list):
+        clean["tasks"] = [
+            {**task, "answer_keys": None} if isinstance(task, dict) else task
+            for task in clean["tasks"]
+        ]
+        for task in clean["tasks"]:
+            if isinstance(task, dict):
+                task.pop("answer_keys", None)
+    return clean
+
+
 def _naive_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
-    return value.replace(tzinfo=None) if value.tzinfo else value
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
 
 
 def student_visible_answer_keys(
