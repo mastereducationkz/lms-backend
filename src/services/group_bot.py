@@ -217,7 +217,8 @@ def group_facts(db, group: Group, now: Optional[datetime] = None) -> dict:
                .filter(EventGroup.group_id == group.id,
                        Event.is_active.is_(True),
                        Event.event_type == "class",
-                       Event.start_datetime >= now,
+                       # An in-progress lesson still needs its Meet link.
+                       Event.end_datetime > now,
                        event_has_operational_group_clause())
                .order_by(Event.start_datetime)
                .limit(LESSONS_AHEAD)
@@ -369,9 +370,9 @@ def _plain_answer(facts: dict, question: str) -> Optional[str]:
         if _SCHEDULE_LIST_TOPIC.search(text):
             entries = []
             for lesson in facts["ближайшие_уроки"][:5]:
-                link = f" — {lesson['ссылка_meet']}" if lesson["ссылка_meet"] else ""
-                entries.append(f"{lesson['когда']}{link}")
-            return f"Расписание: {'; '.join(entries)} (время Алматы)."
+                link = f"\n  Ссылка: {lesson['ссылка_meet']}" if lesson["ссылка_meet"] else ""
+                entries.append(f"• {lesson['когда']}{link}")
+            return "Расписание (время Алматы):\n" + "\n".join(entries)
         lesson = facts["ближайшие_уроки"][0]
         link = f" Ссылка: {lesson['ссылка_meet']}" if lesson["ссылка_meet"] else ""
         return f"Ближайший урок — {lesson['когда']} (время Алматы).{link}"
@@ -465,17 +466,12 @@ def answer(db, *, support_group_id: int, text: str, chat_title: Optional[str] = 
 
     facts = group_facts(db, group, now)
     reply, model_used = None, None
-    # The model has no tools and only this fact bundle.  Do not ask it to turn
-    # an unrelated sentence into a timetable answer: unanswered things go to
-    # the curator, exactly as the group-chat policy promises.
+    # Dates and links are operational facts, not prose.  Letting a model choose
+    # between an upcoming Meet link and a past recording made lesson-link
+    # answers unreliable and flattened schedules into a paragraph.
     if has_supported_topic(question) and _has_anything(facts):
-        key = model_key()
-        if key:
-            reply, answered = _ask_model(facts, question, key)
-            model_used = MODEL if answered else None
-        if reply is None:
-            reply = _plain_answer(facts, question)
-            model_used = "facts" if reply else None
+        reply = _plain_answer(facts, question)
+        model_used = "facts" if reply else None
 
     if reply is None:
         row.answer = CURATOR_REPLY if group.curator_id else NOTHING_YET

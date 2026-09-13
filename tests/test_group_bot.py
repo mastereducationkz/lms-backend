@@ -76,8 +76,9 @@ def test_schedule_lists_upcoming_lessons_instead_of_only_the_first_one(chat):
 
     answer = chat["ask"]("какое расписание?")["answer"]
 
-    assert answer.startswith("Расписание:")
+    assert answer.startswith("Расписание")
     assert "first-lesson-link" in answer and "second-lesson-link" in answer
+    assert "\n" in answer, "each scheduled lesson must render on its own Telegram line"
 
 
 def test_a_terse_link_request_returns_the_next_lesson_link(chat):
@@ -87,6 +88,33 @@ def test_a_terse_link_request_returns_the_next_lesson_link(chat):
     answer = chat["ask"]("ссылка")["answer"]
 
     assert "https://meet.google.com/abc-defg-hij" in answer
+
+
+def test_a_link_to_a_lesson_never_falls_back_to_a_recording(chat, monkeypatch):
+    """A lesson-link question is answered from the upcoming Meet lesson, even with a model key."""
+    db = chat["db"]
+    upcoming = chat["lesson"](chat["linked"], days_ahead=1,
+                               meeting_url="https://meet.google.com/upcoming-link")
+    taught = chat["lesson"](chat["linked"], days_ahead=-1)
+    db.add(LessonRecording(event_id=taught.id, status="ready", hls_url="videos/recordings/1/master.m3u8"))
+    db.flush()
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(group_bot, "_ask_model", lambda *args: pytest.fail("structured link requests use facts"))
+
+    answer = chat["ask"]("ссылка на урок")["answer"]
+
+    assert upcoming.meeting_url in answer
+    assert "/recordings?watch=" not in answer
+
+
+def test_an_in_progress_lesson_remains_the_next_lesson_until_it_ends(chat):
+    """Students joining after the start still need the Meet link for the lesson underway."""
+    current = chat["lesson"](chat["linked"], days_ahead=0,
+                              meeting_url="https://meet.google.com/current-lesson")
+
+    answer = chat["ask"]("ссылка на сегодняшний урок")["answer"]
+
+    assert current.meeting_url in answer
 
 
 def test_homework_is_titles_and_deadlines_and_nobodys_name(chat):
@@ -116,23 +144,17 @@ def test_a_recording_is_the_lms_link_that_asks_for_a_login(chat):
     assert "/watch/" not in answer, "the login-free link is for accountants, never for a chat"
 
 
-def test_the_model_writes_the_answer_when_it_can(chat, monkeypatch):
+def test_structured_group_questions_use_facts_even_when_a_model_is_configured(chat, monkeypatch):
     chat["lesson"](chat["linked"], days_ahead=1)
-    seen = {}
 
-    def fake(facts, question, key):
-        seen.update(facts=facts, question=question, key=key)
-        return "Келесі сабақ — ертең 17:00-де.", True
+    def fake(*args):
+        pytest.fail("the model must not choose schedule dates or links")
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(group_bot, "_ask_model", fake)
     out = chat["ask"]("келесі сабақ қашан?")
-    assert out["answer"] == "Келесі сабақ — ертең 17:00-де."
-    assert _rows(chat["db"])[0].model == group_bot.MODEL
-    assert seen["question"] == "келесі сабақ қашан?"
-    assert set(seen["facts"]) == {"группа", "преподаватель", "куратор", "сейчас",
-                                  "ближайшие_уроки", "ближайшие_викли_тесты",
-                                  "домашние_задания", "записи_уроков"}
+    assert "Ближайший урок" in out["answer"]
+    assert _rows(chat["db"])[0].model == "facts"
 
 
 def test_the_model_is_handed_no_student_and_no_free_link(chat, monkeypatch):
