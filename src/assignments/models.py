@@ -100,6 +100,32 @@ class AssignmentLinkedLesson(Base):
     lesson = relationship("Lesson")
 
 
+class AssignmentAnswerKeyRelease(Base):
+    """A teacher's explicit release of one manual answer key to a class."""
+    __tablename__ = "assignment_answer_key_releases"
+    id = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id = Column(String, nullable=False)
+    answer_key_id = Column(String, nullable=False)
+    released_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    released_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (UniqueConstraint("assignment_id", "task_id", "answer_key_id", name="uq_assignment_answer_key_release"),)
+
+
+class AssignmentAnswerKeyAcknowledgement(Base):
+    """Unscored record that a student opened and confirmed an answer key."""
+    __tablename__ = "assignment_answer_key_acknowledgements"
+    id = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id = Column(String, nullable=False)
+    answer_key_id = Column(String, nullable=False)
+    acknowledged_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (UniqueConstraint("assignment_id", "user_id", "task_id", "answer_key_id", name="uq_assignment_answer_key_ack"),)
+
+
 class AssignmentExtension(Base):
     """Individual deadline extensions for students"""
     __tablename__ = "assignment_extensions"

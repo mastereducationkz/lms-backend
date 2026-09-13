@@ -29,6 +29,7 @@ from src.utils.course_access import student_can_see_homework_for_course
 from src.services import storage_service
 from src.exams.models import BLUEBOOK_MAX_TEST_NUMBER, BLUEBOOK_MIN_TEST_NUMBER
 from src.exams.projection import project_bluebook_answers
+from src.assignments.answer_keys import RELEASE_POLICIES, student_visible_answer_keys
 
 
 def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
@@ -1256,6 +1257,117 @@ def get_assignment(
         assignment_data.content = remove_correct_answers_from_content(assignment_data.content)
     
     return assignment_data
+
+
+def _answer_key_task(assignment: Assignment, task_id: str) -> Dict[str, Any]:
+    """Find a multi-task item by its stable authoring ID."""
+    try:
+        content = json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content
+    except json.JSONDecodeError:
+        content = {}
+    for task in content.get("tasks", []) if isinstance(content, dict) else []:
+        if isinstance(task, dict) and task.get("id") == task_id:
+            return task
+    raise HTTPException(status_code=404, detail="Task not found")
+
+
+@router.get("/{assignment_id}/answer-keys")
+def get_student_answer_keys(
+    assignment_id: int,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db),
+):
+    """Return only task keys whose release policy allows this student to see them."""
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can view answer keys")
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment or not assignment_visible_to_student(current_user.id, assignment, db):
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    submitted = db.query(AssignmentSubmission.id).filter(
+        AssignmentSubmission.assignment_id == assignment_id,
+        AssignmentSubmission.user_id == current_user.id,
+        AssignmentSubmission.is_hidden == False,
+    ).first() is not None
+    releases = {
+        (row.task_id, row.answer_key_id)
+        for row in db.query(AssignmentAnswerKeyRelease).filter(
+            AssignmentAnswerKeyRelease.assignment_id == assignment_id
+        ).all()
+    }
+    acknowledgements = {
+        (row.task_id, row.answer_key_id)
+        for row in db.query(AssignmentAnswerKeyAcknowledgement).filter(
+            AssignmentAnswerKeyAcknowledgement.assignment_id == assignment_id,
+            AssignmentAnswerKeyAcknowledgement.user_id == current_user.id,
+        ).all()
+    }
+    try:
+        content = json.loads(assignment.content) if assignment.content else {}
+    except json.JSONDecodeError:
+        content = {}
+    result = []
+    for task in content.get("tasks", []) if isinstance(content, dict) else []:
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id")
+        keys = student_visible_answer_keys(
+            task, submitted=submitted, due_date=assignment.due_date,
+            manually_released_key_ids={key_id for released_task, key_id in releases if released_task == task_id},
+        )
+        if keys:
+            result.append({"task_id": task_id, "answer_keys": [
+                {**key, "acknowledged": (task_id, key.get("id")) in acknowledgements}
+                for key in keys
+            ]})
+    return result
+
+
+@router.post("/{assignment_id}/answer-keys/{task_id}/{answer_key_id}/acknowledge")
+def acknowledge_answer_key(
+    assignment_id: int, task_id: str, answer_key_id: str,
+    current_user: UserInDB = Depends(get_current_user_dependency), db: Session = Depends(get_db),
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can acknowledge answer keys")
+    visible = get_student_answer_keys(assignment_id, current_user, db)
+    if not any(item["task_id"] == task_id and any(key.get("id") == answer_key_id for key in item["answer_keys"]) for item in visible):
+        raise HTTPException(status_code=403, detail="Answer key is not available yet")
+    existing = db.query(AssignmentAnswerKeyAcknowledgement).filter_by(
+        assignment_id=assignment_id, user_id=current_user.id, task_id=task_id, answer_key_id=answer_key_id
+    ).first()
+    if not existing:
+        db.add(AssignmentAnswerKeyAcknowledgement(
+            assignment_id=assignment_id, user_id=current_user.id, task_id=task_id, answer_key_id=answer_key_id
+        ))
+        db.commit()
+    return {"acknowledged": True}
+
+
+@router.put("/{assignment_id}/answer-keys/{task_id}/{answer_key_id}/release")
+def release_answer_key(
+    assignment_id: int, task_id: str, answer_key_id: str,
+    current_user: UserInDB = Depends(get_current_user_dependency), db: Session = Depends(get_db),
+):
+    if current_user.role not in ("teacher", "admin"):
+        raise HTTPException(status_code=403, detail="Only teachers can release answer keys")
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    task = _answer_key_task(assignment, task_id)
+    key = next((item for item in task.get("answer_keys", []) if item.get("id") == answer_key_id), None)
+    if not key:
+        raise HTTPException(status_code=404, detail="Answer key not found")
+    if key.get("release_policy", "after_submission") != "manual":
+        raise HTTPException(status_code=400, detail="Only manually released answer keys can be released")
+    row = db.query(AssignmentAnswerKeyRelease).filter_by(
+        assignment_id=assignment_id, task_id=task_id, answer_key_id=answer_key_id
+    ).first()
+    if not row:
+        db.add(AssignmentAnswerKeyRelease(
+            assignment_id=assignment_id, task_id=task_id, answer_key_id=answer_key_id, released_by=current_user.id
+        ))
+        db.commit()
+    return {"released": True}
 
 @router.put("/{assignment_id}", response_model=AssignmentSchema)
 def update_assignment(
@@ -2766,6 +2878,20 @@ def validate_assignment_content(assignment_type: str, content: Dict[str, Any]):
             
             # Validate task-specific content
             task_content = task.get("content", {})
+            answer_keys = task.get("answer_keys", [])
+            if not isinstance(answer_keys, list):
+                raise HTTPException(status_code=400, detail=f"Task {i+1} answer_keys must be a list")
+            seen_key_ids = set()
+            for answer_key in answer_keys:
+                if not isinstance(answer_key, dict) or not isinstance(answer_key.get("id"), str):
+                    raise HTTPException(status_code=400, detail=f"Task {i+1} answer keys need an id")
+                if answer_key["id"] in seen_key_ids:
+                    raise HTTPException(status_code=400, detail=f"Task {i+1} has duplicate answer-key ids")
+                seen_key_ids.add(answer_key["id"])
+                if answer_key.get("release_policy", "after_submission") not in RELEASE_POLICIES:
+                    raise HTTPException(status_code=400, detail=f"Task {i+1} has an invalid answer-key release policy")
+                if not isinstance(answer_key.get("resources", []), list):
+                    raise HTTPException(status_code=400, detail=f"Task {i+1} answer-key resources must be a list")
             if task_type == "course_unit":
                 lesson_ids = task_content.get("lesson_ids")
                 course_id = task_content.get("course_id")
