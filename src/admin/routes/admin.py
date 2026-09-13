@@ -1368,7 +1368,13 @@ def update_group(
             raise HTTPException(status_code=400, detail="Group name already exists")
 
     if group_data.name is not None:
+        old_group_name = group.name
         group.name = group_data.name
+        if group.name != old_group_name:
+            from src.events.description_sync import sync_generated_descriptions_for_group_rename
+            sync_generated_descriptions_for_group_rename(
+                db, group.id, old_group_name, group.name
+            )
     if group_data.description is not None:
         group.description = group_data.description
     if "teacher_id" in patch:

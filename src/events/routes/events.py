@@ -24,7 +24,7 @@ from src.services.operational_groups import event_belongs_on_calendar_clause, op
 from src.services.recording_access import public_status, watchable_event_clause
 
 import logging
-from src.events.display import MULTI_GROUP_TYPES, display_description, display_groups, display_title
+from src.events.display import MULTI_GROUP_TYPES, display_groups, display_title
 
 
 def _utc_now() -> datetime:
@@ -271,7 +271,6 @@ def get_my_events(
         
         # Group-scoped events carry their group in the title; multi-group weekly tests do not.
         event_data.title = display_title(event, group_names)
-        event_data.description = display_description(event, group_names)
                 
         result.append(event_data)
         
@@ -1354,7 +1353,6 @@ def get_event_details(
     
     # Add group names
     event_data.groups = [eg.group.name for eg in event.event_groups if eg.group]
-    event_data.description = display_description(event, event_data.groups)
     
     # Add course names
     event_data.courses = [ec.course.title for ec in event.event_courses if ec.course]

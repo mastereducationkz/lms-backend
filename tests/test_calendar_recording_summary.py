@@ -41,18 +41,6 @@ def test_a_lesson_without_a_recording_has_none(world):
     assert _calendar(world, world["teacher"], ev)[ev.id].recording is None
 
 
-def test_calendar_uses_a_renamed_groups_current_name_for_generated_description(world):
-    group = world["group"](name="IELTS July 6 2026 - Said")
-    world["enrol"](group)
-    ev = world["lesson"](group, days_ahead=-1)
-    ev.description = "Scheduled class for Шадеева - IELTS July 6 2026"
-    world["db"].flush()
-
-    shown = _calendar(world, world["teacher"], ev)[ev.id]
-
-    assert shown.description == "Scheduled class for IELTS July 6 2026 - Said"
-
-
 def test_processing_is_reported_as_such(world):
     group = world["group"]()
     world["enrol"](group)
