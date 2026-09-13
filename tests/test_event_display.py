@@ -3,7 +3,7 @@ the title, and only the viewer's own groups listed (lead decision 2026-09-05).""
 
 from types import SimpleNamespace
 
-from src.events.display import display_title, display_groups
+from src.events.display import display_description, display_title, display_groups
 
 
 def _event(event_type, title, groups):
@@ -39,3 +39,19 @@ def test_weekly_test_events_list_only_the_viewers_groups():
 def test_other_events_list_all_their_groups_for_everyone():
     ev = _event("class", "Lesson 3", GROUPS[:2])
     assert display_groups(ev, viewer_group_ids={1}) == ["August 14 SAT - A", "Indi Ranya SAT - B"]
+
+
+def test_generated_class_description_uses_the_current_group_name_after_a_rename():
+    ev = _event("class", "Lesson 31", [(1, "IELTS July 6 2026 - Said")])
+    ev.description = "Scheduled class for Шадеева - IELTS July 6 2026"
+
+    assert display_description(ev, ["IELTS July 6 2026 - Said"]) == (
+        "Scheduled class for IELTS July 6 2026 - Said"
+    )
+
+
+def test_custom_description_is_never_rewritten():
+    ev = _event("class", "Lesson 31", [(1, "IELTS July 6 2026 - Said")])
+    ev.description = "Bring your mock-test results."
+
+    assert display_description(ev, ["IELTS July 6 2026 - Said"]) == ev.description

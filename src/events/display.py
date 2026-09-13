@@ -22,6 +22,26 @@ def display_title(event, group_names: Iterable[str]) -> str:
     return title
 
 
+def display_description(event, group_names: Iterable[str]) -> str | None:
+    """Return a current group label for auto-generated class descriptions.
+
+    Lesson events keep their generated description in the database. Group names
+    are mutable, so preserving that stored text makes a renamed group appear
+    under its former teacher in the calendar. Only the exact generated form is
+    derived again; staff-authored descriptions remain historical content.
+    """
+    description = event.description
+    names = [name for name in group_names if name]
+    if (
+        (event.event_type or "") == "class"
+        and len(names) == 1
+        and description
+        and description.startswith("Scheduled class for ")
+    ):
+        return f"Scheduled class for {names[0]}"
+    return description
+
+
 def display_groups(event, viewer_group_ids: Optional[Iterable[int]]) -> list[str]:
     """Group names to show: every attached group, except that a multi-group weekly test shows a
     student (``viewer_group_ids`` given) only the groups they belong to."""
