@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime, date, timezone
 from typing import Optional, List, Dict
 import json
@@ -27,6 +27,7 @@ class AssignmentSchema(BaseModel):
     is_hidden: Optional[bool] = False
     late_penalty_enabled: Optional[bool] = False
     late_penalty_multiplier: Optional[float] = 0.6
+    max_attempts: Optional[int] = Field(default=1, ge=1)
     created_at: datetime
 
     @field_validator('content', mode='before')
@@ -69,6 +70,7 @@ class AssignmentCreateSchema(BaseModel):
     max_file_size_mb: int = 10
     late_penalty_enabled: bool = False
     late_penalty_multiplier: float = 0.6
+    max_attempts: Optional[int] = Field(default=1, ge=1)
 
     @field_validator('content')
     @classmethod
@@ -99,6 +101,8 @@ class AssignmentSubmissionSchema(BaseModel):
     submitted_at: datetime
     is_late: Optional[bool] = False
     graded_at: Optional[datetime] = None
+    attempt_number: int = 1
+    is_current: bool = True
 
     @field_validator('answers', mode='before')
     @classmethod

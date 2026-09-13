@@ -13,6 +13,7 @@ from src.schemas.models import (
     AssignmentSchema, AssignmentCreateSchema, AssignmentSubmissionSchema,
     SubmitAssignmentSchema, GradeSubmissionSchema, AssignmentLinkedLesson,
     AssignmentExtension, AssignmentExtensionSchema, GrantExtensionSchema,
+    AssignmentResubmissionAccess,
     Event, EventGroup, Group, CourseGroupAccess,
 )
 from src.routes.auth import get_current_user_dependency
@@ -79,6 +80,7 @@ def _student_has_visible_submission(user_id: int, assignment_id: int, db: Sessio
             AssignmentSubmission.user_id == user_id,
             AssignmentSubmission.assignment_id == assignment_id,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         )
         .first()
         is not None
@@ -302,6 +304,7 @@ def get_assignments(
         submitted_assignment_ids = db.query(AssignmentSubmission.assignment_id).filter(
             AssignmentSubmission.user_id == current_user.id,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).subquery()
 
         query = query.filter(
@@ -471,6 +474,7 @@ def get_student_previous_homework(
         .filter(
             AssignmentSubmission.user_id == current_user.id,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         )
         .order_by(desc(AssignmentSubmission.submitted_at))
         .all()
@@ -867,7 +871,8 @@ def create_assignment(
                 event_id=event_id_for_group,
                 lesson_number=lesson_number_for_group,
                 late_penalty_enabled=assignment_data.late_penalty_enabled,
-                late_penalty_multiplier=assignment_data.late_penalty_multiplier
+                late_penalty_multiplier=assignment_data.late_penalty_multiplier,
+                max_attempts=assignment_data.max_attempts
             )
             db.add(new_assignment)
             created_assignments.append(new_assignment)
@@ -889,7 +894,8 @@ def create_assignment(
             max_file_size_mb=assignment_data.max_file_size_mb,
             event_id=resolve_eid(assignment_data.event_id, db),
             late_penalty_enabled=assignment_data.late_penalty_enabled,
-            late_penalty_multiplier=assignment_data.late_penalty_multiplier
+            late_penalty_multiplier=assignment_data.late_penalty_multiplier,
+            max_attempts=assignment_data.max_attempts
         )
         db.add(new_assignment)
         created_assignments.append(new_assignment)
@@ -1045,11 +1051,8 @@ def get_ready_to_submit(current_user: UserInDB = Depends(get_current_user_depend
         raise HTTPException(status_code=403, detail="Only students")
     result = []
     for assignment in _student_assignments(db, current_user.id):
-        has_sub = db.query(AssignmentSubmission).filter(
-            AssignmentSubmission.assignment_id == assignment.id,
-            AssignmentSubmission.user_id == current_user.id,
-            AssignmentSubmission.is_hidden == False).first() is not None
-        if has_sub:
+        status = get_assignment_status_for_student(assignment.id, current_user, db)
+        if not status.get("can_resubmit", True):
             continue
         if assignment_ready_for_student(current_user.id, assignment, db)["ready"]:
             result.append({
@@ -1106,6 +1109,7 @@ def get_homework_updates(
         AssignmentSubmission.is_graded == True,
         AssignmentSubmission.seen_by_student == False,
         AssignmentSubmission.is_hidden == False,
+        AssignmentSubmission.is_current == True,
         Assignment.is_active == True,
     ).options(joinedload(AssignmentSubmission.assignment)).all()
     for sub in graded:
@@ -1130,6 +1134,7 @@ def get_homework_updates(
         r[0] for r in db.query(AssignmentSubmission.assignment_id).filter(
             AssignmentSubmission.user_id == target_id,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).all()
     }
     for a in _student_assignments(db, target_id).all():
@@ -1289,6 +1294,7 @@ def get_student_answer_keys(
         AssignmentSubmission.assignment_id == assignment_id,
         AssignmentSubmission.user_id == current_user.id,
         AssignmentSubmission.is_hidden == False,
+        AssignmentSubmission.is_current == True,
     ).first() is not None
     releases = {
         (row.task_id, row.answer_key_id)
@@ -1463,6 +1469,7 @@ def update_assignment(
     # Update late penalty settings
     assignment.late_penalty_enabled = assignment_data.late_penalty_enabled
     assignment.late_penalty_multiplier = assignment_data.late_penalty_multiplier
+    assignment.max_attempts = assignment_data.max_attempts
     
     db.commit()
     db.refresh(assignment)
@@ -1660,8 +1667,9 @@ def submit_assignment(
             detail=f"Complete linked units first: {missing}",
         )
 
-    # Check if assignment is overdue (with extension support)
+    # Check deadline and the configurable attempt/reopen policy.
     is_late = False
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if assignment.due_date:
         # Check if student has an extension
         extension = db.query(AssignmentExtension).filter(
@@ -1672,25 +1680,33 @@ def submit_assignment(
         # Use extended deadline if exists, otherwise use original deadline
         effective_deadline = extension.extended_deadline if extension else assignment.due_date
         
-        if to_naive_utc(effective_deadline) < datetime.now(timezone.utc).replace(tzinfo=None):
+        if to_naive_utc(effective_deadline) < now:
             is_late = True
-            print(f"Submission is late! Effective deadline was: {effective_deadline}")
-            # We allow late submissions but mark them as late
-    
-    # Check if already submitted (non-hidden submission exists)
-    existing_submission = db.query(AssignmentSubmission).filter(
+    reopen = db.query(AssignmentResubmissionAccess).filter(
+        AssignmentResubmissionAccess.assignment_id == assignment_id,
+        AssignmentResubmissionAccess.student_id == current_user.id,
+        AssignmentResubmissionAccess.is_active == True,
+    ).first()
+    reopen_active = bool(reopen and (not reopen.expires_at or to_naive_utc(reopen.expires_at) >= now))
+    if reopen and reopen.expires_at and to_naive_utc(reopen.expires_at) < now:
+        reopen.is_active = False
+    if is_late and not reopen_active:
+        raise HTTPException(status_code=400, detail="The submission deadline has passed; ask your teacher to reopen it.")
+
+    all_submissions = db.query(AssignmentSubmission).filter(
         AssignmentSubmission.assignment_id == assignment_id,
         AssignmentSubmission.user_id == current_user.id,
-        AssignmentSubmission.is_hidden == False  # Hidden submissions don't count - student can resubmit
-    ).first()
+    ).order_by(AssignmentSubmission.attempt_number.asc(), AssignmentSubmission.id.asc()).all()
+    attempts_used = len(all_submissions)
+    if assignment.max_attempts is not None and attempts_used >= assignment.max_attempts:
+        raise HTTPException(status_code=400, detail="No attempts remaining for this assignment.")
+    existing_submission = next((s for s in all_submissions if s.is_current and not s.is_hidden), None)
     
     print(f"Checking for existing submissions: assignment_id={assignment_id}, user_id={current_user.id}")
     print(f"Existing submission found: {existing_submission is not None}")
     
     if existing_submission:
-        print(f"Found existing submission: ID={existing_submission.id}, submitted_at={existing_submission.submitted_at}")
-        print(f"Existing submission data: answers={existing_submission.answers}, file_url={existing_submission.file_url}")
-        raise HTTPException(status_code=400, detail="Assignment already submitted")
+        existing_submission.is_current = False
     
     print(f"Creating submission with data: {submission_data}")
     print(f"Submission answers: {submission_data.answers}")
@@ -1827,10 +1843,14 @@ def submit_assignment(
         max_score=assignment.max_score,
         is_graded=score is not None,
         is_late=is_late,
+        attempt_number=attempts_used + 1,
+        is_current=True,
         graded_at=datetime.now(timezone.utc).replace(tzinfo=None) if score is not None else None
     )
     
     db.add(submission)
+    if reopen_active:
+        reopen.is_active = False
     db.commit()
     db.refresh(submission)
 
@@ -2147,7 +2167,8 @@ def allow_resubmission(
 ):
     """
     Allow a student to resubmit an assignment.
-    This works by marking the current submission as hidden.
+    This grants a new attempt after the effective deadline while preserving
+    every prior submission in the teacher's history.
     """
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only teachers can allow resubmission")
@@ -2156,11 +2177,21 @@ def allow_resubmission(
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
         
-    # Mark as hidden so it doesn't block new submissions
-    submission.is_hidden = True
-    submission.graded_at = None
-    submission.is_graded = False # Optional: Reset graded status just in case
-    
+    access = db.query(AssignmentResubmissionAccess).filter(
+        AssignmentResubmissionAccess.assignment_id == submission.assignment_id,
+        AssignmentResubmissionAccess.student_id == submission.user_id,
+    ).first()
+    if access is None:
+        access = AssignmentResubmissionAccess(
+            assignment_id=submission.assignment_id,
+            student_id=submission.user_id,
+            granted_by=current_user.id,
+        )
+        db.add(access)
+    else:
+        access.granted_by = current_user.id
+        access.granted_at = datetime.now(timezone.utc)
+        access.is_active = True
     db.commit()
     
     return {"message": "Resubmission allowed successfully"}
@@ -2525,7 +2556,10 @@ def get_assignment_student_progress(
     ).all()
     
     # Create submission lookup
-    submission_lookup = {sub.user_id: sub for sub in submissions}
+    submission_lookup = {
+        sub.user_id: sub for sub in submissions
+        if sub.is_current and not sub.is_hidden
+    }
     
     # Get all extensions for this assignment
     extensions = db.query(AssignmentExtension).filter(
@@ -2620,7 +2654,8 @@ def get_assignment_student_progress(
             "assignment_type": assignment.assignment_type,
             "content": json.loads(assignment.content) if isinstance(assignment.content, str) else assignment.content,
             "late_penalty_enabled": assignment.late_penalty_enabled,
-            "late_penalty_multiplier": assignment.late_penalty_multiplier
+            "late_penalty_multiplier": assignment.late_penalty_multiplier,
+            "max_attempts": assignment.max_attempts
         },
         "students": student_progress,
         "summary": {
@@ -2660,11 +2695,13 @@ def get_assignment_status_for_student(
     
     is_read_only = not _student_has_active_assignment_access(current_user, assignment, db)
     
-    # Get existing submission (exclude hidden submissions - student should not see them)
+    # The current attempt is shown here; older attempts remain available to
+    # teachers through the submissions endpoint.
     submission = db.query(AssignmentSubmission).filter(
         AssignmentSubmission.assignment_id == assignment_id,
         AssignmentSubmission.user_id == current_user.id,
-        AssignmentSubmission.is_hidden == False  # Don't show hidden submissions to students
+        AssignmentSubmission.is_hidden == False,
+        AssignmentSubmission.is_current == True,
     ).first()
     
     # Check if student has an extension
@@ -2678,7 +2715,11 @@ def get_assignment_status_for_student(
     
     # Determine status
     status = "not_started"
-    attempts_left = 1  # async default to 1 attempt
+    attempts_used = db.query(AssignmentSubmission).filter(
+        AssignmentSubmission.assignment_id == assignment_id,
+        AssignmentSubmission.user_id == current_user.id,
+    ).count()
+    attempts_left = None if assignment.max_attempts is None else max(assignment.max_attempts - attempts_used, 0)
     late = False
     
     if submission:
@@ -2686,16 +2727,30 @@ def get_assignment_status_for_student(
             status = "graded"
         else:
             status = "submitted"
-        attempts_left = 0  # Already submitted
     else:
         # Check if assignment is overdue using effective deadline
-        if effective_deadline and effective_deadline < datetime.now(timezone.utc).replace(tzinfo=None):
+        if effective_deadline and to_naive_utc(effective_deadline) < datetime.now(timezone.utc).replace(tzinfo=None):
             late = True
             status = "overdue"
+
+    reopen = db.query(AssignmentResubmissionAccess).filter(
+        AssignmentResubmissionAccess.assignment_id == assignment_id,
+        AssignmentResubmissionAccess.student_id == current_user.id,
+        AssignmentResubmissionAccess.is_active == True,
+    ).first()
+    reopen_active = bool(reopen and (not reopen.expires_at or to_naive_utc(reopen.expires_at) >= datetime.now(timezone.utc).replace(tzinfo=None)))
+    can_resubmit = (
+        not is_read_only and attempts_left != 0 and
+        ((not late) or reopen_active)
+    )
     
     response_data = {
         "status": status,
         "attempts_left": attempts_left,
+        "attempts_used": attempts_used,
+        "max_attempts": assignment.max_attempts,
+        "can_resubmit": can_resubmit,
+        "reopen_active": reopen_active,
         "late": late,
         "due_date": assignment.due_date,
         "submitted_at": submission.submitted_at if submission else None,
@@ -2708,7 +2763,8 @@ def get_assignment_status_for_student(
         "answers": json.loads(submission.answers) if submission and submission.answers else None,
         "file_url": submission.file_url if submission else None,
         "submitted_file_name": submission.submitted_file_name if submission else None,
-        "feedback": submission.feedback if submission else None
+        "feedback": submission.feedback if submission else None,
+        "attempt_number": submission.attempt_number if submission else None
     }
     
     # Add extension info if exists

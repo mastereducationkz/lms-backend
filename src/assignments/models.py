@@ -28,6 +28,9 @@ class Assignment(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     late_penalty_enabled = Column(Boolean, default=False)
     late_penalty_multiplier = Column(Float, default=0.6)
+    # None means unlimited attempts. Existing rows are migrated to 1 attempt;
+    # new homework created by the builder may explicitly choose unlimited.
+    max_attempts = Column(Integer, nullable=True, default=1)
 
     lesson = relationship("Lesson", back_populates="assignments")
     group = relationship("Group")
@@ -53,6 +56,8 @@ class AssignmentSubmission(Base):
     submitted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_late = Column(Boolean, default=False)
     graded_at = Column(DateTime, nullable=True)
+    attempt_number = Column(Integer, nullable=False, default=1)
+    is_current = Column(Boolean, nullable=False, default=True)
 
     assignment = relationship("Assignment", back_populates="submissions")
     user = relationship("UserInDB", foreign_keys=[user_id], back_populates="assignment_submissions")
@@ -62,6 +67,7 @@ class AssignmentSubmission(Base):
         Index('idx_assignment_submissions_user_assignment', 'user_id', 'assignment_id'),
         Index('idx_assignment_submissions_assignment_submitted', 'assignment_id', 'submitted_at'),
         Index('idx_assignment_submissions_user_graded', 'user_id', 'is_graded'),
+        Index('idx_assignment_submissions_current', 'assignment_id', 'user_id', 'is_current'),
     )
 
 
@@ -144,6 +150,22 @@ class AssignmentExtension(Base):
     assignment = relationship("Assignment", backref="extensions")
     student = relationship("UserInDB", foreign_keys=[student_id], backref="assignment_extensions")
     granter = relationship("UserInDB", foreign_keys=[granted_by])
+
+
+class AssignmentResubmissionAccess(Base):
+    """Teacher-granted access to submit again after the effective deadline."""
+    __tablename__ = "assignment_resubmission_access"
+    id = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, index=True)
+    student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    granted_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    granted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('assignment_id', 'student_id', name='uq_assignment_resubmission_access'),
+    )
 
 
 class GroupAssignment(Base):
