@@ -13,7 +13,7 @@ from src.schemas.models import (
     AssignmentSchema, AssignmentCreateSchema, AssignmentSubmissionSchema,
     SubmitAssignmentSchema, GradeSubmissionSchema, AssignmentLinkedLesson,
     AssignmentExtension, AssignmentExtensionSchema, GrantExtensionSchema,
-    AssignmentResubmissionAccess,
+    AssignmentResubmissionAccess, AllowResubmissionSchema, PointHistory,
     Event, EventGroup, Group, CourseGroupAccess,
 )
 from src.routes.auth import get_current_user_dependency
@@ -33,6 +33,31 @@ from src.services import storage_service
 from src.exams.models import BLUEBOOK_MAX_TEST_NUMBER, BLUEBOOK_MIN_TEST_NUMBER
 from src.exams.projection import project_bluebook_answers
 from src.assignments.answer_keys import RELEASE_POLICIES, student_visible_answer_keys, strip_answer_keys
+
+
+def _reverse_active_grade_points(db: Session, submission: AssignmentSubmission, assignment: Assignment, reason: str) -> None:
+    """Remove points that were awarded for a grade that is no longer active.
+
+    The amount is recorded on the submission at grading time, avoiding a
+    fragile reconstruction from score/streak history.  Old submissions from
+    before this field existed have a zero value and are deliberately left
+    untouched rather than risking an incorrect deduction.
+    """
+    points = submission.grade_points_awarded or 0
+    if not points:
+        return
+    student = db.query(UserInDB).filter(UserInDB.id == submission.user_id).first()
+    if not student:
+        return
+    student.activity_points = (student.activity_points or 0) - points
+    db.add(PointHistory(
+        user_id=submission.user_id,
+        amount=-points,
+        reason="assignment_grade_reversal",
+        description=(f"Reversed superseded grade points: {assignment.title} "
+                     f"(attempt {submission.attempt_number}; {reason})"),
+    ))
+    submission.grade_points_awarded = 0
 
 
 def _assignment_course_id(assignment: Assignment, db: Session) -> Optional[int]:
@@ -1687,9 +1712,14 @@ def submit_assignment(
         AssignmentResubmissionAccess.student_id == current_user.id,
         AssignmentResubmissionAccess.is_active == True,
     ).first()
-    reopen_active = bool(reopen and (not reopen.expires_at or to_naive_utc(reopen.expires_at) >= now))
-    if reopen and reopen.expires_at and to_naive_utc(reopen.expires_at) < now:
-        reopen.is_active = False
+    reopen_active = bool(
+        reopen
+        and (reopen.mode == "one_extra" or (
+            reopen.mode == "until_expiry"
+            and reopen.expires_at
+            and to_naive_utc(reopen.expires_at) >= now
+        ))
+    )
     if is_late and not reopen_active:
         raise HTTPException(status_code=400, detail="The submission deadline has passed; ask your teacher to reopen it.")
 
@@ -1698,14 +1728,22 @@ def submit_assignment(
         AssignmentSubmission.user_id == current_user.id,
     ).order_by(AssignmentSubmission.attempt_number.asc(), AssignmentSubmission.id.asc()).all()
     attempts_used = len(all_submissions)
-    if assignment.max_attempts is not None and attempts_used >= assignment.max_attempts:
-        raise HTTPException(status_code=400, detail="No attempts remaining for this assignment.")
     existing_submission = next((s for s in all_submissions if s.is_current and not s.is_hidden), None)
+    # A published grade is final. Unlimited attempts apply while the work is
+    # awaiting a final grade; after grading only a teacher exception can open
+    # another attempt.
+    if existing_submission and existing_submission.is_graded and not reopen_active:
+        raise HTTPException(status_code=409, detail="This homework has already been graded. Ask your teacher to allow another attempt.")
+    if not reopen_active and assignment.max_attempts is not None and attempts_used >= assignment.max_attempts:
+        raise HTTPException(status_code=400, detail="No attempts remaining for this assignment.")
     
     print(f"Checking for existing submissions: assignment_id={assignment_id}, user_id={current_user.id}")
     print(f"Existing submission found: {existing_submission is not None}")
     
     if existing_submission:
+        if existing_submission.is_graded:
+            _reverse_active_grade_points(db, existing_submission, assignment, "student submitted a replacement")
+            existing_submission.is_grade_superseded = True
         existing_submission.is_current = False
     
     print(f"Creating submission with data: {submission_data}")
@@ -1849,7 +1887,7 @@ def submit_assignment(
     )
     
     db.add(submission)
-    if reopen_active:
+    if reopen_active and reopen.mode == "one_extra":
         reopen.is_active = False
     db.commit()
     db.refresh(submission)
@@ -2026,14 +2064,6 @@ def get_submission(
     
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
-    # Previous attempts are immutable evidence of the student's work. They remain
-    # visible to staff, but only the current/latest attempt can affect a grade.
-    if not submission.is_current:
-        raise HTTPException(
-            status_code=409,
-            detail="Only the student's latest attempt can be graded.",
-        )
-    
     # Check permissions
     if current_user.role == "student":
         # Students can only see their own submissions
@@ -2169,13 +2199,14 @@ async def mark_submission_seen(
 @router.put("/submissions/{submission_id}/allow-resubmit")
 def allow_resubmission(
     submission_id: int,
+    policy: AllowResubmissionSchema = AllowResubmissionSchema(),
     current_user: UserInDB = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
     """
-    Allow a student to resubmit an assignment.
-    This grants a new attempt after the effective deadline while preserving
-    every prior submission in the teacher's history.
+    Give a student a deliberate exception after their work is graded.
+    The safe default is one extra attempt. Repeated replacements always need
+    a teacher-selected expiry, including after the normal deadline.
     """
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only teachers can allow resubmission")
@@ -2183,6 +2214,26 @@ def allow_resubmission(
     submission = db.query(AssignmentSubmission).filter(AssignmentSubmission.id == submission_id).first()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+    if not submission.is_current:
+        raise HTTPException(status_code=409, detail="Only the current attempt can be reopened")
+
+    assignment = db.query(Assignment).filter(Assignment.id == submission.assignment_id).first()
+    has_access = current_user.role == "admin"
+    if assignment and assignment.lesson_id and not has_access:
+        lesson = db.query(Lesson).filter(Lesson.id == assignment.lesson_id).first()
+        module = db.query(Module).filter(Module.id == lesson.module_id).first() if lesson else None
+        has_access = bool(module and check_course_access(module.course_id, current_user, db))
+    if assignment and assignment.group_id and not has_access and current_user.role == "teacher":
+        group = db.query(Group).filter(Group.id == assignment.group_id).first()
+        has_access = bool(group and group.teacher_id == current_user.id)
+    if not has_access:
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if policy.mode == "until_expiry" and (
+        not policy.expires_at or to_naive_utc(policy.expires_at) <= now
+    ):
+        raise HTTPException(status_code=400, detail="Choose a future expiry for repeated replacements")
         
     access = db.query(AssignmentResubmissionAccess).filter(
         AssignmentResubmissionAccess.assignment_id == submission.assignment_id,
@@ -2193,15 +2244,23 @@ def allow_resubmission(
             assignment_id=submission.assignment_id,
             student_id=submission.user_id,
             granted_by=current_user.id,
+            mode=policy.mode,
+            expires_at=policy.expires_at,
         )
         db.add(access)
     else:
         access.granted_by = current_user.id
         access.granted_at = datetime.now(timezone.utc)
         access.is_active = True
+        access.mode = policy.mode
+        access.expires_at = policy.expires_at
     db.commit()
     
-    return {"message": "Resubmission allowed successfully"}
+    return {
+        "message": "One extra attempt allowed" if policy.mode == "one_extra" else "Repeated replacements allowed until the selected expiry",
+        "mode": policy.mode,
+        "expires_at": policy.expires_at,
+    }
 @router.put("/{assignment_id}/submissions/{submission_id}/grade", response_model=AssignmentSubmissionSchema)
 async def grade_submission(
     assignment_id: int,
@@ -2227,6 +2286,8 @@ async def grade_submission(
     ).first()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+    if not submission.is_current:
+        raise HTTPException(status_code=409, detail="Only the latest attempt can be graded")
     
     # Check permissions
     has_access = False
@@ -2260,6 +2321,10 @@ async def grade_submission(
             detail=f"Score must be between 0 and {assignment.max_score}"
         )
     
+    # Re-grading the current attempt replaces (rather than stacks on) its
+    # leaderboard points.
+    _reverse_active_grade_points(db, submission, assignment, "grade updated")
+
     # Update submission
     submission.score = grade_data.score
     submission.feedback = grade_data.feedback
@@ -2341,13 +2406,16 @@ async def grade_submission(
         
         total_points = base_points + bonus_points
         
-        award_points(
+        awarded = award_points(
             db, 
             submission.user_id, 
             total_points, 
             'assignment', 
             f'Graded assignment: {assignment.title} ({grade_data.score}/{assignment.max_score})'
         )
+        if awarded:
+            submission.grade_points_awarded = awarded.amount
+            db.commit()
     except Exception as e:
         print(f"Failed to award points: {e}")
     
@@ -2745,11 +2813,20 @@ def get_assignment_status_for_student(
         AssignmentResubmissionAccess.student_id == current_user.id,
         AssignmentResubmissionAccess.is_active == True,
     ).first()
-    reopen_active = bool(reopen and (not reopen.expires_at or to_naive_utc(reopen.expires_at) >= datetime.now(timezone.utc).replace(tzinfo=None)))
-    can_resubmit = (
-        not is_read_only and attempts_left != 0 and
-        ((not late) or reopen_active)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    reopen_active = bool(
+        reopen
+        and (reopen.mode == "one_extra" or (
+            reopen.mode == "until_expiry"
+            and reopen.expires_at
+            and to_naive_utc(reopen.expires_at) >= now
+        ))
     )
+    # Normal policies allow replacements only before the homework has a final
+    # grade. A teacher exception is the sole way to submit again afterwards.
+    current_is_graded = bool(submission and submission.is_graded)
+    normal_policy_allows = attempts_left != 0 and not late and not current_is_graded
+    can_resubmit = not is_read_only and (reopen_active or normal_policy_allows)
     
     response_data = {
         "status": status,
@@ -2758,6 +2835,8 @@ def get_assignment_status_for_student(
         "max_attempts": assignment.max_attempts,
         "can_resubmit": can_resubmit,
         "reopen_active": reopen_active,
+        "resubmission_mode": reopen.mode if reopen_active else None,
+        "resubmission_expires_at": reopen.expires_at if reopen_active else None,
         "late": late,
         "due_date": assignment.due_date,
         "submitted_at": submission.submitted_at if submission else None,

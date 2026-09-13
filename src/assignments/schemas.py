@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime, date, timezone
-from typing import Optional, List, Dict
+from typing import Literal, Optional, List, Dict
 import json
 from src.utils.utc_json import utc_z
 
@@ -103,6 +103,7 @@ class AssignmentSubmissionSchema(BaseModel):
     graded_at: Optional[datetime] = None
     attempt_number: int = 1
     is_current: bool = True
+    is_grade_superseded: bool = False
 
     @field_validator('answers', mode='before')
     @classmethod
@@ -121,6 +122,22 @@ class AssignmentSubmissionSchema(BaseModel):
 class GradeSubmissionSchema(BaseModel):
     score: int
     feedback: Optional[str] = None
+
+
+class AllowResubmissionSchema(BaseModel):
+    """Teacher exception after a grade is published.
+
+    ``one_extra`` is intentionally the safe default.  Repeated replacements
+    must be bounded by an explicit expiry chosen by the teacher.
+    """
+    mode: Literal["one_extra", "until_expiry"] = "one_extra"
+    expires_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def until_expiry_requires_a_deadline(self):
+        if self.mode == "until_expiry" and self.expires_at is None:
+            raise ValueError("An expiry is required for repeated replacements")
+        return self
 
 
 class SubmitAssignmentSchema(BaseModel):

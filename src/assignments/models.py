@@ -58,6 +58,10 @@ class AssignmentSubmission(Base):
     graded_at = Column(DateTime, nullable=True)
     attempt_number = Column(Integer, nullable=False, default=1)
     is_current = Column(Boolean, nullable=False, default=True)
+    # A graded attempt remains auditable after a replacement, but its grade is no
+    # longer the student's active grade or a source of leaderboard points.
+    is_grade_superseded = Column(Boolean, nullable=False, default=False)
+    grade_points_awarded = Column(Integer, nullable=False, default=0)
 
     assignment = relationship("Assignment", back_populates="submissions")
     user = relationship("UserInDB", foreign_keys=[user_id], back_populates="assignment_submissions")
@@ -153,7 +157,7 @@ class AssignmentExtension(Base):
 
 
 class AssignmentResubmissionAccess(Base):
-    """Teacher-granted access to submit again after the effective deadline."""
+    """A teacher-controlled exception to the normal submission policy."""
     __tablename__ = "assignment_resubmission_access"
     id = Column(Integer, primary_key=True, index=True)
     assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -162,6 +166,9 @@ class AssignmentResubmissionAccess(Base):
     granted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     expires_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    # one_extra is consumed by the next submission.  until_expiry ignores the
+    # normal attempt cap until expires_at, so it always requires an expiry.
+    mode = Column(String, nullable=False, default="one_extra")
 
     __table_args__ = (
         UniqueConstraint('assignment_id', 'student_id', name='uq_assignment_resubmission_access'),
