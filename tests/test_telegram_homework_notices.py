@@ -161,6 +161,112 @@ def test_notice_text_includes_the_due_date_when_set():
     assert "Срок:" in text
 
 
+def test_notice_text_lists_real_pdf_text_task_details_and_post_submission_key():
+    text = notices.notice_text(
+        "Homework from Unit 18: Paired Passages",
+        "July 16 SAT - Кенжебаев",
+        datetime(2026, 9, 15, 14, 5),
+        "https://lms.mastereducation.kz/homework/7281",
+        assignment_type="multi_task",
+        content={"tasks": [{
+            "id": "paired-passages",
+            "task_type": "pdf_text_task",
+            "title": "Paired Passages PDF",
+            "content": {
+                "teacher_file_name": "18) Paired passages.pptx (1).pdf",
+                "question": 'Complete this PDF file. Answer "completed" if you have done so.',
+            },
+            "answer_keys": [{"id": "key", "release_policy": "after_submission"}],
+        }]},
+    )
+
+    assert "Задания:" in text
+    assert "1. Paired Passages PDF (файл + текстовый ответ)" in text
+    assert "18) Paired passages.pptx (1).pdf" in text
+    assert 'Answer "completed" if you have done so.' in text
+    assert "После отправки станет доступен материал для самопроверки." in text
+    assert text.endswith('<a href="https://lms.mastereducation.kz/homework/7281">Открыть задание</a>')
+
+
+def test_notice_text_covers_every_supported_multi_task_type_without_leaking_key_contents():
+    task_types = [
+        ("course_unit", {}, "уроки курса"),
+        ("file_task", {"question": "Upload your worksheet."}, "загрузка файла"),
+        ("text_task", {"question": "Explain your answer."}, "текстовый ответ"),
+        ("link_task", {"link_description": "Watch the lesson.", "completion_criteria": "watch"}, "внешняя ссылка"),
+        ("pdf_text_task", {"teacher_file_name": "worksheet.pdf", "question": "Complete it."}, "файл + текстовый ответ"),
+        ("audio_task", {"question": "Record your answer."}, "аудиоответ"),
+        ("bluebook_task", {"test_number": 8}, "Bluebook Practice Test #8"),
+    ]
+    content = {"tasks": [
+        {"id": f"task-{kind}", "task_type": kind, "title": kind, "content": task_content,
+         "answer_keys": [{"id": f"key-{kind}", "release_policy": "manual",
+                          "resources": [{"body": "must never be sent"}]}]}
+        for kind, task_content, _ in task_types
+    ]}
+
+    text = notices.notice_text("All task types", "group", None, "https://example.test/hw",
+                               assignment_type="multi_task", content=content)
+
+    for _, _, expected in task_types:
+        assert expected in text
+    assert "must never be sent" not in text
+    assert "будет опубликован преподавателем" in text
+
+
+def test_notice_text_reports_mixed_answer_key_availability_and_course_unit_names():
+    text = notices.notice_text(
+        "Course homework", "group", None, "https://example.test/hw", assignment_type="multi_task",
+        content={"tasks": [{
+            "task_type": "course_unit", "title": "Course work", "content": {"lesson_ids": [4, 8]},
+            "answer_keys": [
+                {"release_policy": "immediate"}, {"release_policy": "after_submission"},
+                {"release_policy": "manual"},
+            ],
+        }]}, lesson_titles={4: "Unit 4: Evidence", 8: "Unit 8: Inferences"},
+    )
+
+    assert "Unit 4: Evidence, Unit 8: Inferences" in text
+    assert "уже доступна" in text
+    assert "После отправки" in text
+    assert "будет опубликован преподавателем" in text
+
+
+def test_notice_text_keeps_final_link_within_telegram_limit_for_long_teacher_text():
+    long_text = "<&>" * 3_000
+    text = notices.notice_text(
+        long_text, long_text, datetime(2026, 9, 15, 15, 5), "https://example.test/homework/1",
+        assignment_type="multi_task",
+        content={"tasks": [{"task_type": "text_task", "title": long_text,
+                             "content": {"question": long_text}} for _ in range(20)]},
+    )
+
+    assert len(text) <= 4096
+    assert text.endswith('<a href="https://example.test/homework/1">Открыть задание</a>')
+
+
+def test_notice_text_uses_real_standalone_blank_and_matching_prompts():
+    blanks = notices.notice_text("Blanks", "group", None, "https://example.test/hw",
+                                 assignment_type="fill_in_blanks",
+                                 content={"text_with_blanks": "The [blank] is correct."})
+    matching = notices.notice_text("Match", "group", None, "https://example.test/hw",
+                                   assignment_type="matching",
+                                   content={"left_items": ["A", "B", "C"]})
+
+    assert "The [blank] is correct." in blanks
+    assert "Сопоставьте элементы (3)." in matching
+
+
+def test_notice_text_describes_platform_and_legacy_homework_types():
+    platform = notices.notice_text("Weekly IELTS", "group", None, "https://example.test/hw",
+                                   assignment_type="platform_test", content={})
+    pdf = notices.notice_text("PDF", "group", None, "https://example.test/hw",
+                              assignment_type="pdf", content={})
+
+    assert "еженедельный тест на платформе" in platform
+    assert "задания в PDF" in pdf
+
+
 # ── send_due_notices ──────────────────────────────────────────────────────────────────────────
 
 
