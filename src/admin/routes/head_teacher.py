@@ -627,7 +627,9 @@ def get_teacher_details(
         AssignmentSubmission.graded_by == teacher_id,
         AssignmentSubmission.is_graded == True,
         AssignmentSubmission.score.isnot(None),
-        AssignmentSubmission.max_score > 0
+        AssignmentSubmission.max_score > 0,
+        # This is a score-quality distribution, not a workload count.
+        AssignmentSubmission.is_current == True,
     ).all()
     
     # Calculate percentage and distribute into buckets
@@ -893,7 +895,8 @@ def get_teacher_assignments(
         
         graded_submissions = db.query(func.count(AssignmentSubmission.id)).filter(
             AssignmentSubmission.assignment_id == assignment.id,
-            AssignmentSubmission.is_graded == True
+            AssignmentSubmission.is_graded == True,
+            AssignmentSubmission.is_current == True,
         ).scalar() or 0
         
         assignments.append(AssignmentItem(
@@ -912,4 +915,3 @@ def get_teacher_assignments(
         assignments=assignments,
         total=total
     )
-

@@ -114,7 +114,8 @@ def get_detailed_student_analytics(
                 for assignment in assignments:
                     submission = db.query(AssignmentSubmission).filter(
                         AssignmentSubmission.assignment_id == assignment.id,
-                        AssignmentSubmission.user_id == student_id
+                        AssignmentSubmission.user_id == student_id,
+                        AssignmentSubmission.is_current == True,
                     ).first()
                     
                     assignment_data.append({
@@ -605,7 +606,8 @@ async def get_course_analytics_overview(
                 AssignmentSubmission.submitted_at
             ).filter(
                 AssignmentSubmission.assignment_id.in_(assignment_ids),
-                AssignmentSubmission.user_id.in_(student_ids)
+                AssignmentSubmission.user_id.in_(student_ids),
+                AssignmentSubmission.is_current == True,
             ).all()
 
             for submission in submissions:
@@ -944,7 +946,8 @@ def get_quiz_performance_analytics(
     # Analyze quiz assignments
     for assignment in quiz_assignments:
         submissions = db.query(AssignmentSubmission).filter(
-            AssignmentSubmission.assignment_id == assignment.id
+            AssignmentSubmission.assignment_id == assignment.id,
+            AssignmentSubmission.is_current == True,
         ).all()
         
         total_submissions = len(submissions)
@@ -1388,7 +1391,8 @@ def get_all_students_analytics(
             func.coalesce(func.sum(AssignmentSubmission.max_score), 0).label("total_max_score")
         ).filter(
             AssignmentSubmission.user_id.in_(student_ids),
-            AssignmentSubmission.is_graded == True
+            AssignmentSubmission.is_graded == True,
+            AssignmentSubmission.is_current == True,
         ).group_by(
             AssignmentSubmission.user_id
         ).all()
@@ -1633,7 +1637,8 @@ def get_groups_analytics(
                     for assignment in assignments:
                         submission = db.query(AssignmentSubmission).filter(
                             AssignmentSubmission.assignment_id == assignment.id,
-                            AssignmentSubmission.user_id == student.id
+                            AssignmentSubmission.user_id == student.id,
+                            AssignmentSubmission.is_current == True,
                         ).first()
                         
                         if submission and submission.is_graded:
@@ -1785,7 +1790,8 @@ def get_course_groups_analytics(
         graded_submissions = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id.in_(assignment_ids),
             AssignmentSubmission.user_id.in_(list(active_student_ids)),
-            AssignmentSubmission.is_graded == True
+            AssignmentSubmission.is_graded == True,
+            AssignmentSubmission.is_current == True,
         ).all()
 
         for submission in graded_submissions:
@@ -1988,7 +1994,8 @@ def get_group_students_analytics(
             for assignment in course_assignments:
                 submission = db.query(AssignmentSubmission).filter(
                     AssignmentSubmission.assignment_id == assignment.id,
-                    AssignmentSubmission.user_id == student.id
+                    AssignmentSubmission.user_id == student.id,
+                    AssignmentSubmission.is_current == True,
                 ).first()
                 
                 if submission and submission.is_graded:
@@ -2576,7 +2583,8 @@ def export_all_students_report(
                 for assignment in course_assignments:
                     submission = db.query(AssignmentSubmission).filter(
                         AssignmentSubmission.assignment_id == assignment.id,
-                        AssignmentSubmission.user_id == student.id
+                        AssignmentSubmission.user_id == student.id,
+                        AssignmentSubmission.is_current == True,
                     ).first()
                     
                     if submission and submission.is_graded:
@@ -3072,7 +3080,8 @@ def get_student_detailed_progress(
             s.assignment_id: s 
             for s in db.query(AssignmentSubmission).filter(
                 AssignmentSubmission.user_id == student_id,
-                AssignmentSubmission.assignment_id.in_([a.id for a in assignments]) if assignments else False
+                AssignmentSubmission.assignment_id.in_([a.id for a in assignments]) if assignments else False,
+                AssignmentSubmission.is_current == True,
             ).all()
         }
         
@@ -3421,7 +3430,8 @@ def export_analytics_to_excel(
                 for assignment in assignments:
                     submission = db.query(AssignmentSubmission).filter(
                         AssignmentSubmission.assignment_id == assignment.id,
-                        AssignmentSubmission.user_id == student.id
+                        AssignmentSubmission.user_id == student.id,
+                        AssignmentSubmission.is_current == True,
                     ).first()
                     
                     if submission and submission.is_graded:

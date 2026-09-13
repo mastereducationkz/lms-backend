@@ -165,6 +165,7 @@ def child_assignments(
         submission = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id == a.id,
             AssignmentSubmission.user_id == student_id,
+            AssignmentSubmission.is_current == True,
         ).first()
         status = _build_student_assignment_status(submission, a)
         result.append({

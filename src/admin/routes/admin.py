@@ -304,7 +304,8 @@ def _admin_operational_counts(db: Session) -> dict:
     now = datetime.utcnow()
     week_end = now + timedelta(days=7)
     pending_homework_to_grade = db.query(AssignmentSubmission).filter(
-        AssignmentSubmission.is_graded == False
+        AssignmentSubmission.is_graded == False,
+        AssignmentSubmission.is_current == True,
     ).count()
     students_without_assignment_zero = db.query(UserInDB).filter(
         UserInDB.role == "student",

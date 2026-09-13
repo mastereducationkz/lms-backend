@@ -66,6 +66,7 @@ def _homework_section(db: Session, student_id: int) -> Dict[str, Any]:
         for s in db.query(AssignmentSubmission).filter(
             AssignmentSubmission.user_id == student_id,
             AssignmentSubmission.assignment_id.in_(assignment_ids or [0]),
+            AssignmentSubmission.is_current == True,
         ).all()
     }
     linked_lessons = {

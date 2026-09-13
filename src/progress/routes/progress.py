@@ -249,13 +249,15 @@ def create_progress_snapshot(user_id: int, course_id: int, db: Session):
     completed_assignments = db.query(func.count(AssignmentSubmission.id)).join(Assignment).join(Lesson).join(Module).filter(
         Module.course_id == course_id,
         AssignmentSubmission.user_id == user_id,
-        AssignmentSubmission.is_graded == True
+        AssignmentSubmission.is_graded == True,
+        AssignmentSubmission.is_current == True,
     ).scalar() or 0
 
     avg_assignment_score = db.query(func.avg(AssignmentSubmission.score)).join(Assignment).join(Lesson).join(Module).filter(
         Module.course_id == course_id,
         AssignmentSubmission.user_id == user_id,
-        AssignmentSubmission.is_graded == True
+        AssignmentSubmission.is_graded == True,
+        AssignmentSubmission.is_current == True,
     ).scalar() or 0
 
     assignment_pct = float(avg_assignment_score) if avg_assignment_score else 0.0
@@ -400,7 +402,8 @@ def get_course_progress(
             for assignment in assignments:
                 submission = db.query(AssignmentSubmission).filter(
                     AssignmentSubmission.assignment_id == assignment.id,
-                    AssignmentSubmission.user_id == target_student_id
+                    AssignmentSubmission.user_id == target_student_id,
+                    AssignmentSubmission.is_current == True,
                 ).first()
                 
                 if submission:
@@ -524,7 +527,8 @@ def mark_lesson_complete(
         has_sub = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id == aid,
             AssignmentSubmission.user_id == current_user.id,
-            AssignmentSubmission.is_hidden == False).first() is not None
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True).first() is not None
         if has_sub:
             continue
         if assignment_ready_for_student(current_user.id, assignment, db)["ready"]:
@@ -697,7 +701,8 @@ def get_students_progress(
         
         # Получаем количество выполненных заданий
         assignment_count = db.query(AssignmentSubmission).filter(
-            AssignmentSubmission.user_id == student.id
+            AssignmentSubmission.user_id == student.id,
+            AssignmentSubmission.is_current == True,
         ).count()
         
         # Получаем group_id студента через GroupStudent association table

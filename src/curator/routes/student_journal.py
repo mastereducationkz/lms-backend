@@ -152,7 +152,10 @@ def list_students(
                 case((AssignmentSubmission.is_graded == True, AssignmentSubmission.score), else_=None)
             ).label("avg_score"),
         )
-        .filter(AssignmentSubmission.user_id.in_(student_ids))
+        .filter(
+            AssignmentSubmission.user_id.in_(student_ids),
+            AssignmentSubmission.is_current == True,
+        )
         .group_by(AssignmentSubmission.user_id)
         .all()
     )

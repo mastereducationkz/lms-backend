@@ -371,6 +371,7 @@ def _finish_homework_and_progress(
             .filter(
                 AssignmentSubmission.assignment_id.in_(assignment_ids),
                 AssignmentSubmission.user_id.in_(ids),
+                AssignmentSubmission.is_current == True,
             )
             .all()
         }

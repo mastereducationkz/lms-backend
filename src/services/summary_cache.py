@@ -189,7 +189,8 @@ def recalculate_student_summary(
     ).join(Assignment).join(Lesson).join(Module).filter(
         AssignmentSubmission.user_id == user_id,
         Module.course_id == course_id,
-        AssignmentSubmission.is_graded == True
+        AssignmentSubmission.is_graded == True,
+        AssignmentSubmission.is_current == True,
     ).first()
     
     total_assignments = db.query(func.count(Assignment.id)).join(

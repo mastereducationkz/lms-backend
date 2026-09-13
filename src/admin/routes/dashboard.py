@@ -513,7 +513,8 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
 
         pending_submissions = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id.in_(teacher_assignment_ids_sq),
-            AssignmentSubmission.is_graded == False
+            AssignmentSubmission.is_graded == False,
+            AssignmentSubmission.is_current == True,
         ).count()
 
         total_submissions = db.query(AssignmentSubmission).filter(
@@ -526,7 +527,8 @@ def get_teacher_dashboard_stats(user: UserInDB, db: Session) -> DashboardStatsSc
         ).filter(
             AssignmentSubmission.assignment_id.in_(teacher_assignment_ids_sq),
             AssignmentSubmission.is_graded == True,
-            AssignmentSubmission.score.isnot(None)
+            AssignmentSubmission.score.isnot(None),
+            AssignmentSubmission.is_current == True,
         ).one()
         graded_submissions_count = graded_submissions_count or 0
         if graded_submissions_count and avg_score_val is not None:
@@ -716,7 +718,8 @@ def get_curator_dashboard_stats(
             AssignmentSubmission.user_id.in_(current_student_ids),
             AssignmentSubmission.submitted_at >= date_start,
             AssignmentSubmission.submitted_at <= date_end,
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).distinct().all()
         for s in active_submissions: active_student_ids_set.add(s[0])
         total_active_students = len(active_student_ids_set)
@@ -739,7 +742,8 @@ def get_curator_dashboard_stats(
             ~db.query(AssignmentSubmission).filter(
                 AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
                 AssignmentSubmission.user_id == GroupStudent.student_id,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).exists()
         ).count()
         
@@ -749,7 +753,8 @@ def get_curator_dashboard_stats(
             AssignmentSubmission.user_id.in_(current_student_ids),
             AssignmentSubmission.submitted_at > GroupAssignment.due_date,
             GroupAssignment.group_id.in_(curator_group_ids),
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).count()
 
         unsubmitted_direct = db.query(Assignment, GroupStudent).join(
@@ -763,7 +768,8 @@ def get_curator_dashboard_stats(
             ~db.query(AssignmentSubmission).filter(
                 AssignmentSubmission.assignment_id == Assignment.id,
                 AssignmentSubmission.user_id == GroupStudent.student_id,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).exists()
         ).count()
         
@@ -775,7 +781,8 @@ def get_curator_dashboard_stats(
             Assignment.group_id.in_(curator_group_ids),
             Assignment.is_active == True,
             Assignment.is_hidden == False,
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).count()
         
         total_overdue_global = unsubmitted_ga + late_ga + unsubmitted_direct + late_direct
@@ -784,7 +791,8 @@ def get_curator_dashboard_stats(
         total_pending_global = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.user_id.in_(current_student_ids),
             AssignmentSubmission.is_graded == False,
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).count()
 
     # 3. Stats per Group (replacing Curator Performance)
@@ -828,23 +836,23 @@ def get_curator_dashboard_stats(
             ug = db.query(GroupAssignment, GroupStudent).join(GroupStudent, GroupAssignment.group_id == GroupStudent.group_id).filter(
                 GroupAssignment.group_id == g.id, GroupAssignment.due_date < datetime.utcnow(), GroupAssignment.is_active == True,
                 GroupStudent.student_id.in_(g_student_ids),
-                ~db.query(AssignmentSubmission).filter(AssignmentSubmission.assignment_id == GroupAssignment.assignment_id, AssignmentSubmission.user_id == GroupStudent.student_id, AssignmentSubmission.is_hidden == False).exists()
+                ~db.query(AssignmentSubmission).filter(AssignmentSubmission.assignment_id == GroupAssignment.assignment_id, AssignmentSubmission.user_id == GroupStudent.student_id, AssignmentSubmission.is_hidden == False, AssignmentSubmission.is_current == True).exists()
             ).count()
             lg = db.query(AssignmentSubmission).join(GroupAssignment, AssignmentSubmission.assignment_id == GroupAssignment.assignment_id).filter(
-                AssignmentSubmission.user_id.in_(g_student_ids), AssignmentSubmission.submitted_at > GroupAssignment.due_date, GroupAssignment.group_id == g.id, AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.user_id.in_(g_student_ids), AssignmentSubmission.submitted_at > GroupAssignment.due_date, GroupAssignment.group_id == g.id, AssignmentSubmission.is_hidden == False, AssignmentSubmission.is_current == True
             ).count()
             ud = db.query(Assignment, GroupStudent).join(GroupStudent, Assignment.group_id == GroupStudent.group_id).filter(
                 Assignment.group_id == g.id, Assignment.due_date < datetime.utcnow(), Assignment.is_active == True, GroupStudent.student_id.in_(g_student_ids),
-                ~db.query(AssignmentSubmission).filter(AssignmentSubmission.assignment_id == Assignment.id, AssignmentSubmission.user_id == GroupStudent.student_id, AssignmentSubmission.is_hidden == False).exists()
+                ~db.query(AssignmentSubmission).filter(AssignmentSubmission.assignment_id == Assignment.id, AssignmentSubmission.user_id == GroupStudent.student_id, AssignmentSubmission.is_hidden == False, AssignmentSubmission.is_current == True).exists()
             ).count()
             ld = db.query(AssignmentSubmission).join(Assignment, AssignmentSubmission.assignment_id == Assignment.id).filter(
-                AssignmentSubmission.user_id.in_(g_student_ids), AssignmentSubmission.submitted_at > Assignment.due_date, Assignment.group_id == g.id, Assignment.is_active == True, AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.user_id.in_(g_student_ids), AssignmentSubmission.submitted_at > Assignment.due_date, Assignment.group_id == g.id, Assignment.is_active == True, AssignmentSubmission.is_hidden == False, AssignmentSubmission.is_current == True
             ).count()
             overdue_count = ug + lg + ud + ld
             
             # Pending Grading
             pending_grading = db.query(AssignmentSubmission).filter(
-                AssignmentSubmission.user_id.in_(g_student_ids), AssignmentSubmission.is_graded == False, AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.user_id.in_(g_student_ids), AssignmentSubmission.is_graded == False, AssignmentSubmission.is_hidden == False, AssignmentSubmission.is_current == True
             ).count()
             
             # Totals for percentages
@@ -1040,6 +1048,7 @@ def get_head_curator_dashboard_stats(
                 AssignmentSubmission.user_id.in_(current_student_ids),
                 AssignmentSubmission.submitted_at >= date_start,
                 AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             )
             .distinct()
             .all()
@@ -1063,6 +1072,7 @@ def get_head_curator_dashboard_stats(
                 SubGA.assignment_id == GroupAssignment.assignment_id,
                 SubGA.user_id == GroupStudent.student_id,
                 SubGA.is_hidden == False,
+                SubGA.is_current == True,
             ),
         )
         .filter(
@@ -1084,6 +1094,7 @@ def get_head_curator_dashboard_stats(
             GroupAssignment.group_id.in_(current_group_ids),
             AssignmentSubmission.submitted_at > GroupAssignment.due_date,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         )
         .group_by(GroupAssignment.group_id)
         .all()
@@ -1101,6 +1112,7 @@ def get_head_curator_dashboard_stats(
                 SubDirect.assignment_id == Assignment.id,
                 SubDirect.user_id == GroupStudent.student_id,
                 SubDirect.is_hidden == False,
+                SubDirect.is_current == True,
             ),
         )
         .filter(
@@ -1125,6 +1137,7 @@ def get_head_curator_dashboard_stats(
             Assignment.is_active == True,
             Assignment.is_hidden == False,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         )
         .group_by(Assignment.group_id)
         .all()
@@ -1168,6 +1181,7 @@ def get_head_curator_dashboard_stats(
             GroupStudent.group_id.in_(current_group_ids),
             AssignmentSubmission.is_graded == False,
             AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         )
         .group_by(GroupStudent.group_id)
         .all()
@@ -1741,7 +1755,8 @@ def get_curator_homework_by_group(
         for sub in db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id.in_(all_assignment_ids),
             AssignmentSubmission.user_id.in_(all_student_ids),
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).all():
             submissions_map.setdefault(sub.assignment_id, {})[sub.user_id] = sub
 
@@ -1941,7 +1956,8 @@ def get_curator_student_homework(
         submissions = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id.in_(assignment_ids),
             AssignmentSubmission.user_id == student_id,
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).all()
         submissions_map = {s.assignment_id: s for s in submissions}
 
@@ -2072,7 +2088,8 @@ def get_curator_details(
                 ~db.query(AssignmentSubmission).filter(
                     AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
                     AssignmentSubmission.user_id == GroupStudent.student_id,
-                    AssignmentSubmission.is_hidden == False
+                    AssignmentSubmission.is_hidden == False,
+                    AssignmentSubmission.is_current == True,
                 ).exists()
             ).count()
             
@@ -2082,7 +2099,8 @@ def get_curator_details(
                 AssignmentSubmission.user_id.in_(student_ids),
                 AssignmentSubmission.submitted_at > GroupAssignment.due_date,
                 GroupAssignment.group_id == group.id,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).count()
             
             # 2. Direct Assignment source
@@ -2097,7 +2115,8 @@ def get_curator_details(
                 ~db.query(AssignmentSubmission).filter(
                     AssignmentSubmission.assignment_id == Assignment.id,
                     AssignmentSubmission.user_id == GroupStudent.student_id,
-                    AssignmentSubmission.is_hidden == False
+                    AssignmentSubmission.is_hidden == False,
+                    AssignmentSubmission.is_current == True,
                 ).exists()
             ).count()
             
@@ -2109,7 +2128,8 @@ def get_curator_details(
                 Assignment.group_id == group.id,
                 Assignment.is_active == True,
                 Assignment.is_hidden == False,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).count()
             
             overdue_count = unsubmitted_ga + late_ga + unsubmitted_direct + late_direct
@@ -2145,7 +2165,8 @@ def get_curator_details(
                 ~db.query(AssignmentSubmission).filter(
                     AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
                     AssignmentSubmission.user_id == student_id,
-                    AssignmentSubmission.is_hidden == False
+                    AssignmentSubmission.is_hidden == False,
+                    AssignmentSubmission.is_current == True,
                 ).exists()
             ).count()
             
@@ -2155,7 +2176,8 @@ def get_curator_details(
                 AssignmentSubmission.user_id == student_id,
                 AssignmentSubmission.submitted_at > GroupAssignment.due_date,
                 GroupAssignment.group_id == group.id,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).count()
             
             # Direct Assignment overdues
@@ -2170,7 +2192,8 @@ def get_curator_details(
                 ~db.query(AssignmentSubmission).filter(
                     AssignmentSubmission.assignment_id == Assignment.id,
                     AssignmentSubmission.user_id == student_id,
-                    AssignmentSubmission.is_hidden == False
+                    AssignmentSubmission.is_hidden == False,
+                    AssignmentSubmission.is_current == True,
                 ).exists()
             ).count()
             
@@ -2182,7 +2205,8 @@ def get_curator_details(
                 Assignment.group_id == group.id,
                 Assignment.is_active == True,
                 Assignment.is_hidden == False,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).count()
             
             student_overdue = unsubmitted_ga_student + late_ga_student + unsubmitted_direct_student + late_direct_student
@@ -2262,7 +2286,8 @@ def get_curator_details(
             ~db.query(AssignmentSubmission).filter(
                 AssignmentSubmission.assignment_id == GroupAssignment.assignment_id,
                 AssignmentSubmission.user_id == GroupStudent.student_id,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).exists()
         ).count()
 
@@ -2278,7 +2303,8 @@ def get_curator_details(
             GroupAssignment.is_active == True,
             GroupStudent.student_id.in_(all_student_ids) if all_student_ids else False,
             AssignmentSubmission.submitted_at > GroupAssignment.due_date,
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).count()
 
         # Direct Assignment source
@@ -2293,7 +2319,8 @@ def get_curator_details(
             ~db.query(AssignmentSubmission).filter(
                 AssignmentSubmission.assignment_id == Assignment.id,
                 AssignmentSubmission.user_id == GroupStudent.student_id,
-                AssignmentSubmission.is_hidden == False
+                AssignmentSubmission.is_hidden == False,
+                AssignmentSubmission.is_current == True,
             ).exists()
         ).count()
 
@@ -2310,7 +2337,8 @@ def get_curator_details(
             Assignment.is_hidden == False,
             GroupStudent.student_id.in_(all_student_ids) if all_student_ids else False,
             AssignmentSubmission.submitted_at > Assignment.due_date,
-            AssignmentSubmission.is_hidden == False
+            AssignmentSubmission.is_hidden == False,
+            AssignmentSubmission.is_current == True,
         ).count()
         
         overdue_on_day += ga_overdue_unsubmitted + ga_overdue_late + direct_overdue_unsubmitted + direct_overdue_late
@@ -2534,7 +2562,8 @@ def get_teacher_pending_submissions(
     pending_query = db.query(AssignmentSubmission).filter(
         AssignmentSubmission.assignment_id.in_(assignment_ids),
         AssignmentSubmission.user_id.in_(teacher_student_ids),
-        AssignmentSubmission.is_graded == False
+        AssignmentSubmission.is_graded == False,
+        AssignmentSubmission.is_current == True,
     )
     total_pending_count = pending_query.count()
 
@@ -2694,7 +2723,8 @@ def get_teacher_auto_grade_unit_homework_preview(
     pending_submissions = db.query(AssignmentSubmission).filter(
         AssignmentSubmission.assignment_id.in_(list(assignment_map.keys())),
         AssignmentSubmission.user_id.in_(teacher_student_ids),
-        AssignmentSubmission.is_graded == False
+        AssignmentSubmission.is_graded == False,
+        AssignmentSubmission.is_current == True,
     ).all()
     if not pending_submissions:
         return {"eligible_count": 0, "items": []}
@@ -2794,7 +2824,8 @@ def auto_grade_teacher_unit_homework(
     pending_submissions = db.query(AssignmentSubmission).filter(
         AssignmentSubmission.assignment_id.in_(list(assignment_map.keys())),
         AssignmentSubmission.user_id.in_(teacher_student_ids),
-        AssignmentSubmission.is_graded == False
+        AssignmentSubmission.is_graded == False,
+        AssignmentSubmission.is_current == True,
     ).all()
 
     eligible_submissions = []
@@ -3532,9 +3563,3 @@ def get_teacher_students_progress(
     students_data.sort(key=lambda x: (x["last_activity"] or datetime.min, x["student_name"]), reverse=True)
 
     return {"students_progress": students_data}
-
-
-
-
-
-
