@@ -440,7 +440,8 @@ async def get_group_leaderboard(
         submissions = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id.in_(assignment_ids),
             AssignmentSubmission.user_id.in_(student_ids),
-            AssignmentSubmission.is_graded == True
+            AssignmentSubmission.is_graded == True,
+            AssignmentSubmission.is_current == True,
         ).all()
         
         for sub in submissions:
@@ -879,7 +880,8 @@ async def get_weekly_lessons_with_hw_status(
     if assignment_ids:
         submissions = db.query(AssignmentSubmission).filter(
             AssignmentSubmission.assignment_id.in_(assignment_ids),
-            AssignmentSubmission.user_id.in_(student_ids)
+            AssignmentSubmission.user_id.in_(student_ids),
+            AssignmentSubmission.is_current == True,
         ).all()
         # Map (user_id, assignment_id) -> submission
         submission_map = {(s.user_id, s.assignment_id): s for s in submissions}

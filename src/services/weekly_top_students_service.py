@@ -381,6 +381,7 @@ def _homework_metrics(
             AssignmentSubmission.user_id.in_(student_due.keys()),
             AssignmentSubmission.assignment_id.in_(all_due_assignments),
             AssignmentSubmission.is_hidden.is_(False),
+            AssignmentSubmission.is_current.is_(True),
         )
         .all()
     )
