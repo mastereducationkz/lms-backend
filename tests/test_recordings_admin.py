@@ -164,6 +164,24 @@ def test_a_lesson_two_groups_share_counts_once_but_lists_both_groups(world):
     assert {g.id for g in row.groups} == {a.id, b.id}
 
 
+def test_two_pending_teachers_never_get_the_same_suggestion(world):
+    """Two Nurai's pending at once: the first gets nurai@, the second the fallback —
+    exactly like the CSV export, so the UI never offers an address that will 400."""
+    db = world["db"]
+    a, b = _user(db, "teacher"), _user(db, "teacher")
+    a.name, b.name = "Нурай Бақытжанқызы", "Нурай Кобейсин"
+    for teacher in (a, b):
+        group = world["group"]()
+        world["enrol"](group)
+        world["lesson"](group, days_ahead=2, teacher_id=teacher.id, created_by=teacher.id)
+    db.flush()
+
+    suggestions = {r.id: r.suggested_workspace_email for r in _rows(db)
+                   if r.id in (a.id, b.id)}
+    assert suggestions[a.id] != suggestions[b.id]
+    assert "nurai@mastereducation.kz" in suggestions.values()
+
+
 # ── connect / disconnect ───────────────────────────────────────────────────────────────────
 
 def test_set_workspace_email_connects_and_disconnects(world):

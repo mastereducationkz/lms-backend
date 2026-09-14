@@ -11,8 +11,6 @@ CSV ``/export.csv`` produces — they only point the pipeline at an account that
 import csv
 import io
 import logging
-import secrets
-import string
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -124,6 +122,7 @@ def _teacher_rows(db: Session) -> List[TeacherOut]:
              db.query(UserInDB.workspace_email).filter(UserInDB.workspace_email.isnot(None)).all()}
 
     out = []
+    claimed: set = set()
     for teacher in teachers:
         entry = by_teacher.get(teacher.id, {"lessons": set(), "rooms": set(), "groups": {}})
         # Onboarded teachers stay listed even with no upcoming lessons — an admin must be
@@ -136,6 +135,16 @@ def _teacher_rows(db: Session) -> List[TeacherOut]:
             for gid, ids in sorted(entry["groups"].items(),
                                    key=lambda kv: (-len(kv[1]), kv[0]))
         ]
+        suggested = None
+        if teacher.workspace_email is None:
+            # Claim each suggestion so two pending teachers never show the same address —
+            # the CSV export dedupes the same way.
+            suggested = teacher_onboarding.suggest_workspace_email(
+                teacher.name, taken | claimed,
+                group_names=[group_names.get(gid, "") for gid in entry["groups"]],
+            )
+            if suggested:
+                claimed.add(suggested)
         out.append(TeacherOut(
             id=teacher.id,
             name=teacher.name,
@@ -143,13 +152,7 @@ def _teacher_rows(db: Session) -> List[TeacherOut]:
             role=teacher.role,
             is_active=bool(teacher.is_active),
             workspace_email=teacher.workspace_email,
-            suggested_workspace_email=(
-                None if teacher.workspace_email else
-                teacher_onboarding.suggest_workspace_email(
-                    teacher.name, taken,
-                    group_names=[group_names.get(gid, "") for gid in entry["groups"]],
-                )
-            ),
+            suggested_workspace_email=suggested,
             upcoming_lessons=len(entry["lessons"]),
             rooms_ready=len(entry["rooms"]),
             groups=groups,
@@ -260,7 +263,7 @@ def export_workspace_import(org_unit: str = Query("/", description="Google Admin
             continue
         claimed.add(suggested)
         first, last = _split_name(teacher.name or "", suggested.split("@")[0].split(".")[0])
-        password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+        password = teacher_onboarding.generate_import_password()
         writer.writerow([first, last, suggested, password, org_unit or "/", "TRUE"])
 
     content = buf.getvalue()
