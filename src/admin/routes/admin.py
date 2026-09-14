@@ -141,6 +141,7 @@ class UpdateUserRequest(BaseModel):
     group_ids: Optional[List[int]] = None  # Update user's groups
     course_ids: Optional[List[int]] = None  # Update head teacher's courses
     is_analytics_hidden: Optional[bool] = None  # Hide curator from analytics/dashboard/leaderboard
+    workspace_email: Optional[str] = None  # Connect to recordings (teachers only); null disconnects
 
 class CreateUserResponse(BaseModel):
     user: UserSchema
@@ -2324,6 +2325,15 @@ def update_user(
 
     user_patch = user_data.model_dump(exclude_unset=True)
     final_role = user_data.role if user_data.role is not None else user.role
+
+    # Recordings onboarding shares its validation with /admin/recordings/teachers — only an
+    # explicit workspace_email key changes it, so an omitted field never disconnects anyone.
+    if "workspace_email" in user_patch:
+        from src.services import teacher_onboarding
+        try:
+            teacher_onboarding.set_workspace_email(db, current_user, user, user_data.workspace_email)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     if "group_ids" in user_patch and final_role == "student":
         _gc_affected_group_ids = _sync_student_groups(db, user_id, user_patch["group_ids"])

@@ -8,6 +8,7 @@ def register_routes(app: FastAPI):
         admin_router, dashboard_router,
         head_teacher_router, analytics_router, media_router,
         sat_schedules_router, weekly_top_students_router,
+        recordings_admin_router,
     )
     from src.courses.routes import courses_router
     from src.assignments.routes import assignments_router, assignment_zero_router
@@ -43,6 +44,9 @@ def register_routes(app: FastAPI):
     app.include_router(admin_router, prefix="/admin", tags=["Admin"])
     app.include_router(admin_progress_router, prefix="/admin", tags=["Admin Progress"])
     app.include_router(weekly_top_students_router, prefix="/admin", tags=["Admin"])
+    # Recordings onboarding lives beside the other admin screens but under its own prefix,
+    # so "/admin/{user_id}"-style routes elsewhere can never shadow it.
+    app.include_router(recordings_admin_router, prefix="/admin/recordings", tags=["Recordings Admin"])
     app.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
     app.include_router(users_router, prefix="/users", tags=["Users"])
     app.include_router(courses_router, prefix="/courses", tags=["Courses"])
