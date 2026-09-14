@@ -89,3 +89,17 @@ def test_status_includes_unit_gate_and_draft(db):
     assert resp["unit_gate"]["ready"] is False
     assert resp["unit_gate"]["missing"][0]["lesson_id"] == l1.id
     assert resp["draft"]["answers"] == {"tasks": {"1": "x"}}
+
+
+def test_overdue_homework_can_be_submitted_as_late(db):
+    student = _student(db, email="late-status@test.local")
+    group = _group_with_student(db, student)
+    assignment = _unit_assignment(db, group, atype="free_text")
+    assignment.due_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1)
+    db.flush()
+
+    status = get_assignment_status_for_student(assignment.id, student, db)
+
+    assert status["status"] == "overdue"
+    assert status["late"] is True
+    assert status["can_resubmit"] is True

@@ -1692,7 +1692,9 @@ def submit_assignment(
             detail=f"Complete linked units first: {missing}",
         )
 
-    # Check deadline and the configurable attempt/reopen policy.
+    # The deadline is a soft cutoff: submissions after the student's effective
+    # deadline are accepted and recorded as late. Attempt limits and a published
+    # grade still remain hard limits unless a teacher explicitly reopens the work.
     is_late = False
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     if assignment.due_date:
@@ -1720,9 +1722,6 @@ def submit_assignment(
             and to_naive_utc(reopen.expires_at) >= now
         ))
     )
-    if is_late and not reopen_active:
-        raise HTTPException(status_code=400, detail="The submission deadline has passed; ask your teacher to reopen it.")
-
     all_submissions = db.query(AssignmentSubmission).filter(
         AssignmentSubmission.assignment_id == assignment_id,
         AssignmentSubmission.user_id == current_user.id,
@@ -2795,7 +2794,7 @@ def get_assignment_status_for_student(
         AssignmentSubmission.user_id == current_user.id,
     ).count()
     attempts_left = None if assignment.max_attempts is None else max(assignment.max_attempts - attempts_used, 0)
-    late = False
+    late = bool(submission and submission.is_late)
     
     if submission:
         if submission.is_graded:
@@ -2825,7 +2824,7 @@ def get_assignment_status_for_student(
     # Normal policies allow replacements only before the homework has a final
     # grade. A teacher exception is the sole way to submit again afterwards.
     current_is_graded = bool(submission and submission.is_graded)
-    normal_policy_allows = attempts_left != 0 and not late and not current_is_graded
+    normal_policy_allows = attempts_left != 0 and not current_is_graded
     can_resubmit = not is_read_only and (reopen_active or normal_policy_allows)
     
     response_data = {

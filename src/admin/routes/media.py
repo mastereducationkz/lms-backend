@@ -759,9 +759,10 @@ async def upload_submission_file(
         if not group_member:
             raise HTTPException(status_code=403, detail="Access denied to this assignment")
     
-    # Проверяем, не просрочено ли задание
-    if assignment.due_date and assignment.due_date < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Assignment deadline has passed")
+    # The deadline is a soft cutoff.  Keep this endpoint available so a student
+    # can upload the file required for a late submission.  The authoritative
+    # submit endpoint applies access, attempt and final-grade rules and records
+    # whether the completed submission is late.
     
     # Images are always allowed regardless of teacher settings
     _always_allowed_images = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif", "avif"]
