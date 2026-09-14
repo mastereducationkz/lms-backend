@@ -94,6 +94,11 @@ def test_blank_env_counts_as_missing(configured_env):
 
 # --- enable predicate --------------------------------------------------------
 
+def test_oauth_can_support_room_closing_without_recording_ingest(configured_env):
+    """Room safety only needs Meet OAuth; recording ingest remains separately gated."""
+    assert google_workspace.oauth_configured() is True
+    assert google_workspace.recordings_enabled() is False
+
 def test_not_enabled_without_the_flag(configured_env):
     """Credentials present but the switch off is the normal, safe state."""
     assert google_workspace.recordings_enabled() is False

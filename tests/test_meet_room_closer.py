@@ -5,6 +5,7 @@ the teacher's accounts are not confirmed yet (their presence cannot be seen). Go
 the lesson and account links are real rows.
 """
 from datetime import datetime, timedelta
+import threading
 
 import pytest
 
@@ -112,3 +113,30 @@ def test_the_switch_turns_it_off(room, monkeypatch):
     room["still_in"](STUDENT_ACCOUNT)
     monkeypatch.setenv("ENABLE_AUTO_CLOSE_ROOMS", "false")
     assert _run(room, 120) == 0
+
+
+def test_room_closer_runs_in_its_own_timed_worker(monkeypatch):
+    """Long recording work must not postpone ending an eligible room."""
+    ran = threading.Event()
+    monkeypatch.setattr(meet_room_closer.google_workspace, "oauth_configured", lambda: True)
+    monkeypatch.setattr(meet_room_closer, "close_lingering_rooms", lambda _db: ran.set() or 0)
+    worker = meet_room_closer.MeetRoomCloserWorker(poll_interval=0.01)
+
+    worker.start()
+    try:
+        assert ran.wait(0.2), "the independent closer tick must run promptly"
+    finally:
+        worker.stop()
+
+
+def test_room_closer_rejects_a_nonpositive_poll_interval():
+    assert meet_room_closer.MeetRoomCloserWorker(poll_interval=0).poll_interval == meet_room_closer.POLL_INTERVAL_SECONDS
+
+
+def test_room_closer_does_not_start_without_google_oauth(monkeypatch):
+    monkeypatch.setattr(meet_room_closer.google_workspace, "oauth_configured", lambda: False)
+    worker = meet_room_closer.MeetRoomCloserWorker()
+
+    worker.start()
+
+    assert worker._thread is None

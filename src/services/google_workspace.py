@@ -64,18 +64,22 @@ def _env(name: str) -> Optional[str]:
     return value.strip() if value else None
 
 
+def oauth_configured() -> bool:
+    """Whether the Meet/Drive robot has the credentials required to call Google."""
+    return bool(
+        _env("GOOGLE_OAUTH_CLIENT_ID")
+        and _env("GOOGLE_OAUTH_CLIENT_SECRET")
+        and _env("GOOGLE_OAUTH_REFRESH_TOKEN")
+    )
+
+
 def recordings_enabled() -> bool:
     """True only when the pipeline is both configured and switched on.
 
     Two conditions, not one: a deployment can carry credentials while the feature stays
     off (the default), exactly as ``ENABLE_VIDEO_INGEST`` works.
     """
-    return bool(
-        _env("ENABLE_RECORDINGS") == "true"
-        and _env("GOOGLE_OAUTH_CLIENT_ID")
-        and _env("GOOGLE_OAUTH_CLIENT_SECRET")
-        and _env("GOOGLE_OAUTH_REFRESH_TOKEN")
-    )
+    return _env("ENABLE_RECORDINGS") == "true" and oauth_configured()
 
 
 def credentials(scopes: Optional[list] = None):

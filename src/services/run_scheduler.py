@@ -41,6 +41,18 @@ def main():
         except Exception as e:
             logger.error(f"Failed to start video ingest worker: {e}", exc_info=True)
 
+    # Start the Meet closer independently so recording conversion/transcription
+    # cannot postpone the 15-minute room-close policy.
+    room_closer_worker = None
+    try:
+        from src.services.meet_room_closer import MeetRoomCloserWorker
+        room_closer_worker = MeetRoomCloserWorker(
+            poll_interval=os.getenv('MEET_ROOM_CLOSER_POLL_SECONDS', '60')
+        )
+        room_closer_worker.start()
+    except Exception as e:
+        logger.error(f"Failed to start Meet room closer: {e}", exc_info=True)
+
     # Start the lesson-recording pipeline (Meet -> Drive -> HLS -> S3). Scheduler
     # container only, same as video ingest, so the API process never double-processes.
     # Self-gating: RecordingsWorker.start() returns immediately unless ENABLE_RECORDINGS
@@ -147,6 +159,8 @@ def main():
         logger.info("")
         logger.info("⏹️  Received stop signal")
         scheduler.stop()
+        if room_closer_worker:
+            room_closer_worker.stop()
         if video_worker:
             video_worker.stop()
         logger.info("✅ Scheduler stopped gracefully")
@@ -154,6 +168,8 @@ def main():
     except Exception as e:
         logger.error(f"❌ Scheduler crashed: {e}", exc_info=True)
         scheduler.stop()
+        if room_closer_worker:
+            room_closer_worker.stop()
         sys.exit(1)
 
 
