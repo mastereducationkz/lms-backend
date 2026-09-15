@@ -115,6 +115,21 @@ def test_a_week_named_in_the_question_is_that_week(chat):
     assert "16 сентября" not in out["answer"]
 
 
+def test_the_weekend_is_this_saturday_and_sunday(chat):
+    for day in (16, 19, 20, 21):
+        chat["on"](day, hour=10, minute=0)
+    text = chat["at"]("уроки есть на выходных?")["answer"]
+    assert "📅 Уроки на выходных" in text
+    assert "Сб, 19 сентября" in text and "Вс, 20 сентября" in text
+    assert "16 сентября" not in text and "21 сентября" not in text
+
+
+def test_no_weekend_lessons_still_say_when_the_next_one_is(chat):
+    chat["on"](21, hour=10, minute=0)
+    text = chat["at"]("на выходных будут занятия?")["answer"]
+    assert "На выходных уроков нет." in text and "⏭ Следующий урок: Пн, 21 сентября" in text
+
+
 def test_no_lesson_today_still_says_when_the_next_one_is(chat):
     chat["on"](16, meeting_url="https://meet.google.com/wed")
     text = chat["at"]("есть урок сегодня?")["answer"]

@@ -58,6 +58,12 @@ ROUTED = [
     ("во сколько завтра занятие", "lessons", "tomorrow"),
     ("tomorrow's lesson time?", "lessons", "tomorrow"),
     ("ертең сабақ бар ма?", "lessons", "tomorrow"),
+    # the weekend
+    ("уроки есть на выходных?", "lessons", "weekend"),
+    ("на выходных будут занятия?", "lessons", "weekend"),
+    ("any lessons this weekend?", "lessons", "weekend"),
+    ("демалыс күндері сабақ бар ма?", "lessons", "weekend"),
+    ("расписание на выходные", "lessons", "weekend"),
     # a week
     ("уроки на этой неделе", "lessons", "this_week"),
     ("расписание на эту неделю", "lessons", "this_week"),

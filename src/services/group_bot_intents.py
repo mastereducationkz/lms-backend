@@ -28,7 +28,7 @@ MODEL_TIMEOUT_SECONDS = 4
 _CACHE_SIZE = 1000
 
 COMMANDS = ("help", "schedule", "lessons", "next", "weekly", "homework", "recording")
-SPANS = ("today", "tomorrow", "this_week", "next_week", "week")
+SPANS = ("today", "tomorrow", "weekend", "this_week", "next_week", "week")
 
 
 @dataclass(frozen=True)
@@ -131,6 +131,7 @@ _TODAY = _rx(r"сегодня\w*|бүгін\w*|бугин\w*|\btoday\b|\btonight
 _TOMORROW = _rx(r"\bзавтра\w*|ертең\w*|ертен\w*|\btomorrow\b")
 _THIS_WEEK = _rx(r"\bэт(?:ой|у)\s+недел\w*|\bthis\s+week\b|\bосы\s+апта\w*")
 _NEXT_WEEK = _rx(r"следующ(?:ей|ую|ая)\s+недел\w*|\bnext\s+week\b|келесі\s+апта\w*|келеси\s+апта\w*")
+_WEEKEND = _rx(r"выходн\w*|\bweekends?\b|демалыс\w*")
 _A_WEEK = _rx(r"\bна\s+неделю\b|\bнеделю\b|\bfor\s+the\s+week\b|\bаптаға\b")
 
 
@@ -162,6 +163,8 @@ def _span(t: str) -> Optional[str]:
         return "today"
     if _TOMORROW.search(t):
         return "tomorrow"
+    if _WEEKEND.search(t):
+        return "weekend"
     if _NEXT_WEEK.search(t):
         return "next_week"
     if _THIS_WEEK.search(t):

@@ -121,6 +121,10 @@ def span_window(span: str, now: datetime) -> tuple[datetime, datetime]:
         return now, _almaty_midnight(today + timedelta(days=1))
     if span == "tomorrow":
         return _almaty_midnight(today + timedelta(days=1)), _almaty_midnight(today + timedelta(days=2))
+    if span == "weekend":
+        # This Saturday and Sunday; on the weekend itself, what is left of it.
+        saturday = today + timedelta(days=max(0, 5 - today.weekday()))
+        return max(now, _almaty_midnight(saturday)), _almaty_midnight(monday)
     if span == "this_week":
         return now, _almaty_midnight(monday)
     if span == "next_week":
