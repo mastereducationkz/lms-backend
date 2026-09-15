@@ -88,8 +88,12 @@ class TelegramGroupQuestion(Base):
     private_hint = Column(Boolean, nullable=False, default=False)
     #: The facts did not cover it; the group's curator was notified.
     handed_to_curator = Column(Boolean, nullable=False, default=False)
-    #: Which model wrote the answer, or "facts" when the plain template did.
+    #: Who chose the answer: "command", "rules", "context", "default", or the intent model's name.
+    #: Rows before 2026-09-15 say which model *wrote* the answer, or "facts" for the template.
     model = Column(String, nullable=True)
+    #: Which answer it was: schedule, lessons, next, homework, recording, weekly, help, personal,
+    #: curator, courtesy, none, not_live. Empty before 2026-09-15.
+    intent = Column(String(32), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 
 

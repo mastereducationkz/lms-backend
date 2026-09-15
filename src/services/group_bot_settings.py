@@ -19,7 +19,7 @@ from src.utils.utc_json import utc_z
 
 KEY = "group_bot"
 SCOPE_PILOT, SCOPE_ALL = "pilot", "all"
-DEFAULTS = {"enabled": False, "scope": SCOPE_PILOT, "enabled_at": None}
+DEFAULTS = {"enabled": False, "scope": SCOPE_PILOT, "enabled_at": None, "test_chats": {}}
 
 # Who may see the switch; only admins may flip it — the same gate talk time uses.
 READERS = frozenset({"admin", "head_curator", "head_teacher"})
@@ -52,6 +52,22 @@ def in_pilot(db, group: Group) -> bool:
         & (UserInDB.id == Event.teacher_id)
         & (UserInDB.workspace_email.isnot(None))
     )).scalar())
+
+
+def test_chat_group(db, support_group_id: int) -> Optional[int]:
+    """The LMS group a staff test chat answers about, if it is one.
+
+    ``test_chats`` maps a Support chat id to a real group's id, so the whole bot can be tried
+    end-to-end in a chat with no students («IT отдел», 2026-09-15) without linking that chat —
+    a link is one chat per group and the group already has its students' chat. A test chat
+    never notifies the group's curator.
+    """
+    mapping = current(db).get("test_chats")
+    value = mapping.get(str(support_group_id)) if isinstance(mapping, dict) else None
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def enabled_for(db, group: Group) -> bool:

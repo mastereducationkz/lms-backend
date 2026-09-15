@@ -315,18 +315,26 @@ class GroupQuestionIn(BaseModel):
     chat_title: Optional[str] = None
     message_id: Optional[int] = None
     asker: Optional[GroupQuestionAsker] = None
+    #: A group command (/schedule → "schedule"); an unknown one is treated as plain text.
+    command: Optional[str] = Field(default=None, max_length=32)
+    #: The bot's own message this one replies to — «а завтра?» under a lessons answer.
+    reply_to_text: Optional[str] = Field(default=None, max_length=4096)
+    #: "html" when the caller posts with Telegram's HTML parse mode; anything else gets plain text,
+    #: so a Support that predates HTML answers never shows tags in a chat.
+    format: Optional[str] = Field(default=None, max_length=8)
 
 
 @router.post("/telegram/group-question", dependencies=[Depends(verify_support_api_key)])
 def answer_group_question(body: GroupQuestionIn, db: Session = Depends(get_db)):
-    """What the bot should say in a group's chat (owner, 2026-09-12).
+    """What the bot should say in a group's chat (owner, 2026-09-12, 2026-09-15).
 
-    Support decides when the bot speaks — only when it is tagged, and within its rate limits.
-    The LMS decides what it says, from that group's own lessons, homework and recordings, and
-    never anything about a named student: see :mod:`src.services.group_bot`.
+    Support decides when the bot speaks — tagged, commands, rate limits, duplicates. The LMS
+    decides what it says, from that group's own timetable, lessons, homework and recordings, and
+    never anything about a named student: see :mod:`src.services.group_bot`. The answer is
+    Telegram HTML (``format``) and opens with the group's name.
 
     404 — the chat belongs to no LMS group. 409 — the bot is off, or the group is not in the
-    pilot. Support stays silent on both: that chat simply has no bot.
+    pilot and this was not a command (a command gets a ``not_live`` notice instead).
     """
     from src.services import group_bot
 
@@ -335,6 +343,9 @@ def answer_group_question(body: GroupQuestionIn, db: Session = Depends(get_db)):
             db,
             support_group_id=body.support_group_id,
             text=body.text,
+            command=body.command,
+            reply_to_text=body.reply_to_text,
+            html=body.format == "html",
             chat_title=body.chat_title,
             telegram_chat_id=body.telegram_chat_id,
             message_id=body.message_id,
