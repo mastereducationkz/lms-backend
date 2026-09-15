@@ -198,8 +198,13 @@ def local(value: datetime) -> datetime:
     return value + ALMATY_OFFSET
 
 
+_LINK = re.compile(r'<a href="([^"]*)">(.*?)</a>', re.DOTALL)
+
+
 def to_plain(text: str) -> str:
-    """The same answer for a caller that cannot post HTML: tags dropped, entities decoded."""
+    """The same answer for a caller that cannot post HTML: a hyperlink becomes «label: url», other
+    tags are dropped, entities decoded — a link must survive, not vanish with its tag."""
+    text = _LINK.sub(lambda match: f"{match.group(2)}: {match.group(1)}", text)
     return unescape(re.sub(r"</?b>", "", text))
 
 

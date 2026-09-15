@@ -181,7 +181,7 @@ def test_a_changed_week_is_announced_once_it_settles(live):
     assert live["calls"]["post"] == [], "an admin may still be editing"
     live["tick"](watch, NOW + timedelta(minutes=17))
     [sent] = live["calls"]["post"]
-    assert sent["text"] == (f"📚 <b>{NAME}</b>\n⚠️ Расписание поменялось!\n\nБыло:\n• Пн, Ср, Пт — 20:30–21:30\n\n"
+    assert sent["text"] == (f"📚 <b>{NAME}</b>\n⚠️ Расписание изменилось\n\nБыло:\n• Пн, Ср, Пт — 20:30–21:30\n\n"
                             "Стало:\n• Пн–Чт — 19:30–20:30\n\n"
                             "Актуальное расписание всегда в закреплённом сообщении и по /schedule")
     assert sent["key"].startswith(f"schedule-change:{live['linked'].id}:")
@@ -231,8 +231,19 @@ def test_the_morning_digest_is_the_days_lessons_without_the_group_name(live):
     [sent] = live["calls"]["post"]
     text = sent["text"]
     assert text.split("\n\n")[0] in digest.GREETINGS and text.split("\n\n")[-1] in digest.CLOSERS
-    assert "📚 Урок в 20:30–21:30 — не проспи 😴\n🔗 https://meet.google.com/abc-defg-hij" in text
+    assert 'Урок в 20:30–21:30\n<a href="https://meet.google.com/abc-defg-hij">Ссылка на урок</a>' in text
     assert NAME not in text and sent["key"] == f"digest:morning:{live['linked'].id}:2026-09-14"
+
+
+def test_no_automatic_text_raises_its_voice():
+    """Owner, 2026-09-15: never an exclamation mark in what the bot posts on its own."""
+    from types import SimpleNamespace
+
+    group = SimpleNamespace(name="G", schedule_config=MWF_2030)
+    texts = [*digest.GREETINGS, *digest.CLOSERS,
+             watch.notice_text(group, watch.pattern_of(group), watch.pattern_of(group)),
+             digest.last_chance_text(SimpleNamespace(title="Essay", due_date=AT_1005 + timedelta(hours=3)), AT_1005)]
+    assert not [text for text in texts if "!" in text]
 
 
 def test_no_digest_before_ten_or_on_an_empty_day(live):
@@ -257,7 +268,8 @@ def test_a_deadline_alone_is_worth_a_digest(live):
     _homework(live, "Essay <2>", datetime(2026, 9, 14, 18, 59))
     live["tick"](digest, AT_1005)
     [sent] = live["calls"]["post"]
-    assert "📝 Дедлайны:\n• <b>Essay &lt;2&gt;</b> — сегодня до 23:59" in sent["text"]
+    assert "Дедлайны:\n• <b>Essay &lt;2&gt;</b> — сегодня до 23:59" in sent["text"]
+    assert "📝" not in sent["text"], "the morning digest is the soft one"
 
 
 def test_a_group_switched_off_gets_no_digest(live):
@@ -286,6 +298,20 @@ def test_the_last_chance_comes_three_hours_before_the_deadline(live):
     live["db"].flush()
     live["tick"](digest, datetime(2026, 9, 14, 13, 5))
     assert len(live["calls"]["post"]) == 2
+
+
+def test_tasks_due_at_the_same_time_are_one_reminder(live):
+    first = _homework(live, "Unit 8: Functions", datetime(2026, 9, 14, 15, 0))
+    second = _homework(live, "Article <Annotation>", datetime(2026, 9, 14, 15, 0))
+    _homework(live, "Later task", datetime(2026, 9, 14, 17, 0))
+    live["tick"](digest, datetime(2026, 9, 14, 12, 5))
+    [sent] = live["calls"]["post"]
+    assert sent["text"] == ("⏰ До дедлайна 3 часа — до 20:00:\n• <b>Unit 8: Functions</b>\n"
+                            "• <b>Article &lt;Annotation&gt;</b>\nКто ещё не сдал — самое время 🏃")
+    ids = "+".join(str(i) for i in sorted((first.id, second.id)))
+    assert sent["key"] == f"digest:last_chance:{live['linked'].id}:{ids}:2026-09-14T15:00:00"
+    live["tick"](digest, datetime(2026, 9, 14, 12, 10))
+    assert len(live["calls"]["post"]) == 1, "said once"
 
 
 def test_a_last_chance_falling_in_quiet_hours_waits_for_eight_and_says_the_real_time_left(live):

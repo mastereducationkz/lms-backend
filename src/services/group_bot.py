@@ -223,12 +223,13 @@ def calendar_answer(db, group: Group, lang: str) -> str:
     links = keyboard_ui.calendar_links(db, group)
     if not links:
         return render.join(render.header(group.name), soon)
+    # Hyperlinks, not bare URLs (owner, 2026-09-15): two long links read as noise in a chat.
     lines = [title]
     if links.get("google_url"):
-        lines.append(f"• Google Calendar: {escape(links['google_url'])}")
+        lines.append(f'• <a href="{escape(links["google_url"])}">Google Calendar</a>')
     else:
-        lines.append(f"• Google Calendar: {google_soon}")
-    lines.append(f"• {ics_label}: {escape(links['ics_url'])}")
+        lines.append(f"• Google Calendar — {google_soon}")
+    lines.append(f'• <a href="{escape(links["ics_url"])}">{ics_label}</a>')
     return render.join(render.header(group.name), *lines)
 
 

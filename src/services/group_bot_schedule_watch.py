@@ -1,4 +1,4 @@
-"""«⚠️ Расписание поменялось!» — when a group's regular week changes (owner, 2026-09-15).
+"""«⚠️ Расписание изменилось» — when a group's regular week changes (owner, 2026-09-15).
 
 The regular week is ``groups.schedule_config.schedule_items`` — what CRM «Регулярные уроки» and the
 LMS schedule tools write, directly into that column, from five different places. Rather than hook
@@ -52,7 +52,8 @@ def slots_of(pattern: str) -> list:
 
 
 def notice_text(group, old: str, new: str) -> str:
-    lines = [render.header(group.name), "⚠️ Расписание поменялось!", "", "Было:",
+    # No exclamation mark (owner, 2026-09-15): the change is serious enough without one.
+    lines = [render.header(group.name), "⚠️ Расписание изменилось", "", "Было:",
              *render.pattern_lines(slots_of(old), "ru"), "", "Стало:",
              *render.pattern_lines(slots_of(new), "ru"), "",
              "Актуальное расписание всегда в закреплённом сообщении и по /schedule"]

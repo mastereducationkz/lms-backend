@@ -59,7 +59,8 @@ def keyboard(group_id: int) -> list:
         [{"text": "🗓 Расписание", "callback": "gb:schedule"},
          {"text": "📅 Ближайшие", "callback": "gb:lessons"}],
         [{"text": "📝 ДЗ", "callback": "gb:homework"},
-         {"text": "🔗 Урок", "url": lesson_link(group_id)}],
+         # «Ближайший урок», not «Урок»: the button opens a link, and it says which lesson (owner).
+         {"text": "🔗 Ближайший урок", "url": lesson_link(group_id)}],
     ]
 
 

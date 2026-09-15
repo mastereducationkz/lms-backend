@@ -100,6 +100,7 @@ def test_the_telegram_markup_is_callback_data_and_url_buttons():
     markup = kb.to_telegram(kb.keyboard(7))
     assert markup["inline_keyboard"][0][0] == {"text": "🗓 Расписание", "callback_data": "gb:schedule"}
     assert set(markup["inline_keyboard"][1][1]) == {"text", "url"}
+    assert markup["inline_keyboard"][1][1]["text"] == "🔗 Ближайший урок", "the link says which lesson it opens"
 
 
 # ── the lesson link ──────────────────────────────────────────────────────────────────────
@@ -146,16 +147,17 @@ def _popup(chat, action):
 def test_the_schedule_popup_is_the_week_and_mentions_changes(chat):
     for day in (14, 16, 18, 21):
         chat["on"](day)
-    assert _popup(chat, "schedule") == {"text": "🗓 Пн, Ср, Пт 20:30–21:30", "show_alert": True}
+    assert _popup(chat, "schedule") == {"text": "🗓 Расписание:\nПн, Ср, Пт — 20:30–21:30", "show_alert": True}
     chat["on"](19, hour=10, minute=0)           # an extra Saturday lesson
-    assert _popup(chat, "schedule")["text"] == "🗓 Пн, Ср, Пт 20:30–21:30 · изменения на неделе — /schedule"
+    assert _popup(chat, "schedule")["text"] == (
+        "🗓 Расписание:\nПн, Ср, Пт — 20:30–21:30\n\nНа этой неделе есть изменения — /schedule")
 
 
 def test_the_lessons_popup_lists_dates_that_fit(chat):
     for day in (14, 16, 18, 21, 23, 25):
         chat["on"](day)
     text = _popup(chat, "lessons")["text"]
-    assert text == "📅 Сегодня 20:30 · Ср 16.09 20:30 · Пт 18.09 20:30 · Пн 21.09 20:30 · Ср 23.09 20:30"
+    assert text == "📅 Ближайшие уроки:\nСегодня 20:30\nСр 16.09 20:30\nПт 18.09 20:30\nПн 21.09 20:30\nСр 23.09 20:30"
     assert popup.fits(text)
 
 
@@ -168,8 +170,9 @@ def test_the_homework_popup_stays_under_telegrams_limit_with_long_emoji_titles(c
     db.flush()
     text = _popup(chat, "homework")["text"]
     assert popup.units(text) <= 200
-    assert text.startswith("📝 🔥📚 Очень длинное название задания")
-    assert "(сегодня)" in text and "…" in text and "+ ещё" in text and text.endswith("— /homework")
+    assert text.startswith("📝 Домашние задания:\n• 🔥📚 Очень длинное название задания")
+    assert "(сегодня)" in text and "…" in text and "\n+ ещё" in text and text.endswith("— /homework")
+    assert all(line.startswith("• ") for line in text.split("\n")[1:-1]), "one task per line"
     text.encode("utf-8")          # no lone surrogate anywhere
 
 
@@ -220,13 +223,22 @@ def test_before_the_google_calendar_exists_the_feed_is_offered_and_google_is_com
     monkeypatch.setattr(kb, "calendar_links", lambda db, group: {
         "google_url": None, "ics_url": "https://lmsapi.mastereducation.kz/cal/g.ics"})
     text = chat["at"]("/calendar", command="calendar")["answer"]
-    assert "• Google Calendar: скоро появится" in text
-    assert "• iPhone / Outlook (подписка): https://lmsapi.mastereducation.kz/cal/g.ics" in text
+    assert "• Google Calendar — скоро появится" in text
+    assert '• <a href="https://lmsapi.mastereducation.kz/cal/g.ics">iPhone / Outlook (подписка)</a>' in text
+
+
+def test_a_hyperlink_survives_as_label_and_url_for_a_plain_text_caller():
+    from src.services import group_bot_render as render
+
+    html = '📚 <b>A &amp; B</b>\n• <a href="https://calendar.google.com/x?cid=1&amp;hl=ru">Google Calendar</a>'
+    assert render.to_plain(html) == "📚 A & B\n• Google Calendar: https://calendar.google.com/x?cid=1&hl=ru"
 
 
 def test_the_calendar_answer_gives_both_links(chat, monkeypatch):
     monkeypatch.setattr(kb, "calendar_links", lambda db, group: {
         "google_url": "https://calendar.google.com/calendar/r?cid=abc", "ics_url": "https://lmsapi.mastereducation.kz/cal/g.ics"})
     text = chat["at"]("как добавить в календарь?")["answer"]
-    assert "• Google Calendar: https://calendar.google.com/calendar/r?cid=abc" in text
-    assert "• iPhone / Outlook (подписка): https://lmsapi.mastereducation.kz/cal/g.ics" in text
+    assert '• <a href="https://calendar.google.com/calendar/r?cid=abc">Google Calendar</a>' in text
+    assert '• <a href="https://lmsapi.mastereducation.kz/cal/g.ics">iPhone / Outlook (подписка)</a>' in text
+    assert "https://calendar.google.com" not in text.replace('href="https://calendar.google.com', ""), \
+        "the links are hyperlinks, not bare URLs"

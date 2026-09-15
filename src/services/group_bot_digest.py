@@ -41,19 +41,21 @@ HORIZON = timedelta(hours=24)
 LAST_CHANCE = timedelta(hours=3)
 _OPEN = ("pending", "failed")
 
+# Owner, 2026-09-15 (after the samples): softer, fewer emoji, never an exclamation mark — they will
+# rewrite these later. The evening «Напоминалка на завтра» was approved as it is.
 GREETINGS = (
-    "☀️ Доброе утро! Сегодня есть движ 👀",
-    "Гуд морнинг ☕️ Сверяем планы на день",
-    "Проснулись? Вот что сегодня по учёбе 📚",
-    "Утречко 🌤 Коротко, что нас ждёт",
-    "Всем привет! Минутка планирования, не скипаем 😌",
+    "Доброе утро ☀️ Вот что сегодня по учёбе",
+    "Доброе утро. Коротко о планах на сегодня",
+    "Всем привет. Небольшая сводка на день",
+    "Доброе утро 🌤 Что нас ждёт сегодня",
+    "Привет. Планы на сегодня",
 )
 CLOSERS = (
-    "Вопросы? Тегай меня 🤖",
-    "Всё получится, го 💪",
-    "Если что — я тут, просто отметь меня",
-    "Удачного дня и без дедлайн-паники 🫶",
-    "Не прокрастинируем 😉",
+    "Если будут вопросы — отметьте меня",
+    "Хорошего дня",
+    "Если что-то непонятно, я тут",
+    "Удачи сегодня",
+    "Спокойного и продуктивного дня",
 )
 
 
@@ -112,19 +114,25 @@ def open_weekly(db, group, now: datetime):
             .order_by(Event.end_datetime).first())
 
 
-def _lesson_lines(lessons: list, *, nudge: bool) -> list:
+def _lesson_lines(lessons: list, *, soft: bool) -> list:
+    """``soft`` — the morning digest: no emoji, the Meet room as a «Ссылка на урок» hyperlink."""
     lines = []
     for lesson in lessons:
         start, end = render.local(lesson.start_datetime), render.local(lesson.end_datetime)
-        lines.append(f"📚 Урок в {start:%H:%M}–{end:%H:%M}" + (" — не проспи 😴" if nudge else ""))
+        if soft:
+            lines.append(f"Урок в {start:%H:%M}–{end:%H:%M}")
+            if lesson.meeting_url:
+                lines.append(f'<a href="{escape(lesson.meeting_url)}">Ссылка на урок</a>')
+            continue
+        lines.append(f"📚 Урок в {start:%H:%M}–{end:%H:%M}")
         if lesson.meeting_url:
             lines.append(f"🔗 {escape(lesson.meeting_url)}")
     return lines
 
 
-def _deadline_lines(tasks: list, now: datetime) -> list:
+def _deadline_lines(tasks: list, now: datetime, *, soft: bool) -> list:
     today = render.local(now).date()
-    lines = ["📝 Дедлайны:"]
+    lines = ["Дедлайны:" if soft else "📝 Дедлайны:"]
     for task in tasks:
         due = render.local(task.due_date)
         if due.date() == today:
@@ -137,28 +145,29 @@ def _deadline_lines(tasks: list, now: datetime) -> list:
     return lines
 
 
-def compose(opening: str, lessons: list, tasks: list, weekly, closer: str, now: datetime, *, nudge: bool) -> str:
+def compose(opening: str, lessons: list, tasks: list, weekly, closer: str, now: datetime, *, soft: bool) -> str:
     blocks = [opening]
     if lessons:
-        blocks.append("\n".join(_lesson_lines(lessons, nudge=nudge)))
+        blocks.append("\n".join(_lesson_lines(lessons, soft=soft)))
     if tasks:
-        blocks.append("\n".join(_deadline_lines(tasks, now)))
+        blocks.append("\n".join(_deadline_lines(tasks, now, soft=soft)))
     if weekly is not None and weekly.end_datetime is not None:
-        blocks.append(f"🧪 Weekly mock открыт до {render.deadline_label(weekly.end_datetime, now, 'ru')}")
+        mark = "" if soft else "🧪 "
+        blocks.append(f"{mark}Weekly mock открыт до {render.deadline_label(weekly.end_datetime, now, 'ru')}")
     blocks.append(closer)
     return "\n\n".join(blocks)
 
 
 def morning_text(group, day: date, lessons: list, tasks: list, weekly, now: datetime) -> str:
     return compose(pick(GREETINGS, group.id, day.isoformat(), "greeting"), lessons, tasks, weekly,
-                   pick(CLOSERS, group.id, day.isoformat(), "closer"), now, nudge=True)
+                   pick(CLOSERS, group.id, day.isoformat(), "closer"), now, soft=True)
 
 
 def evening_text(group, day: date, lessons: list, tasks: list, weekly, now: datetime) -> str:
     first = render.local(lessons[0].start_datetime)
     opening = f"🌙 Напоминалка на завтра: урок уже в {first:%H:%M}, не проспи 😴"
     return compose(opening, lessons, tasks, weekly, pick(CLOSERS, group.id, day.isoformat(), "closer"),
-                   now, nudge=False)
+                   now, soft=False)
 
 
 def time_left(delta: timedelta) -> str:
@@ -179,6 +188,25 @@ def last_chance_text(task, now: datetime) -> str:
     day = " (завтра)" if due.date() != render.local(now).date() else ""
     return (f"⏰ До дедлайна {time_left(task.due_date - now)}: <b>{escape(task.title or '')}</b> — "
             f"до {due:%H:%M}{day}. Кто ещё не сдал — самое время 🏃")
+
+
+def last_chance_group_text(tasks: list, now: datetime) -> str:
+    """Several tasks due at the same moment are one reminder, not one ping each (seen on switch-on
+    day: two homeworks of one individual chat both due at 15:00)."""
+    if len(tasks) == 1:
+        return last_chance_text(tasks[0], now)
+    due = render.local(tasks[0].due_date)
+    day = " (завтра)" if due.date() != render.local(now).date() else ""
+    lines = [f"⏰ До дедлайна {time_left(tasks[0].due_date - now)} — до {due:%H:%M}{day}:"]
+    lines += [f"• <b>{escape(task.title or '')}</b>" for task in tasks]
+    lines.append("Кто ещё не сдал — самое время 🏃")
+    return "\n".join(lines)
+
+
+def last_chance_key(tasks: list) -> str:
+    """A single task keeps the key it always had; a group is keyed by all of its tasks."""
+    ids = "+".join(str(task.id) for task in sorted(tasks, key=lambda task: task.id))
+    return f"{ids}:{tasks[0].due_date.isoformat()}"
 
 
 def _send(db, budget, summary, group, link, kind: str, key: str, text: str, now: datetime) -> None:
@@ -235,11 +263,14 @@ def run(db, live: list, budget: outbox.Budget, now: datetime) -> dict:
                 _send(db, budget, summary, group, link, "evening", tomorrow.isoformat(), text, now)
         if outbox.in_quiet_hours(now):
             continue
+        due_now: dict = {}
         for task in deadlines(db, group, now, now + LAST_CHANCE):
             send_at = task.due_date - LAST_CHANCE
             if outbox.in_quiet_hours(send_at):
                 send_at = outbox.quiet_hours_end(send_at)
             if now >= send_at:
-                key = f"{task.id}:{task.due_date.isoformat()}"
-                _send(db, budget, summary, group, link, "last_chance", key, last_chance_text(task, now), now)
+                due_now.setdefault(task.due_date, []).append(task)
+        for tasks in due_now.values():
+            _send(db, budget, summary, group, link, "last_chance", last_chance_key(tasks),
+                  last_chance_group_text(tasks, now), now)
     return summary

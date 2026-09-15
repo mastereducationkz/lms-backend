@@ -1,6 +1,7 @@
 """What a tap on 🗓 / 📅 / 📝 shows: a Telegram alert only the person who tapped sees.
 
-Telegram caps an alert at 200 characters of plain text — no bold, no tappable links — so these are
+Telegram caps an alert at 200 characters of plain text — no bold, no tappable links, but line breaks
+are kept, so each item gets its own line under a short title (owner, 2026-09-15) — so these are
 the answers' facts squeezed onto a card, never the answers cut in half: whole items are added while
 they fit, and what did not fit is counted («+ ещё 2 — /homework»). Length is measured in UTF-16 code
 units, Telegram's own unit, so an emoji-heavy title can never push the text over the limit.
@@ -60,14 +61,14 @@ def _schedule(db, group, now: datetime) -> str:
     slots = render.weekly_pattern(group.schedule_config, upcoming, now)
     if not slots:
         return "🗓 Расписание группы пока не заполнено"
-    parts = [line.removeprefix("• ").replace(" — ", " ") for line in render.pattern_lines(slots, "ru")]
-    text = _greedy("🗓 ", parts, "; ", lambda left: " …" if left else "")
+    parts = [line.removeprefix("• ") for line in render.pattern_lines(slots, "ru")]
+    text = _greedy("🗓 Расписание:\n", parts, "\n", lambda left: "\n…" if left else "")
     config = group.schedule_config if isinstance(group.schedule_config, dict) else {}
     try:
         start_date = date.fromisoformat(str(config.get("start_date")))
     except ValueError:
         start_date = None
-    suffix = " · изменения на неделе — /schedule"
+    suffix = "\n\nНа этой неделе есть изменения — /schedule"
     if render.week_changes(slots, upcoming, now, "ru", start_date) and fits(text + suffix):
         text += suffix
     return text
@@ -90,7 +91,7 @@ def _lessons(db, group, now: datetime) -> str:
         else:
             label = f"{render.WEEKDAYS['ru'][start.weekday()]} {start:%d.%m}"
         items.append(f"{label} {start:%H:%M}")
-    return _greedy("📅 ", items, " · ")
+    return _greedy("📅 Ближайшие уроки:\n", items, "\n")
 
 
 def _homework(db, group, now: datetime) -> str:
@@ -103,19 +104,19 @@ def _homework(db, group, now: datetime) -> str:
     items = []
     for task in ordered:
         if task.due_date is None:
-            items.append(f"{short(task.title)} — без срока")
+            items.append(f"• {short(task.title)} — без срока")
             continue
         due = render.local(task.due_date)
         if task in late:
-            items.append(f"{short(task.title)} — срок прошёл {due:%d.%m}")
+            items.append(f"• {short(task.title)} — срок прошёл {due:%d.%m}")
             continue
         when = f"до {due:%d.%m %H:%M}"
         if due.date() == today:
             when += " (сегодня)"
         elif due.date() == today + timedelta(days=1):
             when += " (завтра)"
-        items.append(f"{short(task.title)} — {when}")
-    return _greedy("📝 ", items, "; ", lambda left: f" + ещё {left} — /homework" if left else "")
+        items.append(f"• {short(task.title)} — {when}")
+    return _greedy("📝 Домашние задания:\n", items, "\n", lambda left: f"\n+ ещё {left} — /homework" if left else "")
 
 
 def popup(db, *, support_group_id: int, action: str, now: Optional[datetime] = None) -> dict:
