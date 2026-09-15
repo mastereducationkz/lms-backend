@@ -247,6 +247,18 @@ def test_no_automatic_text_raises_its_voice():
     assert not [text for text in texts if "!" in text]
 
 
+def test_an_open_weekly_mock_is_not_in_the_digest(live):
+    """Owner, 2026-09-15: «remove the weekly mock thing from digests»."""
+    live["on"](14, meeting_url="https://meet.google.com/abc-defg-hij")
+    mock = live["on"](13, hour=7, minute=0, event_type="weekly_test", title="IELTS Weekly Test · 13.09-14.09",
+                      meeting_url="https://ielts.mastereducation.kz/weekly-sets/15")
+    mock.end_datetime = datetime(2026, 9, 20, 7, 0)            # open for the whole week
+    live["db"].flush()
+    live["tick"](digest, AT_1005)
+    [sent] = live["calls"]["post"]
+    assert "Weekly" not in sent["text"] and "weekly-sets" not in sent["text"] and "🧪" not in sent["text"]
+
+
 def test_no_digest_before_ten_or_on_an_empty_day(live):
     live["on"](14)
     live["tick"](digest, datetime(2026, 9, 14, 4, 30))      # 09:30

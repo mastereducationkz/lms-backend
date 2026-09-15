@@ -7,7 +7,7 @@ evening one: tomorrow's lessons) or a homework deadline in the next 24 hours. A 
 still sends within the hour.
 
 **What.** No group name (owner): a rotating greeting, the lessons with their Meet links, the
-deadlines, the weekly mock while it is open, a rotating closer. Rotation is a stable hash of the
+deadlines, a rotating closer — and no weekly mock (owner). Rotation is a stable hash of the
 group and the day, so a retried send says the same thing.
 
 **Last chance.** Three hours before each homework deadline: «⏰ До дедлайна 3 часа…». In quiet hours
@@ -113,13 +113,6 @@ def deadlines(db, group, after: datetime, until: datetime) -> list:
     return out
 
 
-def open_weekly(db, group, now: datetime):
-    return (db.query(Event).join(EventGroup, EventGroup.event_id == Event.id)
-            .filter(EventGroup.group_id == group.id, Event.is_active.is_(True), Event.event_type == "weekly_test",
-                    Event.start_datetime <= now, Event.end_datetime > now, event_has_operational_group_clause())
-            .order_by(Event.end_datetime).first())
-
-
 def _lesson_lines(lessons: list, *, soft: bool) -> list:
     """``soft`` — the morning digest: a warm line per lesson, the Meet room as a «Ссылка на урок» hyperlink."""
     lines = []
@@ -151,27 +144,27 @@ def _deadline_lines(tasks: list, now: datetime, *, soft: bool) -> list:
     return lines
 
 
-def compose(opening: str, lessons: list, tasks: list, weekly, closer: str, now: datetime, *, soft: bool) -> str:
+def compose(opening: str, lessons: list, tasks: list, closer: str, now: datetime, *, soft: bool) -> str:
+    """Greeting, lessons, deadlines, closer. No weekly mock (owner, 2026-09-15: «remove the weekly mock
+    thing from digests») — /weekly still answers it on request."""
     blocks = [opening]
     if lessons:
         blocks.append("\n".join(_lesson_lines(lessons, soft=soft)))
     if tasks:
         blocks.append("\n".join(_deadline_lines(tasks, now, soft=soft)))
-    if weekly is not None and weekly.end_datetime is not None:
-        blocks.append(f"🧪 Weekly mock открыт до {render.deadline_label(weekly.end_datetime, now, 'ru')}")
     blocks.append(closer)
     return "\n\n".join(blocks)
 
 
-def morning_text(group, day: date, lessons: list, tasks: list, weekly, now: datetime) -> str:
-    return compose(pick(GREETINGS, group.id, day.isoformat(), "greeting"), lessons, tasks, weekly,
+def morning_text(group, day: date, lessons: list, tasks: list, now: datetime) -> str:
+    return compose(pick(GREETINGS, group.id, day.isoformat(), "greeting"), lessons, tasks,
                    pick(CLOSERS, group.id, day.isoformat(), "closer"), now, soft=True)
 
 
-def evening_text(group, day: date, lessons: list, tasks: list, weekly, now: datetime) -> str:
+def evening_text(group, day: date, lessons: list, tasks: list, now: datetime) -> str:
     first = render.local(lessons[0].start_datetime)
     opening = f"🌙 Напоминалка на завтра: урок уже в {first:%H:%M}, не проспи 😴"
-    return compose(opening, lessons, tasks, weekly, pick(CLOSERS, group.id, day.isoformat(), "closer"),
+    return compose(opening, lessons, tasks, pick(CLOSERS, group.id, day.isoformat(), "closer"),
                    now, soft=False)
 
 
@@ -257,14 +250,14 @@ def run(db, live: list, budget: outbox.Budget, now: datetime) -> dict:
             ahead = [lesson for lesson in lessons if lesson.start_datetime > now]
             tasks = deadlines(db, group, now, now + HORIZON)
             if not early and (ahead or tasks):
-                text = morning_text(group, today, ahead, tasks, open_weekly(db, group, now), now)
+                text = morning_text(group, today, ahead, tasks, now)
                 _send(db, budget, summary, group, link, "morning", today.isoformat(), text, now)
         if _in_window(local, EVENING):
             tomorrow = today + timedelta(days=1)
             lessons = day_lessons(db, group, tomorrow)
             if lessons and render.local(lessons[0].start_datetime).time() < MORNING:
                 tasks = deadlines(db, group, now, now + HORIZON)
-                text = evening_text(group, tomorrow, lessons, tasks, open_weekly(db, group, now), now)
+                text = evening_text(group, tomorrow, lessons, tasks, now)
                 _send(db, budget, summary, group, link, "evening", tomorrow.isoformat(), text, now)
         if outbox.in_quiet_hours(now):
             continue
