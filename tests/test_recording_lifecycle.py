@@ -231,7 +231,7 @@ def test_ingest_counts_the_attempt_before_trying(monkeypatch):
     db = _DB([rec])
     seen = {}
 
-    def _process(_db, recording):
+    def _process(_db, recording, **_kwargs):
         seen["attempts_at_process"] = recording.attempts
         raise RuntimeError("ffmpeg exploded")
 

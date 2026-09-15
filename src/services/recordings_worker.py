@@ -227,11 +227,20 @@ def ingest_one_pending(db, exclude: Optional[set] = None) -> bool:
 
     recording.attempts += 1
     db.commit()
+    rec_id, event_id = recording.id, recording.event_id
+
+    def report(phase, done=None, total=None):
+        recordings_status.ingest_progress(rec_id, event_id, phase, done, total)
+
+    # Pages show which recording is being made watchable and how far it has got (recording_progress).
+    report("downloading")
     try:
-        recording_ingest.process_recording(db, recording)
+        recording_ingest.process_recording(db, recording, progress=report)
     except Exception as e:
         db.rollback()
         recording_ingest.fail_recording(db, recording, e)
+    finally:
+        recordings_status.ingest_finished()
     return True
 
 
@@ -245,7 +254,9 @@ def ingest_pending(db, budget_seconds: float = INGEST_BUDGET_SECONDS, clock=time
     minutes. Each recording is tried at most once per tick — a failing one waits for the
     next tick rather than spending its three attempts back to back.
     """
-    if not recording_ingest.room_on_disk():
+    held = not recording_ingest.room_on_disk()
+    recordings_status.ingest_held_for_disk(held)  # so the pages can say why the line is not moving
+    if held:
         return 0
     started, tried, done = clock(), set(), 0
     while clock() - started < budget_seconds and ingest_one_pending(db, exclude=tried):

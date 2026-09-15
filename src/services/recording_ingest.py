@@ -45,8 +45,8 @@ def room_on_disk(path: str = "/tmp") -> bool:
     return False
 
 
-def _download_drive_file(file_id: str, workdir: Path) -> Path:
-    """Stream a Drive file to disk.
+def _download_drive_file(file_id: str, workdir: Path, progress=None) -> Path:
+    """Stream a Drive file to disk; ``progress(bytes_done, bytes_total)`` after each chunk.
 
     Chunked rather than read-into-memory: lesson recordings run to hundreds of megabytes
     and the container is sharing 4 cores and limited RAM with the rest of the stack.
@@ -61,7 +61,9 @@ def _download_drive_file(file_id: str, workdir: Path) -> Path:
         downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
         done = False
         while not done:
-            _status, done = downloader.next_chunk()
+            status, done = downloader.next_chunk()
+            if progress and status is not None and status.total_size:
+                progress(status.resumable_progress, status.total_size)
 
     if dest.stat().st_size == 0:
         raise RuntimeError(f"drive file {file_id} downloaded as 0 bytes")
@@ -124,9 +126,10 @@ def _target_duration(playlist: Path) -> float:
     raise RuntimeError(f"{playlist.name} has no target duration")
 
 
-def _repackage_hls(src: Path, out: Path, *, has_audio: bool) -> None:
+def _repackage_hls(src: Path, out: Path, *, has_audio: bool, progress=None, duration: Optional[float] = None) -> None:
     """Copy Meet's own H.264/AAC into HLS segments — no re-encoding, same layout as the ladder
-    (``master.m3u8`` + ``v0.m3u8`` + ``v0_NNN.ts``), so the player and token route see no difference."""
+    (``master.m3u8`` + ``v0.m3u8`` + ``v0_NNN.ts``), so the player and token route see no difference.
+    ``progress(seconds_done, duration)`` while ffmpeg works, when someone is listening."""
     cmd = ["ffmpeg", "-y", "-i", str(src), "-map", "0:v:0"]
     if has_audio:
         cmd += ["-map", "0:a:0"]
@@ -137,7 +140,10 @@ def _repackage_hls(src: Path, out: Path, *, has_audio: bool) -> None:
             "-master_pl_name", "master.m3u8",
             "-var_stream_map", "v:0,a:0" if has_audio else "v:0",
             str(out / "v%v.m3u8")]
-    video_ingest._run(cmd, timeout=1800)
+    if progress:
+        video_ingest._run_with_progress(cmd, timeout=1800, duration=duration, progress=progress)
+    else:
+        video_ingest._run(cmd, timeout=1800)
     if not (out / "master.m3u8").exists():
         raise RuntimeError("ffmpeg did not produce master.m3u8")
 
@@ -162,13 +168,14 @@ POSTER_FRACTIONS = (0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80)
 POSTER_WIDTH = 1280
 
 
-def make_poster(src: Path, out_dir: Path, duration: Optional[int]) -> Optional[Path]:
+def make_poster(src: Path, out_dir: Path, duration: Optional[int], progress=None) -> Optional[Path]:
     """Write ``poster.jpg`` into ``out_dir`` — the most detailed of several candidate frames.
 
     At the same JPEG quality a busier picture compresses worse, so the largest candidate is
     the one with the most on it: a slide full of text beats a face, and both beat a black
     frame from a camera that was off. It is a cheap proxy that needs no image library.
     Returns None rather than raising: a lesson without a preview is still a lesson.
+    ``progress(frames_tried, frames_total)`` after each candidate.
     """
     if not duration or duration < 1:
         return None
@@ -186,6 +193,8 @@ def make_poster(src: Path, out_dir: Path, duration: Optional[int]) -> Optional[P
                 candidates.append(frame)
         except Exception as e:
             logger.warning("%s: no preview frame at %.0f%%: %s", src.name, fraction * 100, e)
+        if progress:
+            progress(i + 1, len(POSTER_FRACTIONS))
     if not candidates:
         return None
     best = max(candidates, key=lambda f: f.stat().st_size)
@@ -196,7 +205,7 @@ def make_poster(src: Path, out_dir: Path, duration: Optional[int]) -> Optional[P
     return poster
 
 
-def package_hls(src: Path, out: Path) -> str:
+def package_hls(src: Path, out: Path, progress=None, duration: Optional[float] = None) -> str:
     """Make the recording streamable. Returns ``"repackaged"`` or ``"re-encoded"``.
 
     Meet already records H.264 video with AAC sound — what every browser plays. Re-encoding
@@ -207,11 +216,13 @@ def package_hls(src: Path, out: Path) -> str:
 
     Anything else — another codec or pixel format, keyframes too far apart, a repackage that
     fails — falls back to the full re-encode, so an unusual file costs time, never the lesson.
+    ``progress(seconds_done, duration)`` while ffmpeg works, when someone is listening.
     """
+    listening = {"progress": progress, "duration": duration} if progress else {}
     info = _probe_streams(src)
     if _browser_playable(info):
         try:
-            _repackage_hls(src, out, has_audio=info["audio"] is not None)
+            _repackage_hls(src, out, has_audio=info["audio"] is not None, **listening)
             longest = _target_duration(out / "v0.m3u8")
             if longest <= MAX_SEGMENT_SECONDS:
                 return "repackaged"
@@ -223,7 +234,7 @@ def package_hls(src: Path, out: Path) -> str:
     else:
         logger.info("%s: video=%s/%s audio=%s, re-encoding", src.name,
                     info["video"], info["pix_fmt"], info["audio"])
-    video_ingest._transcode_hls(src, out)
+    video_ingest._transcode_hls(src, out, **listening)
     return "re-encoded"
 
 
@@ -246,10 +257,24 @@ def _save(db, recording, **fields) -> None:
                            getattr(recording, "id", "?"), str(e).splitlines()[0][:200])
 
 
-def process_recording(db, recording) -> None:
+def _phase(progress, phase: str) -> dict:
+    """``progress=`` for one helper, bound to its phase and announced as begun.
+
+    Nothing at all while nobody is listening, so the helpers — and their stand-ins in tests — keep
+    their plain signatures.
+    """
+    if progress is None:
+        return {}
+    progress(phase)
+    return {"progress": lambda done=None, total=None: progress(phase, done, total)}
+
+
+def process_recording(db, recording, progress=None) -> None:
     """Drive file → HLS on S3 → ``status='ready'``. Raises on failure.
 
     The recording row is the unit of work; the caller owns retry and failure accounting.
+    ``progress(phase, done, total)`` follows it through downloading → packaging → preview →
+    uploading, for the pages that wait on it (``recording_progress``).
     """
     rec_id, event_id, drive_file_id = recording.id, recording.event_id, recording.drive_file_id
     if not drive_file_id:
@@ -264,20 +289,22 @@ def process_recording(db, recording) -> None:
 
     workdir = Path(tempfile.mkdtemp(prefix=f"rec_{event_id}_"))
     try:
-        source = _download_drive_file(drive_file_id, workdir)
+        source = _download_drive_file(drive_file_id, workdir, **_phase(progress, "downloading"))
         logger.info("recording %s: downloaded %s bytes", rec_id, source.stat().st_size)
 
+        # Read before packaging, so packaging can say how far into the lesson it has got.
+        duration = probe_duration(source)
         hls_dir = workdir / "hls"
         hls_dir.mkdir()
-        how = package_hls(source, hls_dir)
+        packaging = _phase(progress, "packaging")
+        how = package_hls(source, hls_dir, **packaging, **({"duration": duration} if packaging else {}))
         logger.info("recording %s: %s for streaming", rec_id, how)
 
-        duration = probe_duration(source)
         # Written into the HLS folder so it uploads with the tree, under the same token.
-        poster = make_poster(source, hls_dir, duration)
+        poster = make_poster(source, hls_dir, duration, **_phase(progress, "preview"))
 
         prefix = storage_prefix(event_id)
-        video_ingest._upload_tree(hls_dir, prefix)
+        video_ingest._upload_tree(hls_dir, prefix, **_phase(progress, "uploading"))
 
         hls_url = storage_service.stored_path(f"{prefix}/master.m3u8")
         poster_url = storage_service.stored_path(f"{prefix}/poster.jpg") if poster else None

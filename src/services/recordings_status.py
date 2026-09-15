@@ -73,6 +73,48 @@ def tick_finished(seconds: float) -> None:
     _save(finished_at=utc_z(_now()), step=None, progress=None, last_seconds=round(seconds))
 
 
+# ── the recording being made watchable right now (2026-09-15) ───────────────────────────
+# The ingest runs one recording at a time, so one entry says it all: which recording, which phase,
+# how far into it. Written at most every PROGRESS_EVERY — a lesson is ~77 download chunks and ~600
+# HLS files — except when the phase changes or completes.
+PROGRESS_EVERY = timedelta(seconds=2)
+# A report this old belongs to a worker that stopped mid-recording (every phase reports far more often).
+PROGRESS_STALE_AFTER = timedelta(minutes=3)
+
+_last_report: dict = {}
+
+
+def ingest_progress(recording_id: int, event_id: int, phase: str,
+                    done: Optional[float] = None, total: Optional[float] = None) -> None:
+    now = _now()
+    key = (recording_id, phase)
+    same = _last_report.get("key") == key
+    finished = done is not None and total is not None and done >= total
+    if same and not finished and now - _last_report["at"] < PROGRESS_EVERY:
+        return
+    phase_started = _last_report["phase_started"] if same else now
+    _last_report.update(key=key, at=now, phase_started=phase_started)
+    _save(ingest={"recording_id": recording_id, "event_id": event_id, "phase": phase,
+                  "done": done, "total": total,
+                  "phase_started_at": utc_z(phase_started), "updated_at": utc_z(now)})
+
+
+def ingest_finished() -> None:
+    _last_report.clear()
+    _save(ingest=None)
+
+
+def ingest_held_for_disk(held: bool) -> None:
+    """The line is held because the server's disk is nearly full — worth saying, never a silent wait."""
+    _save(held_for_disk=held)
+
+
+def raw(db) -> dict:
+    """The row as the worker wrote it, for readers that need more than ``snapshot``."""
+    row = db.get(AppSetting, KEY)
+    return dict(row.value) if row is not None and isinstance(row.value, dict) else {}
+
+
 def _parse(value) -> Optional[datetime]:
     if not value:
         return None

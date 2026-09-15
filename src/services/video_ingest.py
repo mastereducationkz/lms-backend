@@ -182,6 +182,47 @@ def _run(cmd: list, timeout: int, capture: bool = False) -> str:
     return proc.stdout if capture else ""
 
 
+def _run_with_progress(cmd: list, timeout: int, duration: Optional[float], progress) -> None:
+    """``_run`` for an ffmpeg command, reporting ``progress(seconds_done, duration)`` as it goes.
+
+    ffmpeg's ``-progress pipe:1`` prints key=value blocks about twice a second; ``out_time_us`` (and,
+    despite its name, ``out_time_ms``) is microseconds into the input. stderr goes to a file so a
+    chatty encoder can never fill a pipe and hang the worker.
+    """
+    logger.info("run: %s", " ".join(cmd[:6]) + (" ..." if len(cmd) > 6 else ""))
+    full = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    with tempfile.TemporaryFile(mode="w+") as err:
+        proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=err, text=True)
+        # A watchdog rather than a check between lines: an ffmpeg that goes silent must still be
+        # stopped at the timeout, or it would hold the one-at-a-time ingest behind it.
+        expired = threading.Event()
+
+        def expire():
+            expired.set()
+            proc.kill()
+
+        watchdog = threading.Timer(timeout, expire)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            for line in proc.stdout:
+                key, _, value = line.strip().partition("=")
+                if duration and key in ("out_time_us", "out_time_ms") and value.isdigit():
+                    progress(min(int(value) / 1_000_000, duration), duration)
+            returncode = proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            watchdog.cancel()
+        if expired.is_set():
+            raise subprocess.TimeoutExpired(full, timeout)
+        if returncode != 0:
+            err.seek(0)
+            raise RuntimeError(f"{cmd[0]} exited {returncode}: {err.read()[-1500:]}")
+
+
 def _download(url: str, workdir: Path) -> Path:
     out_tmpl = str(workdir / "source.%(ext)s")
     cmd = ["yt-dlp", "--no-playlist", "--socket-timeout", "30",
@@ -219,8 +260,9 @@ def _probe_height(src: Path) -> int:
         return 720
 
 
-def _transcode_hls(src: Path, out: Path) -> None:
-    """Transcode to an adaptive HLS ladder (flat layout: master.m3u8 + v<N>.m3u8 + v<N>_<seg>.ts)."""
+def _transcode_hls(src: Path, out: Path, progress=None, duration: Optional[float] = None) -> None:
+    """Transcode to an adaptive HLS ladder (flat layout: master.m3u8 + v<N>.m3u8 + v<N>_<seg>.ts).
+    ``progress(seconds_done, duration)`` while it works, when someone is listening."""
     height = _probe_height(src)
     ladder = [r for r in RENDITIONS if r[0] <= height] or [RENDITIONS[0]]
     n = len(ladder)
@@ -245,18 +287,25 @@ def _transcode_hls(src: Path, out: Path) -> None:
             "-master_pl_name", "master.m3u8",
             "-var_stream_map", var_map,
             str(out / "v%v.m3u8")]
-    _run(cmd, timeout=3600)
+    if progress:
+        _run_with_progress(cmd, timeout=3600, duration=duration, progress=progress)
+    else:
+        _run(cmd, timeout=3600)
     if not (out / "master.m3u8").exists():
         raise RuntimeError("ffmpeg did not produce master.m3u8")
 
 
-def _upload_tree(local_dir: Path, key_prefix: str) -> None:
-    for f in sorted(local_dir.rglob("*")):
-        if not f.is_file():
-            continue
+def _upload_tree(local_dir: Path, key_prefix: str, progress=None) -> None:
+    """Upload every file under ``local_dir``; ``progress(bytes_done, bytes_total)`` after each one."""
+    files = [f for f in sorted(local_dir.rglob("*")) if f.is_file()]
+    total, done = sum(f.stat().st_size for f in files), 0
+    for f in files:
         rel = f.relative_to(local_dir).as_posix()
         key = f"{key_prefix}/{rel}"
         storage_service.save(key, f.read_bytes(), content_type=storage_service.content_type_for(key))
+        done += f.stat().st_size
+        if progress:
+            progress(done, total)
 
 
 def process_job(db, job: VideoIngestJob) -> None:

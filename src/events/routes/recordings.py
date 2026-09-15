@@ -18,6 +18,7 @@ from src.config import get_db
 from src.routes.auth import get_current_user_dependency
 from src.schemas.models import Event, LessonRecording, UserInDB
 from src.services.media_tokens import signed_hls_url
+from src.services import recording_progress
 from src.services.recording_access import may_watch, public_status
 
 logger = logging.getLogger(__name__)
@@ -51,10 +52,18 @@ def get_lesson_recording(
         .filter(LessonRecording.event_id == event_id)
         .first()
     )
+    staff = recording_progress.is_staff(current_user)
     if recording is None:
-        return {"status": "missing", "url": None}
+        # «No recording» only once one can no longer come; until then, what it is waiting for.
+        status, progress = recording_progress.without_recording(
+            db, recording_progress.Context(db), event, staff=staff)
+        return {"status": status, "url": None, "progress": progress}
 
-    return playback_payload(recording, current_user.id)
+    payload = playback_payload(recording, current_user.id)
+    if payload["status"] != "ready":
+        payload["progress"] = recording_progress.of_recording(
+            recording_progress.Context(db), recording, event, staff=staff)
+    return payload
 
 
 def playback_payload(recording: LessonRecording, viewer_id: int) -> dict:

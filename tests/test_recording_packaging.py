@@ -75,6 +75,19 @@ def test_the_repackage_keeps_the_player_contract(tmp_path, out, encoder):
     assert recording_ingest._target_duration(out / "v0.m3u8") <= recording_ingest.MAX_SEGMENT_SECONDS
 
 
+def test_packaging_reports_how_far_into_the_lesson_it_is(tmp_path, out, encoder):
+    """The recordings page shows «Preparing for streaming · 60%» from ffmpeg's own progress (2026-09-15)."""
+    src = _clip(tmp_path / "lesson.mp4")
+    seen = []
+
+    how = recording_ingest.package_hls(src, out, progress=lambda done, total: seen.append((done, total)), duration=20.0)
+
+    assert how == "repackaged" and (out / "master.m3u8").exists()
+    assert seen, "ffmpeg's progress reached the callback"
+    assert all(total == 20.0 and 0 <= done <= 20.0 for done, total in seen)
+    assert [done for done, _ in seen] == sorted(done for done, _ in seen), "it never goes backwards"
+
+
 def test_the_repackaged_segments_are_still_h264_and_aac(tmp_path, out, encoder):
     src = _clip(tmp_path / "lesson.mp4")
     recording_ingest.package_hls(src, out)

@@ -28,7 +28,8 @@ from src.config import get_db
 from src.routes.auth import get_current_user_dependency
 from src.schemas.models import Event, EventGroup, Group, LessonRecording, UserInDB
 from src.services.media_tokens import signed_hls_url
-from src.services.recording_access import public_status, watchable_event_clause
+from src.services import recording_progress
+from src.services.recording_access import public_status, sees_every_recording, watchable_event_clause
 
 router = APIRouter()
 
@@ -182,6 +183,11 @@ def list_recordings(
         db.query(UserInDB.id, UserInDB.name).filter(UserInDB.id.in_(teacher_ids)).all()
     ) if teacher_ids else {}
 
+    # Where each card that is not watchable yet stands (in line, processing, failed…), read once per page.
+    unfinished = any(not (recording.status == "ready" and recording.hls_url) for recording, _ in rows)
+    progress_ctx = recording_progress.Context(db) if unfinished else None
+    staff = recording_progress.is_staff(current_user)
+
     items = []
     for recording, event in rows:
         state = public_status(recording)
@@ -199,6 +205,8 @@ def list_recordings(
             "poster_url": (signed_hls_url(recording.poster_url, current_user.id)
                            if state == "ready" and recording.poster_url else None),
             "ingested_at": _utc(recording.ingested_at),
+            "progress": (recording_progress.of_recording(progress_ctx, recording, event, staff=staff)
+                         if progress_ctx else None),
         })
 
     last = rows[-1][1] if rows else None
@@ -210,6 +218,79 @@ def list_recordings(
         response["total"] = filtered.count()
         response["facets"] = _facets(db, scoped)
     return response
+
+
+def _status_entry(db, ctx, event, recording, viewer, staff: bool) -> dict:
+    """One lesson's recording as a polling page needs it: status, progress, and — once ready — its preview."""
+    if recording is None:
+        status, progress = recording_progress.without_recording(db, ctx, event, staff=staff)
+        return {"status": status, "progress": progress, "poster_url": None, "duration_seconds": None}
+    state = public_status(recording)
+    return {
+        "status": state,
+        "progress": recording_progress.of_recording(ctx, recording, event, staff=staff),
+        "poster_url": (signed_hls_url(recording.poster_url, viewer.id)
+                       if state == "ready" and recording.poster_url else None),
+        "duration_seconds": recording.duration_seconds,
+    }
+
+
+@router.get("/status")
+def recording_statuses(
+    event_ids: str = Query(..., max_length=600, description="Comma-separated lesson ids, at most 48"),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """Where each of a handful of recordings stands — what a page polls while cards are on their way (2026-09-15).
+
+    One request for every card still in progress, never one per card, and far lighter than the list:
+    no facets, no groups. A lesson the viewer may not watch is simply absent, never a 403; students,
+    as in the list, only ever see finished recordings.
+    """
+    try:
+        ids = sorted({int(part) for part in event_ids.split(",") if part.strip()})
+    except ValueError:
+        raise HTTPException(status_code=400, detail="event_ids must be comma-separated lesson ids")
+    if len(ids) > PAGE_MAX:
+        raise HTTPException(status_code=400, detail=f"At most {PAGE_MAX} lessons at a time")
+    events = db.query(Event).filter(Event.id.in_(ids or [-1]), watchable_event_clause(current_user)).all()
+    recordings = {r.event_id: r for r in
+                  db.query(LessonRecording).filter(LessonRecording.event_id.in_([e.id for e in events] or [-1]))}
+    ctx = recording_progress.Context(db)
+    staff = recording_progress.is_staff(current_user)
+    items = {}
+    for event in events:
+        recording = recordings.get(event.id)
+        if current_user.role == "student" and not (recording and recording.status == "ready" and recording.hls_url):
+            continue
+        items[str(event.id)] = _status_entry(db, ctx, event, recording, current_user, staff)
+    return {"items": items}
+
+
+@router.post("/{event_id}/retry")
+def retry_recording(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """Send a failed recording round the ingest again, attempts reset — admins and heads (2026-09-15).
+
+    A failure stays for a human to look at, because payroll reads it; once the cause is dealt with (a
+    Drive permission, a full disk) this replaces an edit in the database. It joins the line in the
+    order it was found, so an older lesson goes ahead of newer ones.
+    """
+    event = db.query(Event).filter(Event.id == event_id, watchable_event_clause(current_user)).first()
+    recording = (db.query(LessonRecording).filter(LessonRecording.event_id == event_id).first()
+                 if event is not None else None)
+    if recording is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if not sees_every_recording(current_user):
+        raise HTTPException(status_code=403, detail="Only admins and heads can retry a recording")
+    if recording.status != "failed":
+        raise HTTPException(status_code=409, detail="Only a failed recording can be retried")
+    recording.status, recording.attempts, recording.error = "pending", 0, None
+    db.commit()
+    return _status_entry(db, recording_progress.Context(db), event, recording, current_user, staff=True)
 
 
 def _group_state(*, is_active, is_over) -> str:
