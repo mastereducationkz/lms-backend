@@ -116,12 +116,28 @@ class _FakeUser:
         self.id = uid
 
 
+def _run(coro):
+    """Drive the async handler on a private loop.
+
+    ``asyncio.get_event_loop()`` raises "no current event loop" once any earlier module in the
+    run has called ``asyncio.run()`` (which unsets the thread's loop on exit), so these tests
+    passed alone and failed in the full suite. A loop of our own, never installed on the thread,
+    works in any order and leaves the global untouched (same idiom as
+    tests/test_lesson_request_cancel_resolution.py).
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def test_endpoint_head_curator_sees_all(db):
     t = _u(db, "ep-hc@test.local")
     g = _g(db, t.id)
     _req(db, t.id, g.id, "reschedule", datetime(2026, 8, 3, 10, 0))
     _req(db, t.id, g.id, "cancel", datetime(2026, 8, 9, 10, 0))
-    out = asyncio.get_event_loop().run_until_complete(
+    out = _run(
         lr_routes.teacher_request_stats(
             year=2026, month=8, min_count=2, db=db,
             current_user=_FakeUser("head_curator"),
@@ -134,7 +150,7 @@ def test_endpoint_head_curator_sees_all(db):
 def test_endpoint_head_teacher_empty_scope_returns_empty(db):
     # a head_teacher with no managed courses has empty scope → []
     ht = _u(db, "ep-ht@test.local", "head_teacher")
-    out = asyncio.get_event_loop().run_until_complete(
+    out = _run(
         lr_routes.teacher_request_stats(
             year=2026, month=8, min_count=1, db=db,
             current_user=_FakeUser("head_teacher", uid=ht.id),

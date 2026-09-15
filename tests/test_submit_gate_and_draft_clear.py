@@ -180,7 +180,10 @@ def test_late_submission_cannot_replace_a_final_grade_without_reopen(db):
     assignment.max_attempts = None
     db.flush()
     first = submit_assignment(assignment.id, SubmitAssignmentSchema(answers={"text": "first"}), student, db)
-    first.is_graded = True
+    # submit_assignment returns a response schema (a copy); the grade has to land on the stored
+    # row, which is what the next submission's gate reads.
+    stored = db.get(AssignmentSubmission, first.id)
+    stored.is_graded = True
     db.flush()
 
     with pytest.raises(HTTPException) as exc:
