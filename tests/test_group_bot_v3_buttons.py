@@ -208,11 +208,20 @@ def test_calendar_questions_are_their_own_intent(text):
     assert group_bot_intents.classify(text, use_model=False).name == "calendar"
 
 
-def test_the_calendar_answer_says_soon_until_the_group_has_one(chat):
+def test_the_calendar_answer_says_soon_when_there_are_no_links(chat, monkeypatch):
+    monkeypatch.setattr(kb, "calendar_links", lambda db, group: None)
     out = chat["at"]("/calendar", command="calendar")
     assert out["intent"] == "calendar"
     assert out["answer"] == f"{HEADER}\n📆 Скоро здесь будет ссылка на календарь группы."
     assert out["keyboard"] == kb.keyboard(chat["linked"].id)
+
+
+def test_before_the_google_calendar_exists_the_feed_is_offered_and_google_is_coming(chat, monkeypatch):
+    monkeypatch.setattr(kb, "calendar_links", lambda db, group: {
+        "google_url": None, "ics_url": "https://lmsapi.mastereducation.kz/cal/g.ics"})
+    text = chat["at"]("/calendar", command="calendar")["answer"]
+    assert "• Google Calendar: скоро появится" in text
+    assert "• iPhone / Outlook (подписка): https://lmsapi.mastereducation.kz/cal/g.ics" in text
 
 
 def test_the_calendar_answer_gives_both_links(chat, monkeypatch):

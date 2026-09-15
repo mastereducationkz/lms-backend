@@ -207,22 +207,27 @@ def fact_answer(db, group: Group, intent: intents.Intent, now: datetime, lang: s
 _CALENDAR_TEXT = {
     "ru": ("📆 Календарь группы — уроки, дедлайны и weekly mock появятся у вас в телефоне и будут "
            "обновляться сами:", "iPhone / Outlook (подписка)",
-           "📆 Скоро здесь будет ссылка на календарь группы."),
+           "📆 Скоро здесь будет ссылка на календарь группы.", "скоро появится"),
     "kk": ("📆 Топ күнтізбесі — сабақтар, дедлайндар және weekly mock телефоныңызда өздігінен жаңарып тұрады:",
-           "iPhone / Outlook (жазылу)", "📆 Жақында мұнда топ күнтізбесінің сілтемесі болады."),
+           "iPhone / Outlook (жазылу)", "📆 Жақында мұнда топ күнтізбесінің сілтемесі болады.", "жақында пайда болады"),
     "en": ("📆 Group calendar — lessons, deadlines and weekly mocks show up on your phone and stay up to date:",
-           "iPhone / Outlook (subscribe)", "📆 A link to the group calendar will be here soon."),
+           "iPhone / Outlook (subscribe)", "📆 A link to the group calendar will be here soon.", "coming soon"),
 }
 
 
 def calendar_answer(db, group: Group, lang: str) -> str:
-    title, ics_label, soon = _CALENDAR_TEXT.get(lang, _CALENDAR_TEXT["ru"])
+    """Both links once the group's Google Calendar exists. Before that the ICS feed already works,
+    so it is offered at once and the Google line says it is on its way — a student who uses
+    Google should wait for the real calendar, which updates at once, not subscribe to the feed."""
+    title, ics_label, soon, google_soon = _CALENDAR_TEXT.get(lang, _CALENDAR_TEXT["ru"])
     links = keyboard_ui.calendar_links(db, group)
     if not links:
         return render.join(render.header(group.name), soon)
     lines = [title]
     if links.get("google_url"):
         lines.append(f"• Google Calendar: {escape(links['google_url'])}")
+    else:
+        lines.append(f"• Google Calendar: {google_soon}")
     lines.append(f"• {ics_label}: {escape(links['ics_url'])}")
     return render.join(render.header(group.name), *lines)
 
