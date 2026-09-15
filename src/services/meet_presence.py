@@ -336,6 +336,41 @@ def _roster(event, batch: _Batch, end: datetime) -> list:
     return sorted(rows, key=lambda r: r["name"].lower())
 
 
+def _is_lesson_call(conference, start: datetime, end: datetime, now: datetime) -> bool:
+    """A call that overlaps the lesson itself — not a room check before it."""
+    return min(conference.ended_at or now, end) - max(conference.started_at or start, start) >= LESSON_CALL_MIN_OVERLAP
+
+
+def _waiting(conferences: list, start: datetime, end: datetime, now: datetime) -> dict:
+    """What a lesson that is not judged yet is waiting for — the pages say it instead of «Loading» (2026-09-15).
+
+    The stage, first match wins: the lesson is still on; Google Meet still shows a call open; a call
+    has ended and the LMS is saving who joined; no call of the lesson itself has come through from
+    Google yet; or the lesson's call is saved and the record opens at ``ready_at``.
+    """
+    calls = sorted(conferences, key=lambda c: c.started_at or start)
+    if now < end:
+        stage = "lesson_running"
+    elif any(c.ended_at is None for c in calls):
+        stage = "call_open"
+    elif any(c.synced_at is None for c in calls):
+        stage = "collecting"
+    elif not any(c.synced_at and _is_lesson_call(c, start, end, now) for c in calls):
+        stage = "awaiting_google"
+    else:
+        stage = "settling"
+    return {
+        "stage": stage,
+        "ended_at": utc_z(end),
+        "ready_at": utc_z(end + COMPLETE_AFTER),
+        "judge_at": utc_z(end + GIVE_UP_WAITING_AFTER),
+        "calls": [{"started_at": utc_z(c.started_at) if c.started_at else None,
+                   "ended_at": utc_z(c.ended_at) if c.ended_at else None,
+                   "saved": c.synced_at is not None,
+                   "lesson_call": _is_lesson_call(c, start, end, now)} for c in calls],
+    }
+
+
 def lesson_record(event, batch: _Batch, now: datetime) -> dict:
     start = event.start_datetime
     end = event.end_datetime or start + timedelta(hours=1)
@@ -350,15 +385,13 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
     if not conferences and (event.id not in batch.lms_rooms or not meet_code(event.meeting_url)):
         return {**unjudged, "state": "no_room"}  # nothing we could ever have read
     if now < end + COMPLETE_AFTER or (waiting_for_google and now < end + GIVE_UP_WAITING_AFTER):
-        return {**unjudged, "state": "waiting"}
+        return {**unjudged, "state": "waiting", "waiting": _waiting(conferences, start, end, now)}
     if not any(c.synced_at for c in conferences):
         return {**unjudged, "state": "unavailable" if now > end + GOOGLE_KEEPS else "none"}
-    lesson_call_saved = any(
-        c.synced_at and min(c.ended_at or now, end) - max(c.started_at or start, start) >= LESSON_CALL_MIN_OVERLAP
-        for c in conferences
-    )
+    lesson_call_saved = any(c.synced_at and _is_lesson_call(c, start, end, now) for c in conferences)
     if not lesson_call_saved and now < end + GIVE_UP_WAITING_AFTER:
-        return {**unjudged, "state": "waiting"}  # only calls around the lesson so far, not the lesson's own
+        # Only calls around the lesson so far, not the lesson's own.
+        return {**unjudged, "state": "waiting", "waiting": _waiting(conferences, start, end, now)}
 
     lo, hi = start - LESSON_MARGIN, end + LESSON_MARGIN
     ended_at = {c.id: c.ended_at or now for c in conferences}
@@ -495,6 +528,8 @@ def public_participants(record: dict) -> dict:
     if record.get("state") != "ready":
         return {
             "state": record.get("state"),
+            # Times and stage only — the calls carry no identities.
+            "waiting": record.get("waiting"),
             "teacher": None,
             "students": [{"name": r["name"], "mark": r["mark"], "first_join": None, "last_leave": None,
                           "minutes_in_lesson": 0, "joins": 0, "flags": []} for r in record.get("roster", [])],

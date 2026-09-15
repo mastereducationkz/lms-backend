@@ -23,6 +23,7 @@ from src.schemas.models import (
     MeetParticipantSession,
 )
 from src.services import meet_presence
+from src.utils.utc_json import utc_z
 from tests.test_operational_groups import _user, db, world  # noqa: F401 - fixtures
 
 _names = count()
@@ -163,6 +164,37 @@ def test_a_room_with_only_calls_around_the_lesson_is_judged_after_waiting_long_e
     db.flush()
     later = skipped.end_datetime + meet_presence.GIVE_UP_WAITING_AFTER + timedelta(minutes=1)
     assert meet_presence.lesson(db, skipped, later)["state"] == "ready"
+
+
+def test_a_waiting_lesson_says_what_it_is_waiting_for(room):
+    """2026-09-15: «Loading» read as a slow LMS. A waiting record now says which stage it is in."""
+    db, world, lesson = room["db"], room["world"], room["lesson"]
+    assert _record(room, lesson.start_datetime + timedelta(minutes=10))["waiting"]["stage"] == "lesson_running"
+    settling = _record(room, lesson.end_datetime + timedelta(minutes=10))["waiting"]
+    assert settling["stage"] == "settling" and [c["lesson_call"] for c in settling["calls"]] == [True]
+    assert "waiting" not in _record(room), "a judged record waits for nothing"
+
+    room["teacher"].workspace_email = "gulzada@mastereducation.kz"
+    taught = world["lesson"](room["group"], days_ahead=-2, meeting_url="https://meet.google.com/wai-tingn-owx")
+    start, end = taught.start_datetime, taught.end_datetime
+    db.add(MeetConference(event_id=taught.id, conference_record=f"conferenceRecords/check-{next(_names)}",
+                          started_at=start - timedelta(minutes=2), ended_at=start - timedelta(minutes=1),
+                          synced_at=start))
+    db.flush()
+    an_hour_on = end + timedelta(hours=1)
+    waiting = meet_presence.lesson(db, taught, an_hour_on)["waiting"]
+    assert waiting["stage"] == "awaiting_google"
+    assert [(c["saved"], c["lesson_call"]) for c in waiting["calls"]] == [(True, False)], "a room check, not the lesson"
+    assert waiting["judge_at"] == utc_z(end + meet_presence.GIVE_UP_WAITING_AFTER)
+
+    call = MeetConference(event_id=taught.id, conference_record=f"conferenceRecords/lesson-{next(_names)}",
+                          started_at=start, ended_at=None)
+    db.add(call)
+    db.flush()
+    assert meet_presence.lesson(db, taught, an_hour_on)["waiting"]["stage"] == "call_open"
+    call.ended_at = end
+    db.flush()
+    assert meet_presence.lesson(db, taught, an_hour_on)["waiting"]["stage"] == "collecting"
 
 
 # ── lateness ─────────────────────────────────────────────────────────────────────────────

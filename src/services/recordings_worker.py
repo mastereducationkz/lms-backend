@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.config import SessionLocal
+from src.services import recordings_status
 from src.schemas.models import Event, LessonRecording, UserInDB
 from src.services import (
     google_workspace,
@@ -281,6 +282,8 @@ class RecordingsWorker:
         """One pass. Returns a summary, which makes it directly testable and callable by hand."""
         db = SessionLocal()
         started = datetime.now(timezone.utc)
+        # Pages waiting on Google Meet say what this tick is doing, step by step (recordings_status).
+        recordings_status.tick_started(self.poll_interval)
         summary = {"links": 0, "rooms": 0, "claimed": 0, "attendance": 0, "speech": 0,
                    "ingested": 0, "transcribed": 0, "missing": 0}
         try:
@@ -289,7 +292,9 @@ class RecordingsWorker:
                 # Talk time's switch reaches the rooms before their lessons start.
                 ("rooms", meet_talk_sync.sync_rooms),
                 ("claimed", poll_for_recordings),
-                ("attendance", meet_attendance.sync_if_enabled),
+                # «Saving who joined · 12 of 38 calls» on the pages while it runs.
+                ("attendance", lambda session: meet_attendance.sync_if_enabled(
+                    session, progress=recordings_status.attendance_progress)),
                 # After attendance: speech is named through the people it just saved.
                 ("speech", meet_talk_sync.sync_speech),
                 ("ingested", ingest_pending),
@@ -297,13 +302,17 @@ class RecordingsWorker:
                 ("transcribed", meet_talk_sync.transcribe_pending),
                 ("missing", recording_alerts.sweep_missing_recordings),
             ):
+                recordings_status.step_started(key)
                 try:
                     summary[key] = fn(db)
                 except Exception as e:
                     db.rollback()
                     logger.error("recordings tick step %s failed: %s", key, e, exc_info=True)
+                recordings_status.step_finished(key)
+            seconds = (datetime.now(timezone.utc) - started).total_seconds()
             # Steps log only what they save, so a slow tick used to be indistinguishable from a stuck one.
-            logger.info("recordings tick took %.0f s: %s", (datetime.now(timezone.utc) - started).total_seconds(), summary)
+            logger.info("recordings tick took %.0f s: %s", seconds, summary)
+            recordings_status.tick_finished(seconds)
             return summary
         finally:
             db.close()

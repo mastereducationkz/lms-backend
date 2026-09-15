@@ -170,6 +170,20 @@ def test_one_call_failing_does_not_stop_the_others_and_is_tried_again(meet):
     assert _saved(db, lesson) == 2
 
 
+def test_the_check_says_how_far_it_has_got(meet):
+    """The pages show «Saving who joined · 1 of 2 calls» instead of «Loading» (2026-09-15)."""
+    db = meet["db"]
+    meet["call"]("conferenceRecords/first")
+    meet["call"]("conferenceRecords/second")
+    meet["call"]("conferenceRecords/still-on", ended_minutes_after_start=None)
+    seen = []
+
+    saved = meet_attendance.sync(db, now=meet["start"] + timedelta(hours=2), progress=lambda done, total: seen.append((done, total)))
+
+    assert saved == 2
+    assert seen == [(0, 2), (1, 2)], "only calls there is something to save count"
+
+
 def test_saving_the_same_people_twice_adds_nothing(meet):
     db, lesson = meet["db"], meet["lesson"]
     conference = MeetConference(event_id=lesson.id, conference_record="conferenceRecords/again")

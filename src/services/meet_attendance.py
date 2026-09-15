@@ -21,7 +21,7 @@ import argparse
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from src.schemas.models import MeetConference, MeetParticipant, MeetParticipantSession
 from src.services import google_workspace, meet_recordings
@@ -133,14 +133,16 @@ def _conference_row(db, conference: dict) -> Optional[MeetConference]:
     return row
 
 
-def sync(db, lookback_hours: int = LOOKBACK_HOURS, now: Optional[datetime] = None) -> int:
+def sync(db, lookback_hours: int = LOOKBACK_HOURS, now: Optional[datetime] = None,
+         progress: Optional[Callable[[int, int], None]] = None) -> int:
     """Save every ended, not-yet-saved lesson call from the lookback window. Returns calls saved.
 
     One call failing (Google hiccup, a deleted lesson) is logged and skipped; the next tick
-    tries it again because its ``synced_at`` is still empty.
+    tries it again because its ``synced_at`` is still empty. The calls to save are found first,
+    so ``progress(done, total)`` can tell the pages how far this check has got.
     """
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
-    saved = 0
+    pending = []
     for conference in meet_recordings.list_recent_conferences(lookback_hours):
         name = conference.get("name")
         if not name:
@@ -153,8 +155,17 @@ def sync(db, lookback_hours: int = LOOKBACK_HOURS, now: Optional[datetime] = Non
             if ended is None or ended > now - SETTLE:
                 continue  # still running, or only just over
             row.ended_at = ended
-            conference_id, event_id = row.id, row.event_id
+            pending.append((name, row.id, row.event_id))
             db.commit()  # the Google calls below must not hold a transaction open (pgbouncer kills it at 60 s)
+        except Exception as e:
+            db.rollback()
+            logger.warning("meet attendance %s: %s", name, e)
+
+    saved = 0
+    for done, (name, conference_id, event_id) in enumerate(pending):
+        if progress:
+            progress(done, len(pending))
+        try:
             people = fetch_people(name)
             save_people(db, conference_id, event_id, people, now)
             saved += 1
@@ -165,9 +176,9 @@ def sync(db, lookback_hours: int = LOOKBACK_HOURS, now: Optional[datetime] = Non
     return saved
 
 
-def sync_if_enabled(db) -> int:
+def sync_if_enabled(db, progress: Optional[Callable[[int, int], None]] = None) -> int:
     """The recordings worker's step: nothing at all while the switch is off."""
-    return sync(db) if enabled() else 0
+    return sync(db, progress=progress) if enabled() else 0
 
 
 def main(argv: Optional[list] = None) -> None:

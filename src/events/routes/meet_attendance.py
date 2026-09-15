@@ -25,7 +25,7 @@ from src.schemas.models import (
     MeetParticipant,
     UserInDB,
 )
-from src.services import meet_presence, meet_talk, talk_settings
+from src.services import meet_presence, meet_talk, recordings_status, talk_settings
 from src.utils.utc_json import utc_z
 
 router = APIRouter()
@@ -56,7 +56,10 @@ def get_lesson_record(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
-    return meet_presence.lesson(db, _visible_lesson(db, current_user, event_id))
+    record = meet_presence.lesson(db, _visible_lesson(db, current_user, event_id))
+    if record["state"] == "waiting":
+        record["sync"] = recordings_status.snapshot(db)  # what the lesson's card says it is waiting on
+    return record
 
 
 class IdentityIn(BaseModel):
@@ -265,6 +268,7 @@ def list_lesson_records(
             "start": record["start"],
             "end": record["end"],
             "state": record["state"],
+            "waiting": record.get("waiting"),
             "groups": sorted(groups.get(record["event_id"], []), key=lambda g: g["name"]),
             "teacher": {"id": teacher["user_id"], "name": teacher["name"],
                         "first_join": teacher["first_join"], "last_leave": teacher["last_leave"]} if teacher else None,
@@ -278,4 +282,6 @@ def list_lesson_records(
             "talk": talk.get(record["event_id"]),
         })
     return {"items": items, "from": utc_z(date_from), "to": utc_z(date_to),
-            "review_options": meet_presence.review_options(), "talk_enabled": talk_on}
+            "review_options": meet_presence.review_options(), "talk_enabled": talk_on,
+            # What the check with Google Meet is doing, for lessons still waiting on it.
+            "sync": recordings_status.snapshot(db, now)}
