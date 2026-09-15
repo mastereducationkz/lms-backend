@@ -190,7 +190,9 @@ def _run_with_progress(cmd: list, timeout: int, duration: Optional[float], progr
     chatty encoder can never fill a pipe and hang the worker.
     """
     logger.info("run: %s", " ".join(cmd[:6]) + (" ..." if len(cmd) > 6 else ""))
-    full = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    # Below the API in the CPU queue: a re-encode takes every core it is given, and the site must stay quick.
+    nice = ["nice", "-n", "10"] if shutil.which("nice") else []
+    full = [*nice, cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
     with tempfile.TemporaryFile(mode="w+") as err:
         proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=err, text=True)
         # A watchdog rather than a check between lines: an ffmpeg that goes silent must still be
@@ -295,17 +297,42 @@ def _transcode_hls(src: Path, out: Path, progress=None, duration: Optional[float
         raise RuntimeError("ffmpeg did not produce master.m3u8")
 
 
-def _upload_tree(local_dir: Path, key_prefix: str, progress=None) -> None:
-    """Upload every file under ``local_dir``; ``progress(bytes_done, bytes_total)`` after each one."""
+def _upload_tree(local_dir: Path, key_prefix: str, progress=None, concurrency: int = 1) -> None:
+    """Upload every file under ``local_dir``; ``progress(bytes_done, bytes_total)`` as each one lands.
+
+    ``concurrency`` puts several files up at once. A lesson is ~650 small HLS files and S3 is ~120 ms away
+    (eu-central-1, measured 2026-09-15), so one at a time spends much of the upload waiting on round trips.
+    The first failure stops the rest and is raised.
+    """
     files = [f for f in sorted(local_dir.rglob("*")) if f.is_file()]
     total, done = sum(f.stat().st_size for f in files), 0
-    for f in files:
+    lock = threading.Lock()
+
+    def put(f: Path) -> None:
+        nonlocal done
         rel = f.relative_to(local_dir).as_posix()
         key = f"{key_prefix}/{rel}"
         storage_service.save(key, f.read_bytes(), content_type=storage_service.content_type_for(key))
-        done += f.stat().st_size
-        if progress:
-            progress(done, total)
+        with lock:
+            done += f.stat().st_size
+            if progress:
+                progress(done, total)
+
+    if concurrency <= 1:
+        for f in files:
+            put(f)
+        return
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="hls-upload")
+    try:
+        for future in as_completed([pool.submit(put, f) for f in files]):
+            future.result()
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
 
 
 def process_job(db, job: VideoIngestJob) -> None:

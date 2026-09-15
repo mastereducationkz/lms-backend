@@ -257,6 +257,12 @@ def _save(db, recording, **fields) -> None:
                            getattr(recording, "id", "?"), str(e).splitlines()[0][:200])
 
 
+# HLS files put to S3 at once. Each waits mostly on a ~120 ms round trip to eu-central-1, so six in parallel
+# cut the upload of a lesson's ~650 files without real CPU or memory (2026-09-15). The Drive download gains
+# nothing from the same trick — measured, four ranges at once shared one link's 3 MB/s — so it stays single.
+UPLOAD_CONCURRENCY = 6
+
+
 def _phase(progress, phase: str) -> dict:
     """``progress=`` for one helper, bound to its phase and announced as begun.
 

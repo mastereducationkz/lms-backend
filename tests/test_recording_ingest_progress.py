@@ -20,6 +20,42 @@ def test_the_upload_counts_bytes_across_every_file(tmp_path, monkeypatch):
     assert seen == [(10, 100), (100, 100)]
 
 
+def test_the_upload_puts_several_files_at_once_and_counts_them_all(tmp_path, monkeypatch):
+    """~650 files ~120 ms away (S3 eu-central-1): one at a time spent the upload waiting on round trips."""
+    for i in range(20):
+        (tmp_path / f"v0_{i:03d}.ts").write_bytes(b"x" * 50)
+    saved = []
+
+    def slow_save(key, data, content_type=None):
+        time.sleep(0.05)
+        saved.append(key)
+
+    monkeypatch.setattr(recording_ingest.video_ingest.storage_service, "save", slow_save)
+    seen = []
+    started = time.monotonic()
+
+    recording_ingest.video_ingest._upload_tree(tmp_path, "videos/recordings/1", concurrency=5,
+                                               progress=lambda d, t: seen.append((d, t)))
+
+    assert len(saved) == 20 and len(set(saved)) == 20
+    assert seen[-1] == (1000, 1000) and len(seen) == 20
+    assert time.monotonic() - started < 0.6, "five at a time, not twenty in a row (1 s)"
+
+
+def test_a_failed_file_stops_the_upload_and_says_so(tmp_path, monkeypatch):
+    for i in range(30):
+        (tmp_path / f"v0_{i:03d}.ts").write_bytes(b"x")
+
+    def save(key, data, content_type=None):
+        if key.endswith("v0_003.ts"):
+            raise RuntimeError("S3 said no")
+        time.sleep(0.01)
+
+    monkeypatch.setattr(recording_ingest.video_ingest.storage_service, "save", save)
+    with pytest.raises(RuntimeError, match="S3 said no"):
+        recording_ingest.video_ingest._upload_tree(tmp_path, "videos/recordings/1", concurrency=4)
+
+
 def test_processing_reports_each_phase_in_order(monkeypatch):
     calls, got = [], {}
 
@@ -38,7 +74,8 @@ def test_processing_reports_each_phase_in_order(monkeypatch):
     monkeypatch.setattr(recording_ingest, "probe_duration", lambda src: 60)
     monkeypatch.setattr(recording_ingest, "package_hls", package)
     monkeypatch.setattr(recording_ingest, "make_poster", lambda s, o, d, progress=None: progress(8, 8))
-    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p, progress=None: progress(1, 1))
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree",
+                        lambda d, p, progress=None, concurrency=1: progress(1, 1))
     monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
     monkeypatch.setattr(recording_ingest.meet_recordings, "copy_to_shared_drive", lambda f, e: "shared-1")
     rec = _Recording(status="pending", hls_url=None, id=7, event_id=70)

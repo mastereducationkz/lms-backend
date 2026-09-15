@@ -452,6 +452,10 @@ def transcribe_one(db, recording, key: Optional[str], openai_key: Optional[str] 
     # that then sits idle through minutes of download and Deepgram — and pgbouncer kills it at
     # 60 s (lesson 15883, 2026-09-11: transcribed, then lost at the save).
     db.commit()
+    from src.services import work_in_flight
+
+    # A deploy mid-transcript gives this attempt back; a crash keeps it counted (work_in_flight).
+    work_in_flight.begin("transcript", row_id)
 
     # Google and Deepgram only: no transaction is open, so a failure here leaves nothing to undo.
     workdir = Path(tempfile.mkdtemp(prefix=f"talk_{event_id}_"))
@@ -507,7 +511,11 @@ def transcribe_pending(db, budget_seconds: float = TRANSCRIBE_BUDGET_SECONDS, cl
     """Transcribe lessons until none are left or the budget is spent. Returns lessons tried."""
     if not talk_settings.transcripts_enabled(db):
         return 0
+    from src.services import work_in_flight
     from src.services.recording_ingest import room_on_disk
+
+    # One cut off on every attempt (never failing on its own) shows as failed, not waiting for ever.
+    work_in_flight.write_off_exhausted(db, "transcript", TRANSCRIBE_MAX_ATTEMPTS)
 
     if not room_on_disk():
         return 0

@@ -331,7 +331,7 @@ def test_ingest_archives_to_the_shared_drive(monkeypatch):
 
     monkeypatch.setattr(recording_ingest, "_download_drive_file", _fake_download)
     monkeypatch.setattr(recording_ingest.video_ingest, "_transcode_hls", lambda s, o: None)
-    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p: None)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p, **_kwargs: None)
     monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
 
     def _fake_copy(file_id, event):
@@ -358,7 +358,7 @@ def test_archive_failure_does_not_fail_the_ingest(monkeypatch):
 
     monkeypatch.setattr(recording_ingest, "_download_drive_file", _fake_download)
     monkeypatch.setattr(recording_ingest.video_ingest, "_transcode_hls", lambda s, o: None)
-    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p: None)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p, **_kwargs: None)
     monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
     monkeypatch.setattr(recording_ingest.meet_recordings, "copy_to_shared_drive",
                         lambda f, e: (_ for _ in ()).throw(RuntimeError("Drive 503")))
@@ -377,7 +377,7 @@ def _wire_ingest(monkeypatch, recording_ingest, on_download=None):
 
     monkeypatch.setattr(recording_ingest, "_download_drive_file", _download)
     monkeypatch.setattr(recording_ingest, "package_hls", lambda s, o: "repackaged")
-    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p: None)
+    monkeypatch.setattr(recording_ingest.video_ingest, "_upload_tree", lambda d, p, **_kwargs: None)
     monkeypatch.setattr(recording_ingest.storage_service, "stored_path", lambda k: "/uploads/" + k)
     monkeypatch.setattr(recording_ingest.meet_recordings, "copy_to_shared_drive",
                         lambda f, e: "shared-file-9")

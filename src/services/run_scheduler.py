@@ -4,6 +4,7 @@ Standalone Lesson Reminder Scheduler Runner
 Runs the scheduler in a separate process/container
 """
 import logging
+import signal
 import time
 import sys
 import os
@@ -23,8 +24,20 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+
+def _stop_on_sigterm(signum, frame):
+    """Take the graceful path below on SIGTERM, as on Ctrl+C.
+
+    A deploy (``docker compose up -d``) and ``docker stop`` send SIGTERM. Running as PID 1 with no handler,
+    the process ignored it and was killed ten seconds later — mid-recording, with the attempt already
+    counted (2026-09-15). Now it gives back what it cut off before it goes.
+    """
+    raise KeyboardInterrupt
+
+
 def main():
     """Main scheduler runner"""
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)
     logger.info("=" * 80)
     logger.info("🚀 STARTING LESSON REMINDER SCHEDULER")
     logger.info("=" * 80)
@@ -63,13 +76,20 @@ def main():
 
     # Start the lesson-recording pipeline (Meet -> Drive -> HLS -> S3). Scheduler
     # container only, same as video ingest, so the API process never double-processes.
-    # Self-gating: RecordingsWorker.start() returns immediately unless ENABLE_RECORDINGS
+    # Self-gating: both workers return immediately unless ENABLE_RECORDINGS
     # is true AND the OAuth env is complete.
+    recordings_worker = ingest_worker = None
     try:
-        from src.services.recordings_worker import RecordingsWorker
-        RecordingsWorker(
-            poll_interval=int(os.getenv('RECORDINGS_POLL_SECONDS', '300'))
-        ).start()
+        from src.services.recordings_worker import RecordingIngestWorker, RecordingsWorker
+        # Recordings are made watchable on a thread of their own, one after another, instead of
+        # waiting for the tick's other steps and its five-minute sleep (2026-09-15).
+        ingest_worker = RecordingIngestWorker()
+        ingest_worker.start()
+        recordings_worker = RecordingsWorker(
+            poll_interval=int(os.getenv('RECORDINGS_POLL_SECONDS', '300')),
+            ingest_in_tick=not ingest_worker.running,
+        )
+        recordings_worker.start()
     except Exception as e:
         logger.error(f"Failed to start recordings worker: {e}", exc_info=True)
 
@@ -124,28 +144,28 @@ def main():
     # Check configuration
     resend_api_key = os.getenv('RESEND_API_KEY')
     postgres_url = os.getenv('POSTGRES_URL')
-    
+
     if not resend_api_key:
         logger.error("❌ RESEND_API_KEY not configured!")
         logger.error("   Scheduler cannot send emails without API key")
         sys.exit(1)
-    
+
     if not postgres_url:
         logger.error("❌ POSTGRES_URL not configured!")
         logger.error("   Scheduler cannot access database")
         sys.exit(1)
-    
+
     logger.info(f"✅ Configuration validated")
     logger.info(f"   RESEND_API_KEY: {'*' * 10}{resend_api_key[-6:]}")
     logger.info(f"   POSTGRES_URL: {postgres_url.split('@')[0].split(':')[0]}://***")
     logger.info(f"   EMAIL_SENDER: {os.getenv('EMAIL_SENDER', 'noreply@mail.mastereducation.kz')}")
     logger.info(f"   EMAIL_SENDER_NAME: {os.getenv('EMAIL_SENDER_NAME', 'MasterED Platform')}")
-    
+
     # Initialize scheduler
     logger.info("")
     logger.info("🔧 Initializing scheduler...")
     scheduler = LessonReminderScheduler(check_interval=60)  # Check every minute
-    
+
     # Start scheduler
     scheduler.start()
     logger.info("✅ Scheduler started successfully!")
@@ -157,7 +177,7 @@ def main():
     logger.info("")
     logger.info("🔄 Scheduler is now running... (Press Ctrl+C to stop)")
     logger.info("=" * 80)
-    
+
     try:
         # Keep the process running
         while True:
@@ -171,6 +191,15 @@ def main():
             room_closer_worker.stop()
         if video_worker:
             video_worker.stop()
+        for worker in (ingest_worker, recordings_worker):
+            if worker:
+                worker.stop()
+        # Whatever a recording or transcript was cut off in the middle of gets its attempt back, and no
+        # page is left showing a recording as processing — before the container goes.
+        from src.services import recordings_status, work_in_flight
+        work_in_flight.give_back_attempts()
+        if ingest_worker and ingest_worker.running:
+            recordings_status.ingest_finished()
         logger.info("✅ Scheduler stopped gracefully")
         sys.exit(0)
     except Exception as e:
