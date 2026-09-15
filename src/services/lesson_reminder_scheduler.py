@@ -89,6 +89,7 @@ class LessonReminderScheduler:
                 self._send_telegram_invitations()
                 self._send_telegram_lesson_notices()
                 self._send_telegram_homework_notices()
+                __import__("src.services.group_bot_jobs", fromlist=["run_from_scheduler"]).run_from_scheduler()
                 self._check_and_send_reminders()
                 self._check_and_send_post_lesson_reminders()
             except Exception as e:

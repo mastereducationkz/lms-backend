@@ -164,3 +164,101 @@ class TelegramHomeworkNotice(Base):
     __table_args__ = (
         UniqueConstraint("assignment_id", "lms_group_id", name="uq_homework_notice_assignment_group"),
     )
+
+
+# ── what the bot says on its own (owner, 2026-09-15) ─────────────────────────────────────────
+
+class TelegramGroupGreeting(Base):
+    """The bot's hello in a group's chat — one per LMS group, ever.
+
+    ``source="backfill"`` rows record the hellos staff already sent by hand as announcements, so the
+    automatic one (:mod:`src.services.group_bot_hello`) never greets a chat twice. The row is the
+    claim: it exists before the message is sent.
+    """
+
+    __tablename__ = "telegram_group_greetings"
+
+    id = Column(Integer, primary_key=True)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, unique=True)
+    support_group_id = Column(Integer, nullable=False)
+    variant = Column(String(16), nullable=False)                  # group | individual
+    source = Column(String(16), nullable=False, default="auto")   # auto | backfill
+    # pending → sent | failed (retried while attempts remain) | skipped (the chat can never take it)
+    status = Column(String(16), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    telegram_message_id = Column(BigInteger, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    sent_at = Column(DateTime, nullable=True)
+
+
+class TelegramPinnedTimetable(Base):
+    """The one pinned timetable message in a group's chat, edited in place as the timetable moves.
+
+    ``removed_at`` is final: when someone unpins or deletes it, the bot respects that and never
+    posts or pins it again (owner).
+    """
+
+    __tablename__ = "telegram_pinned_timetables"
+
+    id = Column(Integer, primary_key=True)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, unique=True)
+    support_group_id = Column(Integer, nullable=False)
+    telegram_message_id = Column(BigInteger, nullable=True)
+    #: sha256 of what is on screen (text + buttons) — an edit is made only when it would change.
+    content_hash = Column(String(64), nullable=True)
+    # pending → posted → removed; failed (retried while attempts remain) | skipped
+    status = Column(String(16), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    posted_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    removed_at = Column(DateTime, nullable=True)
+
+
+class TelegramScheduleWatch(Base):
+    """A group's regular week as the chat was last told it, and a change waiting to settle.
+
+    An admin edits «Регулярные уроки» one row at a time, so a new pattern waits in ``pending_json``
+    until it has not changed for 15 minutes; one notice then says before → after.
+    """
+
+    __tablename__ = "telegram_schedule_watch"
+
+    id = Column(Integer, primary_key=True)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, unique=True)
+    pattern_json = Column(Text, nullable=False)
+    pending_json = Column(Text, nullable=True)
+    pending_since = Column(DateTime, nullable=True)
+    notified_at = Column(DateTime, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class TelegramDigestSend(Base):
+    """One digest or last-chance reminder in one group's chat — the row is the claim and the record.
+
+    ``kind`` is morning | evening | last_chance; ``key`` is the day it is about (a date) or, for a
+    last chance, ``<assignment id>:<due date>`` so a moved deadline earns a new reminder.
+    """
+
+    __tablename__ = "telegram_digest_sends"
+
+    id = Column(Integer, primary_key=True)
+    lms_group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    support_group_id = Column(Integer, nullable=False)
+    kind = Column(String(16), nullable=False)
+    key = Column(String(120), nullable=False)
+    status = Column(String(16), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    telegram_message_id = Column(BigInteger, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    sent_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("lms_group_id", "kind", "key", name="uq_digest_send_group_kind_key"),
+    )

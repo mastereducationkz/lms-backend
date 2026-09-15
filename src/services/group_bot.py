@@ -33,7 +33,10 @@ from sqlalchemy import and_, or_
 from src.announcements.models import TelegramGroupLink, TelegramGroupQuestion
 from src.messages.models import Notification
 from src.schemas.models import Assignment, Event, EventGroup, Group, GroupAssignment, LessonRecording
+from html import escape
+
 from src.services import group_bot_intents as intents
+from src.services import group_bot_keyboard as keyboard_ui
 from src.services import group_bot_render as render
 from src.services import group_bot_settings
 from src.services.operational_groups import event_has_operational_group_clause
@@ -196,7 +199,32 @@ def fact_answer(db, group: Group, intent: intents.Intent, now: datetime, lang: s
         return render.recordings_answer(group, _recordings(db, group), now, lang)
     if name == "weekly":
         return render.weekly_answer(group, _weekly_tests(db, group, now), now, lang)
+    if name == "calendar":
+        return calendar_answer(db, group, lang)
     raise ValueError(f"not a fact intent: {name}")
+
+
+_CALENDAR_TEXT = {
+    "ru": ("📆 Календарь группы — уроки, дедлайны и weekly mock появятся у вас в телефоне и будут "
+           "обновляться сами:", "iPhone / Outlook (подписка)",
+           "📆 Скоро здесь будет ссылка на календарь группы."),
+    "kk": ("📆 Топ күнтізбесі — сабақтар, дедлайндар және weekly mock телефоныңызда өздігінен жаңарып тұрады:",
+           "iPhone / Outlook (жазылу)", "📆 Жақында мұнда топ күнтізбесінің сілтемесі болады."),
+    "en": ("📆 Group calendar — lessons, deadlines and weekly mocks show up on your phone and stay up to date:",
+           "iPhone / Outlook (subscribe)", "📆 A link to the group calendar will be here soon."),
+}
+
+
+def calendar_answer(db, group: Group, lang: str) -> str:
+    title, ics_label, soon = _CALENDAR_TEXT.get(lang, _CALENDAR_TEXT["ru"])
+    links = keyboard_ui.calendar_links(db, group)
+    if not links:
+        return render.join(render.header(group.name), soon)
+    lines = [title]
+    if links.get("google_url"):
+        lines.append(f"• Google Calendar: {escape(links['google_url'])}")
+    lines.append(f"• {ics_label}: {escape(links['ics_url'])}")
+    return render.join(render.header(group.name), *lines)
 
 
 # ── the answer ───────────────────────────────────────────────────────────────────────────
@@ -245,7 +273,8 @@ def answer(db, *, support_group_id: int, text: str, command: Optional[str] = Non
     )
 
     def done(reply: Optional[str], intent: str, source: str, dedupe_key: Optional[str] = None, *,
-             private_hint: bool = False, handed_to_curator: bool = False, not_live: bool = False) -> dict:
+             private_hint: bool = False, handed_to_curator: bool = False, not_live: bool = False,
+             buttons: bool = False) -> dict:
         if reply is not None and not html:
             reply = render.to_plain(reply)
         row.answer, row.intent, row.model = reply, intent, source
@@ -259,7 +288,9 @@ def answer(db, *, support_group_id: int, text: str, command: Optional[str] = Non
         return {"answer": reply, "format": "html" if html else "text", "intent": intent, "dedupe_key": dedupe_key,
                 "silent": reply is None, "private_hint": private_hint,
                 "handed_to_curator": handed_to_curator, "not_live": not_live,
-                "group_name": group.name, "question_id": row.id}
+                "group_name": group.name, "question_id": row.id,
+                # The answer buttons (owner, 2026-09-15) — only under answers about the group's facts.
+                "keyboard": keyboard_ui.keyboard(group.id) if buttons and reply is not None else None}
 
     if not group_bot_settings.enabled_for(db, group):
         if command is None:
@@ -276,7 +307,7 @@ def answer(db, *, support_group_id: int, text: str, command: Optional[str] = Non
         return done(render.plain(group, "private", lang), "personal", intent.source,
                     f"personal:{asked}", private_hint=True)
     if intent.name == "help":
-        return done(render.plain(group, "help", lang), "help", intent.source, f"help:{lang}")
+        return done(render.plain(group, "help", lang), "help", intent.source, f"help:{lang}", buttons=True)
     if intent.name == "curator":
         reply = render.plain(group, "curator" if group.curator_id else "no_curator", lang)
         # A staff test chat reads like the real thing and never pages a real curator.
@@ -284,7 +315,8 @@ def answer(db, *, support_group_id: int, text: str, command: Optional[str] = Non
                     handed_to_curator=bool(group.curator_id) and not is_test_chat)
 
     reply = fact_answer(db, group, intent, now, lang)
-    return done(reply, intent.name, intent.source, f"{intent.name}:{intent.span or ''}:{_digest(reply)}")
+    return done(reply, intent.name, intent.source, f"{intent.name}:{intent.span or ''}:{_digest(reply)}",
+                buttons=True)
 
 
 def recent_count(db, now: Optional[datetime] = None) -> int:

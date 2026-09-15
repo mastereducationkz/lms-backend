@@ -355,3 +355,31 @@ def answer_group_question(body: GroupQuestionIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="This chat is not linked to an LMS group")
     except group_bot.SwitchedOff:
         raise HTTPException(status_code=409, detail="The group bot is off for this group")
+
+
+class GroupPopupIn(BaseModel):
+    """A tap on one of the answer buttons (``gb:<action>``)."""
+
+    support_group_id: int
+    telegram_chat_id: Optional[int] = None
+    telegram_user_id: Optional[int] = None
+    action: str = Field(min_length=1, max_length=32)
+
+
+@router.post("/telegram/group-popup", dependencies=[Depends(verify_support_api_key)])
+def group_button_popup(body: GroupPopupIn, db: Session = Depends(get_db)):
+    """The text of the alert only the person who tapped sees (≤200 characters, plain text).
+
+    404 — unlinked chat. 409 — the bot is off or the group is outside the pilot. 422 — an action
+    this LMS does not know. Nothing is written: a tap is not a question.
+    """
+    from src.services import group_bot, group_bot_popup
+
+    try:
+        return group_bot_popup.popup(db, support_group_id=body.support_group_id, action=body.action)
+    except group_bot.NotLinked:
+        raise HTTPException(status_code=404, detail="This chat is not linked to an LMS group")
+    except group_bot.SwitchedOff:
+        raise HTTPException(status_code=409, detail="The group bot is off for this group")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Unknown button action")

@@ -27,7 +27,7 @@ INTENT_MODELS = tuple(filter(None, (os.getenv("GROUP_BOT_INTENT_MODEL", "gpt-4.1
 MODEL_TIMEOUT_SECONDS = 4
 _CACHE_SIZE = 1000
 
-COMMANDS = ("help", "schedule", "lessons", "next", "weekly", "homework", "recording")
+COMMANDS = ("help", "schedule", "lessons", "next", "weekly", "homework", "recording", "calendar")
 SPANS = ("today", "tomorrow", "weekend", "this_week", "next_week", "week")
 
 
@@ -103,6 +103,7 @@ _STATEMENT = _rx(
 
 # ── what the group's facts answer ──────────────────────────────────────────────────────────
 
+_CALENDAR = _rx(r"календар\w*|\bcalendar\w*|күнтізбе\w*|\bics\b")
 _WEEKLY = _rx(r"\b(?:мок\w*|mock\w*|викли\w*|weekly|пробн\w*)")
 _HOMEWORK = _rx(
     r"\bдз\b|\bд/з\b|домашк\w*|домашн\w*|\bзадани\w*|\bзадал\w*|дедлайн\w*|homework|home\s+work|"
@@ -140,7 +141,7 @@ def is_personal(text: str) -> bool:
 
 
 def _has_topic(t: str) -> bool:
-    return any(rx.search(t) for rx in (_WEEKLY, _HOMEWORK, _RECORDING, _SCHEDULE, _LESSON))
+    return any(rx.search(t) for rx in (_CALENDAR, _WEEKLY, _HOMEWORK, _RECORDING, _SCHEDULE, _LESSON))
 
 
 def is_courtesy(text: str) -> bool:
@@ -177,6 +178,9 @@ def _span(t: str) -> Optional[str]:
 def _rules(t: str) -> tuple[Optional[Intent], Optional[Intent]]:
     """(decided, default). ``decided`` is certain; otherwise ``default`` is what to fall back on
     when the model cannot be asked — ``None`` when the rules have no idea at all."""
+    if _CALENDAR.search(t):
+        # «добавить уроки в календарь» is about the calendar, not about the lessons.
+        return Intent("calendar"), None
     if _WEEKLY.search(t):
         return Intent("weekly"), None
     if _HOMEWORK.search(t):
@@ -217,7 +221,7 @@ _LABELS = {
     "this_week": Intent("lessons", "this_week"), "next_week": Intent("lessons", "next_week"),
     "homework": Intent("homework"), "recording": Intent("recording"), "weekly": Intent("weekly"),
     "help": Intent("help"), "personal": Intent("personal"), "curator": Intent("curator"),
-    "none": Intent("none"),
+    "calendar": Intent("calendar"), "none": Intent("none"),
 }
 SYSTEM_PROMPT = (
     "Label a message sent to an education center's bot in a student group chat. "
@@ -229,6 +233,7 @@ SYSTEM_PROMPT = (
     "homework: homework or deadlines\n"
     "recording: a past lesson's recording\n"
     "weekly: the weekly mock test\n"
+    "calendar: adding the group's lessons to a phone or Google calendar\n"
     "help: what the bot can do, or a greeting\n"
     "personal: the sender's own grades, payments, attendance or submissions\n"
     "curator: any other request or problem that needs a person\n"
@@ -303,7 +308,7 @@ def _context_line(reply_to_text: Optional[str]) -> str:
 # what a bot message was about: «⏭ Следующий урок: Завтра, …» is about the next lesson, and its
 # «Завтра» is a date in the answer, not the topic.
 _ANSWER_MARKS = (("⏭", "next"), ("🟢", "next"), ("🗓", "schedule"), ("📅", "lessons"),
-                 ("📝", "homework"), ("🎥", "recording"), ("🧪", "weekly"))
+                 ("📝", "homework"), ("🎥", "recording"), ("🧪", "weekly"), ("📆", "calendar"))
 
 
 def _context_topic(context: str) -> Optional[str]:
@@ -315,7 +320,7 @@ def _context_topic(context: str) -> Optional[str]:
     return chosen.name if chosen and chosen.name in _FACT_TOPICS else None
 
 
-_FACT_TOPICS = ("schedule", "lessons", "next", "homework", "recording", "weekly")
+_FACT_TOPICS = ("schedule", "lessons", "next", "homework", "recording", "weekly", "calendar")
 
 
 def classify(text: str, *, command: Optional[str] = None, reply_to_text: Optional[str] = None,
