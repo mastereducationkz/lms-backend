@@ -360,7 +360,7 @@ def get_my_events(
             result.append(EventSchema(
                 id=virtual_id,
                 title=title,
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=end_dt,
@@ -656,7 +656,7 @@ def get_calendar_events(
             sched_event = EventSchema(
                 id=virtual_id,
                 title=title,
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=end_dt,
@@ -961,7 +961,7 @@ def get_upcoming_events(
             lesson_event = EventSchema(
                 id=lesson_event_id,
                 title=title,
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=end_dt,
@@ -1163,7 +1163,7 @@ def _reconstruct_virtual_event(db: Session, event_id: int, current_user: UserInD
             return EventSchema(
                 id=event_id,
                 title=f"{group_name}: Lesson {_lesson_number_for_schedule(db, sched)}",
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=sched.scheduled_at + timedelta(minutes=60),

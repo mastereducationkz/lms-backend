@@ -1423,7 +1423,7 @@ async def bulk_schedule_upload(
                 if not existing:
                     new_event = Event(
                         title=f"{group.name}: Lesson {lesson_number}",
-                        description=f"Scheduled class for {group.name}",
+                        description=None,
                         event_type="class",
                         start_datetime=target_dt,
                         end_datetime=end_dt,

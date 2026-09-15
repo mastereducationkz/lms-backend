@@ -337,7 +337,7 @@ async def get_my_events(
             result.append(EventSchema(
                 id=virtual_id,
                 title=title,
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=end_dt,
@@ -580,7 +580,7 @@ async def get_calendar_events(
             sched_event = EventSchema(
                 id=virtual_id,
                 title=title,
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=end_dt,
@@ -885,7 +885,7 @@ async def get_upcoming_events(
             lesson_event = EventSchema(
                 id=lesson_event_id,
                 title=title,
-                description=f"Scheduled class for {group_name}",
+                description=None,
                 event_type="class",
                 start_datetime=sched.scheduled_at,
                 end_datetime=end_dt,

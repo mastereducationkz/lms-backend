@@ -138,9 +138,11 @@ def reconcile_group_schedule(
     # Extra new slots (schedule now has more future lessons) -> create.
     for target_dt, _ln in future_desired[pair_count:]:
         end_dt = target_dt + timedelta(minutes=60)
+        # No description: «Scheduled class for {group}» repeated the title and the group line, and went
+        # stale on every rename — 14 804 of 16 189 were wrong when the owner had them removed (2026-09-15).
         new_event = Event(
             title=f"{group_name}: Lesson",
-            description=f"Scheduled class for {group_name}",
+            description=None,
             event_type="class",
             start_datetime=target_dt,
             end_datetime=end_dt,
