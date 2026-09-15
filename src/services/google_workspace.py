@@ -38,11 +38,18 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 # `drive` (not `drive.file`) is required: the recording is created by Meet, not by this
 # app, so `drive.file` can never see it, and the pipeline has to copy it into the Shared
 # Drive and delete the original at 7 days (spec §4.6).
-SCOPES = [
+#
+# `calendar` (2026-09-15) lets the robot create one Google Calendar per live group and share
+# it read-only (calendars.insert / acl.insert — `calendar.events` cannot). The Meet/Drive
+# pipeline keeps asking for PIPELINE_SCOPES only, so a deployment still running a token
+# consented before the calendar scope keeps recording; only the calendar sync notices.
+PIPELINE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/meetings.space.created",
 ]
+CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+SCOPES = PIPELINE_SCOPES + [CALENDAR_SCOPE]
 
 # Shared Drive ids come from the environment so a staging deployment can point at
 # different drives. The defaults are the production drives, so a missing env var
@@ -121,7 +128,7 @@ def credentials(scopes: Optional[list] = None):
         token_uri=TOKEN_URI,
         client_id=client_id,
         client_secret=client_secret,
-        scopes=list(scopes or SCOPES),
+        scopes=list(scopes or PIPELINE_SCOPES),
     )
 
 
@@ -146,6 +153,11 @@ def _client(api: str, version: str):
 
 def calendar_client():
     return _client("calendar", "v3")
+
+
+def group_calendars_client():
+    """Calendar API with the `calendar` scope: creating and sharing the per-group calendars."""
+    return _discovery_build("calendar", "v3", credentials=credentials(SCOPES), cache_discovery=False)
 
 
 def drive_client():

@@ -50,7 +50,26 @@ def test_scopes_are_exactly_what_was_consented():
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/meetings.space.created",
+        "https://www.googleapis.com/auth/calendar",
     ]
+
+
+def test_the_pipeline_never_asks_for_the_calendar_scope():
+    """A token consented before 2026-09-15 has no `calendar` scope; recordings must keep working
+    with it — only the per-group calendars ask for the wider set."""
+    assert google_workspace.CALENDAR_SCOPE not in google_workspace.PIPELINE_SCOPES
+    assert google_workspace.SCOPES == google_workspace.PIPELINE_SCOPES + [google_workspace.CALENDAR_SCOPE]
+
+
+def test_the_consent_script_asks_for_exactly_the_scopes():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "google_oauth_consent.py"
+    spec = importlib.util.spec_from_file_location("google_oauth_consent", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.SCOPES == google_workspace.SCOPES
 
 
 def test_readonly_meet_scope_is_not_requested():
@@ -67,7 +86,8 @@ def test_credentials_built_from_env(configured_env):
     assert creds.client_id == "cid.apps.googleusercontent.com"
     assert creds.client_secret == "csecret"
     assert creds.token is None, "no access token should be baked in; it is fetched on use"
-    assert list(creds.scopes) == google_workspace.SCOPES
+    assert list(creds.scopes) == google_workspace.PIPELINE_SCOPES
+    assert list(google_workspace.credentials(google_workspace.SCOPES).scopes) == google_workspace.SCOPES
 
 
 @pytest.mark.parametrize("missing", [

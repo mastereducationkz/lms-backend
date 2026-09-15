@@ -18,6 +18,7 @@ from src.auth.models import UserInDB, PointHistory, UserPushToken
 # Module, not names: announcements.models is a plausible first import (its tests do it), and
 # binding names here would then be a circular-import error. Defining the classes is enough.
 from src.announcements import models as _announcement_models  # noqa: F401
+from src.events import calendar_models as _calendar_models  # noqa: F401
 from src.courses.models import (
     Group, GroupStudent, Step, Course, CourseHeadTeacher,
     CourseGroupAccess, CourseTeacherAccess, Module, Lesson,
