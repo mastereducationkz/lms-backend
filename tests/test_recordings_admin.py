@@ -42,44 +42,46 @@ def test_romanization_follows_passport_spelling(cyrillic, latin):
     assert workspace_names.romanize(cyrillic) == latin
 
 
-# (LMS name, official ФИО from CRM, first, last, address) — real teachers, production 2026-09-14.
+# (LMS name, official ФИО from CRM, first, last, address) — real teachers, production 2026-09-15, after
+# every teacher name was made «Фамилия Имя Отчество» on both sides (the addresses predate that).
 PRODUCTION_TEACHERS = [
     # The eleven pilot addresses people chose by hand are reproduced exactly.
-    ("Есен Нұрғалы Беғалыұлы", "Нургалы Есен", "Nurgaly", "Yesen", "nurgaly"),
-    ("Aisha Temirkhan", "Айша Темирхан", "Aisha", "Temirkhan", "aisha"),
-    ("Алина Сыздыкова", "Алина Сыздыкова", "Alina", "Syzdykova", "alina"),
-    ("Gulzada Kassymbayeva", "Гулзада Касымбаева", "Gulzada", "Kassymbayeva", "gulzada"),
-    ("Ерполат Бекдәулет Полатұл", "Бекдаулет Ерполат", "Bekdaulet", "Yerpolat", "bekdaulet"),
-    ("Кенжебаев Арсен", "Арсен Кенжебаев", "Arsen", "Kenzhebayev", "arsen"),
-    ("Zhansaya Makhambetaliyeva", "Жансая Махамбеталиева", "Zhansaya", "Makhambetaliyeva", "zhansaya"),
-    ("Шадеева Арайлым", "Арайлым Шадеева", "Arailym", "Shadeyeva", "arailym"),
+    ("Есен Нұрғалы Беғалыұлы", "Есен Нургалы", "Nurgaly", "Yesen", "nurgaly"),
+    ("Темирхан Айша", "Темирхан Айша", "Aisha", "Temirkhan", "aisha"),
+    ("Сыздыкова Алина", "Сыздыкова Алина", "Alina", "Syzdykova", "alina"),
+    # Her own Latin spelling («Kassymbayeva») went with her Latin LMS name; the ФИО transliterates.
+    ("Касымбаева Гулзада", "Касымбаева Гулзада", "Gulzada", "Kasymbayeva", "gulzada"),
+    ("Ерполат Бекдәулет Полатұл", "Ерполат Бекдаулет", "Bekdaulet", "Yerpolat", "bekdaulet"),
+    ("Кенжебаев Арсен", "Кенжебаев Арсен", "Arsen", "Kenzhebayev", "arsen"),
+    ("Махамбеталиева Жансая", "Махамбеталиева Жансая", "Zhansaya", "Makhambetaliyeva", "zhansaya"),
+    ("Шадеева Арайлым", "Шадеева Арайлым", "Arailym", "Shadeyeva", "arailym"),
     # Pending teachers.
-    ("Орынбасар Ақжол Ерғалиұлы", "Акжол Орынбасар", "Akzhol", "Orynbasar", "akzhol"),
-    ("Жансерик Курбанов", "Жансерик Курбанов", "Zhanserik", "Kurbanov", "zhanserik"),
-    ("Болат Еркебулан Бауыржанұлы", "Еркебулан Болат", "Yerkebulan", "Bolat", "yerkebulan"),
-    ("Айтжан Әділет Дулатұлы", "Адилет Айтжан", "Adilet", "Aitzhan", "adilet"),
-    ("Миниус Ернұр Темірболатұлы", "Ернур Миниус", "Yernur", "Minius", "yernur"),
-    ("Даниил Бутырин", "Даниил Бутырин", "Daniil", "Butyrin", "daniil"),
-    ("Лайла Жанатбеккызы", "Лайла Жанатбеккызы", "Laila", "Zhanatbekkyzy", "laila"),
-    ("Ахметов Бексултан Замирович", "Бексултан Ахметов", "Beksultan", "Akhmetov", "beksultan"),
-    ("Ақтай Мирас Айқынұлы", "Мирас Актай", "Miras", "Aktay", "miras"),
-    ("Aliya Dosniyazova", "Алия Досниязова", "Aliya", "Dosniyazova", "aliya"),
-    ("Madina", "Мадина Сибанова", "Madina", "Sibanova", "madina"),
-    ("Жақсылық Даниял Едігеұлы", "Даниял Жаксылык", "Daniyal", "Zhaksylyk", "daniyal"),
-    ("Қиясбек Мирас", "Мирас Киясбек", "Miras", "Kiyasbek", "miras"),
-    ("Ержанқызы Елдана", "Елдана Ержанкызы", "Yeldana", "Yerzhankyzy", "yeldana"),
-    ("Махамаджанов Диербек", "Диербек Махамаджанов", "Diyerbek", "Makhamadzhanov", "diyerbek"),
-    ("Сырым Өркенұлы", "Сырым Оркенулы", "Syrym", "Orkenuly", "syrym"),
-    ("Maulen", "Маулен Аязбай", "Maulen", "Ayazbay", "maulen"),
-    ("Ерсултан Онталап", "Ерсултан Онталап", "Yersultan", "Ontalap", "yersultan"),
-    ("Ayanat", "Аянат Ислам", "Ayanat", "Islam", "ayanat"),
-    ("Дулатұлы Абай", "Абай Дулатулы", "Abay", "Dulatuly", "abay"),
-    ("Нурай Бақытжанқызы", "Нурай Бакытжанкызы", "Nuray", "Bakytzhankyzy", "nuray"),
-    ("Тлеуғали Әли Робертұлы", "Али Тлеугали", "Ali", "Tleugali", "ali"),
-    ("Оралбекова Аида Саятқызы", "Аида Оралбекова", "Aida", "Oralbekova", "aida"),
-    ("Исабеков Алпамыс Нургалиевич", "Алпамыс Исабеков", "Alpamys", "Isabekov", "alpamys"),
-    ("Beksultan Balkybek", "Бексултан Балкыбек", "Beksultan", "Balkybek", "beksultan"),
-    ("Нурай Кобейсин", "Нурай Кобейсин", "Nuray", "Kobeisin", "nuray"),
+    ("Орынбасар Ақжол Ерғалиұлы", "Орынбасар Акжол", "Akzhol", "Orynbasar", "akzhol"),
+    ("Курбанов Жансерик", "Курбанов Жансерик", "Zhanserik", "Kurbanov", "zhanserik"),
+    ("Болат Еркебулан Бауыржанұлы", "Болат Еркебулан", "Yerkebulan", "Bolat", "yerkebulan"),
+    ("Айтжан Әділет Дулатұлы", "Айтжан Адилет", "Adilet", "Aitzhan", "adilet"),
+    ("Миниус Ернұр Темірболатұлы", "Миниус Ернур", "Yernur", "Minius", "yernur"),
+    ("Бутырин Даниил", "Бутырин Даниил", "Daniil", "Butyrin", "daniil"),
+    ("Жанатбеккызы Лайла", "Жанатбеккызы Лайла", "Laila", "Zhanatbekkyzy", "laila"),
+    ("Ахметов Бексултан Замирович", "Ахметов Бексултан", "Beksultan", "Akhmetov", "beksultan"),
+    ("Ақтай Мирас Айқынұлы", "Актай Мирас", "Miras", "Aktay", "miras"),
+    ("Досниязова Алия", "Досниязова Алия", "Aliya", "Dosniyazova", "aliya"),
+    ("Сибанова Мадина", "Сибанова Мадина", "Madina", "Sibanova", "madina"),
+    ("Жақсылық Даниял Едігеұлы", "Жаксылык Даниял", "Daniyal", "Zhaksylyk", "daniyal"),
+    ("Қиясбек Мирас", "Киясбек Мирас", "Miras", "Kiyasbek", "miras"),
+    ("Ержанқызы Елдана", "Ержанкызы Елдана", "Yeldana", "Yerzhankyzy", "yeldana"),
+    ("Махамаджанов Диербек", "Махамаджанов Диербек", "Diyerbek", "Makhamadzhanov", "diyerbek"),
+    ("Өркенұлы Сырым", "Оркенулы Сырым", "Syrym", "Orkenuly", "syrym"),
+    ("Аязбай Маулен", "Аязбай Маулен", "Maulen", "Ayazbay", "maulen"),
+    ("Онталап Ерсултан", "Онталап Ерсултан", "Yersultan", "Ontalap", "yersultan"),
+    ("Ислам Аянат", "Ислам Аянат", "Ayanat", "Islam", "ayanat"),
+    ("Дулатұлы Абай", "Дулатулы Абай", "Abay", "Dulatuly", "abay"),
+    ("Бақытжанқызы Нурай", "Бакытжанкызы Нурай", "Nuray", "Bakytzhankyzy", "nuray"),
+    ("Тлеуғали Әли Робертұлы", "Тлеугали Али", "Ali", "Tleugali", "ali"),
+    ("Оралбекова Аида Саятқызы", "Оралбекова Аида", "Aida", "Oralbekova", "aida"),
+    ("Исабеков Алпамыс Нургалиевич", "Исабеков Алпамыс", "Alpamys", "Isabekov", "alpamys"),
+    ("Балкыбек Бексултан", "Балкыбек Бексултан", "Beksultan", "Balkybek", "beksultan"),
+    ("Кобейсин Нурай", "Кобейсин Нурай", "Nuray", "Kobeisin", "nuray"),
 ]
 
 
@@ -100,8 +102,14 @@ def test_without_an_official_name_the_lms_name_order_is_read_from_its_endings():
 
 
 def test_a_latin_label_does_not_beat_the_official_name():
-    assert workspace_names.english_name("Albar Head", "Head of NUET Альбар Керимхан") == \
+    assert workspace_names.english_name("Albar Head", "Head of NUET Керимхан Альбар") == \
         ("Albar", "Kerimkhan")
+
+
+def test_an_official_name_written_before_the_fio_rule_still_resolves_by_its_endings():
+    # «Имя Фамилия» officials from before 2026-09-15: a surname ending turns the order around.
+    assert workspace_names.english_name("Кенжебаев Арсен", "Арсен Кенжебаев") == ("Arsen", "Kenzhebayev")
+    assert workspace_names.english_name("Сыздыкова Алина", "Алина Сыздыкова") == ("Alina", "Syzdykova")
 
 
 def test_the_same_given_name_falls_back_to_the_surname_then_a_number():

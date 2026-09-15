@@ -14,10 +14,11 @@ Which words make the name, in order of trust:
 
 1. the teacher's own Latin LMS name when it has a given name and a surname ("Gulzada
    Kassymbayeva" — their own spelling beats any transliteration);
-2. the official ФИО the CRM syncs into ``users.official_full_name`` — written «Имя Фамилия»
-   for every teacher on production, so the first word is the given name unless a surname or
-   patronymic ending says otherwise;
-3. the LMS name, which in Cyrillic is usually «Фамилия Имя Отчество».
+2. the official ФИО the CRM syncs into ``users.official_full_name`` — «Фамилия Имя Отчество»
+   since 2026-09-15, when the owner made every teacher name surname-first ("we ask for ФИО");
+   until then it was mostly «Имя Фамилия», so a surname or patronymic ending still decides
+   when it disagrees with the order;
+3. the LMS name, also «Фамилия Имя Отчество».
 """
 from __future__ import annotations
 
@@ -121,7 +122,7 @@ def english_name(name: Optional[str], official_full_name: Optional[str] = None) 
     if len(own) >= 2 and not has_cyrillic(name) and _agrees(own, official):
         given, rest = _resolve(own, given_first=True)
     elif len(official) >= 2 or (official and not own):
-        given, rest = _resolve(official, given_first=True)
+        given, rest = _resolve(official, given_first=False)
     elif own:
         given, rest = _resolve(own, given_first=not has_cyrillic(name))
     else:
