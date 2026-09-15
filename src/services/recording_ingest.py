@@ -257,10 +257,12 @@ def _save(db, recording, **fields) -> None:
                            getattr(recording, "id", "?"), str(e).splitlines()[0][:200])
 
 
-# HLS files put to S3 at once. Each waits mostly on a ~120 ms round trip to eu-central-1, so six in parallel
-# cut the upload of a lesson's ~650 files without real CPU or memory (2026-09-15). The Drive download gains
-# nothing from the same trick — measured, four ranges at once shared one link's 3 MB/s — so it stays single.
-UPLOAD_CONCURRENCY = 6
+# HLS files put to S3 at once. One, by measurement (2026-09-15): six at a time uploaded recording 53 at
+# ~4.3 MB/s, one at a time had uploaded recording 51 at ~4.6 MB/s — the server's link is the ceiling, as for
+# the Drive download (one range 3.1 MB/s, four at once 3.0 MB/s together), not S3's ~120 ms round trips. And
+# that link also streams every recording students watch (HLS is proxied through the backend), so more upload
+# streams would only take a bigger share from viewers. Raise it only on a bigger link.
+UPLOAD_CONCURRENCY = 1
 
 
 def _phase(progress, phase: str) -> dict:
