@@ -53,6 +53,14 @@ def main():
     except Exception as e:
         logger.error(f"Failed to start Meet room closer: {e}", exc_info=True)
 
+    # Per-group Google Calendars (create, share read-only, sync within a minute). Its own
+    # thread so a slow Google call never delays reminders; no-op unless ENABLE_GROUP_CALENDARS.
+    try:
+        from src.services.group_calendar import GroupCalendarWorker
+        GroupCalendarWorker(poll_interval=int(os.getenv('GROUP_CALENDAR_POLL_SECONDS', '60'))).start()
+    except Exception as e:
+        logger.error(f"Failed to start group calendars worker: {e}", exc_info=True)
+
     # Start the lesson-recording pipeline (Meet -> Drive -> HLS -> S3). Scheduler
     # container only, same as video ingest, so the API process never double-processes.
     # Self-gating: RecordingsWorker.start() returns immediately unless ENABLE_RECORDINGS

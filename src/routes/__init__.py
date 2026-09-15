@@ -17,6 +17,7 @@ def register_routes(app: FastAPI):
         events_router, lesson_recordings_router, meet_attendance_router, meet_talk_router,
         recording_library_router, watch_links_internal_router, watch_links_public_router,
     )
+    from src.events.routes.calendar_feeds import router as calendar_feeds_router
     from src.messages.routes import messages_router, notifications_router, group_messages_router
     from src.parents.routes import router as parents_router
     from src.gamification.routes import (
@@ -64,6 +65,8 @@ def register_routes(app: FastAPI):
     app.include_router(lesson_recordings_router, prefix="/events", tags=["Events"])
     # Its own prefix, not /events: "/events/recordings" would be swallowed by /events/{event_id}.
     app.include_router(recording_library_router, prefix="/recordings", tags=["Recordings"])
+    # Calendar subscriptions: signed group ICS feeds, personal feeds, the Calendar page's links.
+    app.include_router(calendar_feeds_router, prefix="/calendar", tags=["Calendar subscriptions"])
     # Its own prefix for the same reason: who was in each lesson's Meet room.
     app.include_router(meet_attendance_router, prefix="/meet-attendance", tags=["Meet attendance"])
     # Talk time reads the same lessons, so it lives beside them.

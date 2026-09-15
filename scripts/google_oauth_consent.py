@@ -32,6 +32,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/meetings.space.created",
+    # 2026-09-15: per-group Google Calendars (create + share read-only).
+    "https://www.googleapis.com/auth/calendar",
 ]
 
 OUT_PATH = ".google_refresh_token"
@@ -89,7 +91,7 @@ def main() -> int:
         print(f"\nWARNING: these scopes were not granted: {missing}", file=sys.stderr)
         print("The pipeline will fail on the corresponding calls.", file=sys.stderr)
         return 1
-    print("All three scopes granted.")
+    print(f"All {len(SCOPES)} scopes granted.")
     print("\nNext: hand the file to the deploy step, then delete it.")
     return 0
 

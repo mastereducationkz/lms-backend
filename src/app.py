@@ -121,6 +121,8 @@ _MUTATION_INVALIDATION_RULES: dict[str, tuple[str, ...]] = {
     "integrations": ("progress:*", "dashboard:*", "assignments:*", "events:*"),
     # Student targets (E5) feed the dashboard tile.
     "targets": ("dashboard:*",),
+    # Rotating a personal calendar feed token; nothing cached reads it, listed for completeness.
+    "calendar": ("calendar:*",),
     # Telegram announcements hold no LMS state of their own -- the routes proxy
     # to the Support platform, which owns every row. Listed so the middleware
     # doesn't have to special-case an unknown prefix; there is nothing cached
