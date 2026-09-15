@@ -47,21 +47,21 @@ HORIZON = timedelta(hours=24)
 LAST_CHANCE = timedelta(hours=3)
 _OPEN = ("pending", "failed")
 
-# Owner, 2026-09-15 (after the samples): softer, fewer emoji, never an exclamation mark — they will
-# rewrite these later. The evening «Напоминалка на завтра» was approved as it is.
+# Owner, 2026-09-15: warm and emotional, but gentle — no slang, never an exclamation mark (a first
+# rewrite went «very very dry»). The evening «Напоминалка на завтра» was approved as it is.
 GREETINGS = (
-    "Доброе утро ☀️ Вот что сегодня по учёбе",
-    "Доброе утро. Коротко о планах на сегодня",
-    "Всем привет. Небольшая сводка на день",
-    "Доброе утро 🌤 Что нас ждёт сегодня",
-    "Привет. Планы на сегодня",
+    "Доброе утро ☀️ Надеюсь, вы выспались — вот что нас ждёт сегодня 💛",
+    "Утро доброе 🌤 Наливаем чай и смотрим планы на день ☕️",
+    "Привет-привет 👋 Небольшая сводка, чтобы день прошёл спокойно ✨",
+    "Доброе утро 🌸 Сегодня есть дела — давайте по порядку 📋",
+    "С добрым утром 🙌 Вот что сегодня по учёбе, всё успеем 😉",
 )
 CLOSERS = (
-    "Если будут вопросы — отметьте меня",
-    "Хорошего дня",
-    "Если что-то непонятно, я тут",
-    "Удачи сегодня",
-    "Спокойного и продуктивного дня",
+    "Если будут вопросы — отметьте меня, я рядом 🤗",
+    "Хорошего дня и лёгкой учёбы 💫",
+    "Вы справитесь, я в вас верю 💪",
+    "Удачи сегодня и не забывайте про перерывы ☕️",
+    "Пусть день будет продуктивным и спокойным 🌿",
 )
 
 
@@ -121,14 +121,14 @@ def open_weekly(db, group, now: datetime):
 
 
 def _lesson_lines(lessons: list, *, soft: bool) -> list:
-    """``soft`` — the morning digest: no emoji, the Meet room as a «Ссылка на урок» hyperlink."""
+    """``soft`` — the morning digest: a warm line per lesson, the Meet room as a «Ссылка на урок» hyperlink."""
     lines = []
     for lesson in lessons:
         start, end = render.local(lesson.start_datetime), render.local(lesson.end_datetime)
         if soft:
-            lines.append(f"Урок в {start:%H:%M}–{end:%H:%M}")
+            lines.append(f"📚 Урок в {start:%H:%M}–{end:%H:%M} — ждём вас 😊")
             if lesson.meeting_url:
-                lines.append(f'<a href="{escape(lesson.meeting_url)}">Ссылка на урок</a>')
+                lines.append(f'🔗 <a href="{escape(lesson.meeting_url)}">Ссылка на урок</a>')
             continue
         lines.append(f"📚 Урок в {start:%H:%M}–{end:%H:%M}")
         if lesson.meeting_url:
@@ -138,7 +138,7 @@ def _lesson_lines(lessons: list, *, soft: bool) -> list:
 
 def _deadline_lines(tasks: list, now: datetime, *, soft: bool) -> list:
     today = render.local(now).date()
-    lines = ["Дедлайны:" if soft else "📝 Дедлайны:"]
+    lines = ["📝 Дедлайны:"]
     for task in tasks:
         due = render.local(task.due_date)
         if due.date() == today:
@@ -158,8 +158,7 @@ def compose(opening: str, lessons: list, tasks: list, weekly, closer: str, now: 
     if tasks:
         blocks.append("\n".join(_deadline_lines(tasks, now, soft=soft)))
     if weekly is not None and weekly.end_datetime is not None:
-        mark = "" if soft else "🧪 "
-        blocks.append(f"{mark}Weekly mock открыт до {render.deadline_label(weekly.end_datetime, now, 'ru')}")
+        blocks.append(f"🧪 Weekly mock открыт до {render.deadline_label(weekly.end_datetime, now, 'ru')}")
     blocks.append(closer)
     return "\n\n".join(blocks)
 

@@ -231,7 +231,7 @@ def test_the_morning_digest_is_the_days_lessons_without_the_group_name(live):
     [sent] = live["calls"]["post"]
     text = sent["text"]
     assert text.split("\n\n")[0] in digest.GREETINGS and text.split("\n\n")[-1] in digest.CLOSERS
-    assert 'Урок в 20:30–21:30\n<a href="https://meet.google.com/abc-defg-hij">Ссылка на урок</a>' in text
+    assert '📚 Урок в 20:30–21:30 — ждём вас 😊\n🔗 <a href="https://meet.google.com/abc-defg-hij">Ссылка на урок</a>' in text
     assert NAME not in text and sent["key"] == f"digest:morning:{live['linked'].id}:2026-09-14"
 
 
@@ -271,7 +271,7 @@ def test_a_deadline_alone_is_worth_a_digest(live):
     [sent] = live["calls"]["post"]
     assert "Дедлайны:\n• <a href=\"https://lms.mastereducation.kz/homework/" in sent["text"]
     assert "<b>Essay &lt;2&gt;</b></a> — сегодня до 23:59" in sent["text"], "the title opens that very homework"
-    assert "📝" not in sent["text"], "the morning digest is the soft one"
+    assert sent["text"].count("📝 Дедлайны:") == 1
 
 
 def test_a_group_switched_off_gets_no_digest(live):
