@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, and_, select
+from sqlalchemy import desc, and_, select, exists, func
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import json
@@ -336,6 +336,10 @@ def get_assignments(
             (Assignment.lesson_id.in_(select(lesson_ids)))
             | (Assignment.group_id.in_(select(group_ids)))
             | (Assignment.id.in_(select(submitted_assignment_ids)))
+        )
+        query = query.filter(
+            (Assignment.id.in_(select(submitted_assignment_ids)))
+            | _not_inherited_by_late_join(current_user.id)
         )
     elif current_user.role == "teacher":
         # Teachers see only assignments from their courses and groups
@@ -1041,6 +1045,28 @@ def create_assignment(
 
     return result_assignment
 
+def _not_inherited_by_late_join(student_id: int):
+    """SQL condition: false for group homework whose deadline fell on or before the day this
+    student joined that group, unless a teacher gave them an extension on it.
+
+    A late joiner never had the chance to do that homework, and listing it made a new student's
+    first page a wall of «Просрочено» (21 items for a student added to a July group on 21.08).
+    Membership is stamped with a date, so a deadline later on the join day counts as before it.
+    Callers keep submitted homework separately — anything the student did anyway stays theirs.
+    """
+    inherited = exists().where(
+        GroupStudent.group_id == Assignment.group_id,
+        GroupStudent.student_id == student_id,
+        Assignment.due_date.isnot(None),
+        Assignment.due_date < func.date_trunc("day", GroupStudent.created_at) + timedelta(days=1),
+    )
+    extended = exists().where(
+        AssignmentExtension.assignment_id == Assignment.id,
+        AssignmentExtension.student_id == student_id,
+    )
+    return ~inherited | extended
+
+
 def _student_assignments(db: Session, student_id: int):
     """Assignments visible to a given student — mirrors the `student` branch of
     get_assignments() so the updates feed matches what the student sees."""
@@ -1054,11 +1080,18 @@ def _student_assignments(db: Session, student_id: int):
     group_ids = db.query(GroupStudent.group_id).filter(
         GroupStudent.student_id == student_id
     ).subquery()
+    submitted_assignment_ids = db.query(AssignmentSubmission.assignment_id).filter(
+        AssignmentSubmission.user_id == student_id,
+        AssignmentSubmission.is_hidden == False,
+        AssignmentSubmission.is_current == True,
+    ).subquery()
     return db.query(Assignment).filter(
         Assignment.is_active == True,
         (Assignment.is_hidden == False) | (Assignment.is_hidden == None),
         (Assignment.lesson_id.in_(select(lesson_ids)))
         | (Assignment.group_id.in_(select(group_ids))),
+        (Assignment.id.in_(select(submitted_assignment_ids)))
+        | _not_inherited_by_late_join(student_id),
     ).options(joinedload(Assignment.group))
 
 

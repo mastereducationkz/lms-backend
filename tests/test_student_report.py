@@ -84,7 +84,9 @@ def seeded(db):
     group = Group(name="Report Test Group", curator_id=curator.id, teacher_id=teacher.id)
     db.add(group)
     db.flush()
-    db.add(GroupStudent(group_id=group.id, student_id=student.id))
+    # Joined before the homework below was due: a late joiner does not inherit older
+    # unsubmitted homework (see _not_inherited_by_late_join).
+    db.add(GroupStudent(group_id=group.id, student_id=student.id, created_at=datetime(2026, 7, 1)))
 
     course = Course(title="Report Course", description="", teacher_id=teacher.id, is_active=True)
     db.add(course)
