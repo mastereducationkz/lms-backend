@@ -160,6 +160,46 @@ def test_unreadable_space_is_skipped_quietly(monkeypatch):
     assert meet_recordings.space_meet_code("spaces/not-ours") is None
 
 
+def test_a_space_is_asked_for_its_code_once(monkeypatch):
+    """The worker sees the same spaces every tick and their codes never change (174 lookups a tick, 2026-09-15)."""
+    asked = []
+
+    class _Meet:
+        def spaces(self):
+            return self
+
+        def get(self, name):
+            asked.append(name)
+            return self
+
+        def execute(self):
+            return {"meetingUri": "https://meet.google.com/abc-defg-hij"}
+
+    monkeypatch.setattr(meet_recordings, "_SPACE_CODES", {})
+    monkeypatch.setattr(meet_recordings.google_workspace, "meet_client", _Meet)
+
+    assert meet_recordings.space_meet_code("spaces/ours") == "abc-defg-hij"
+    assert meet_recordings.space_meet_code("spaces/ours") == "abc-defg-hij"
+    assert asked == ["spaces/ours"]
+
+
+def test_an_unreadable_space_is_asked_again_next_time(monkeypatch):
+    """A passing Google error must not hide a lesson room for the life of the process."""
+    tries = []
+
+    class _Boom:
+        def spaces(self):
+            tries.append(1)
+            raise RuntimeError("503")
+
+    monkeypatch.setattr(meet_recordings, "_SPACE_CODES", {})
+    monkeypatch.setattr(meet_recordings.google_workspace, "meet_client", _Boom)
+
+    assert meet_recordings.space_meet_code("spaces/flaky") is None
+    assert meet_recordings.space_meet_code("spaces/flaky") is None
+    assert len(tries) == 2
+
+
 # --- copying into the Shared Drive -------------------------------------------
 
 class _FakeFiles:

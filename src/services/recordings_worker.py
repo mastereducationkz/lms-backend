@@ -280,6 +280,7 @@ class RecordingsWorker:
     def tick(self) -> dict:
         """One pass. Returns a summary, which makes it directly testable and callable by hand."""
         db = SessionLocal()
+        started = datetime.now(timezone.utc)
         summary = {"links": 0, "rooms": 0, "claimed": 0, "attendance": 0, "speech": 0,
                    "ingested": 0, "transcribed": 0, "missing": 0}
         try:
@@ -301,6 +302,8 @@ class RecordingsWorker:
                 except Exception as e:
                     db.rollback()
                     logger.error("recordings tick step %s failed: %s", key, e, exc_info=True)
+            # Steps log only what they save, so a slow tick used to be indistinguishable from a stuck one.
+            logger.info("recordings tick took %.0f s: %s", (datetime.now(timezone.utc) - started).total_seconds(), summary)
             return summary
         finally:
             db.close()

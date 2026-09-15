@@ -141,6 +141,12 @@ def resolve_recording(conference_record_name: str) -> str:
     return resolve_recording_detail(conference_record_name)[0]
 
 
+# A space's meeting code never changes, and the worker asks about the same spaces on every tick —
+# every call in its lookback window, lesson or not (174 on 2026-09-15). Each one read is kept;
+# an unreadable space is not, so a passing Google error is asked again next time.
+_SPACE_CODES: dict = {}
+
+
 def space_meet_code(space_name: str) -> Optional[str]:
     """The meeting code for a Meet space, or None if we cannot read it.
 
@@ -148,12 +154,17 @@ def space_meet_code(space_name: str) -> Optional[str]:
     conference that is not ours (someone's ad-hoc meeting), and the poller should skip it
     quietly rather than treat every stranger's meeting as an incident.
     """
+    if space_name in _SPACE_CODES:
+        return _SPACE_CODES[space_name]
     try:
         space = google_workspace.meet_client().spaces().get(name=space_name).execute()
     except Exception as e:
         logger.debug("space %s unreadable (probably not ours): %s", space_name, e)
         return None
-    return meet_code(space.get("meetingUri"))
+    code = meet_code(space.get("meetingUri"))
+    if code:
+        _SPACE_CODES[space_name] = code
+    return code
 
 
 def match_lesson(db, code: Optional[str]) -> Optional[Event]:

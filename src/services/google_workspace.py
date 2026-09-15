@@ -132,12 +132,29 @@ def credentials(scopes: Optional[list] = None):
     )
 
 
-# Every Google call gets a deadline, per socket operation. Without one httplib2 waits for ever:
-# on 2026-09-15 one Meet response never arrived and the recordings worker sat in poll() for over
-# an hour — no attendance saved, no recordings claimed, no rooms for new lessons — until the
-# scheduler was restarted. With a timeout the call raises, the worker's step logs it and the next
-# tick carries on. Two minutes is far above any real response; downloads read in chunks under it.
+# Every Google call gets a deadline, per socket operation. googleapiclient's own transport carries
+# a 60 s one; passing ``http=`` (below) replaces that transport, so the deadline is set here. Two
+# minutes is far above any real response; downloads read in chunks under it.
 GOOGLE_HTTP_TIMEOUT_SECONDS = 120
+
+# One credentials object per configuration, shared by every client. A fresh ``Credentials`` holds
+# no access token, so every client used to open with its own token exchange: 1–9 s each on
+# 2026-09-15, against 0.2 s for a call on a warm token. The recordings worker builds a client per
+# Meet call, so the 174 calls in its window made one tick take over half an hour and attendance
+# landed more than an hour after the lessons. Only the credentials are shared — httplib2
+# transports are not thread-safe, so each client keeps its own. google-auth refreshes the shared
+# token before it expires.
+_SHARED_CREDENTIALS: dict = {}
+
+
+def _shared_credentials(scopes: Optional[list] = None):
+    key = (_env("GOOGLE_OAUTH_CLIENT_ID"), _env("GOOGLE_OAUTH_CLIENT_SECRET"),
+           _env("GOOGLE_OAUTH_REFRESH_TOKEN"), tuple(scopes or PIPELINE_SCOPES))
+    if not all(key[:3]):
+        return credentials(scopes)  # raises, naming what is missing: nothing to share
+    if key not in _SHARED_CREDENTIALS:
+        _SHARED_CREDENTIALS[key] = credentials(scopes)
+    return _SHARED_CREDENTIALS[key]
 
 
 def _authorized_http(creds):
@@ -164,7 +181,7 @@ def _discovery_build(*args, **kwargs):
 def _client(api: str, version: str):
     # cache_discovery=False: the default file cache is unwritable in the container and
     # logs a warning on every single build() call.
-    return _discovery_build(api, version, http=_authorized_http(credentials()), cache_discovery=False)
+    return _discovery_build(api, version, http=_authorized_http(_shared_credentials()), cache_discovery=False)
 
 
 def calendar_client():
@@ -173,7 +190,7 @@ def calendar_client():
 
 def group_calendars_client():
     """Calendar API with the `calendar` scope: creating and sharing the per-group calendars."""
-    return _discovery_build("calendar", "v3", http=_authorized_http(credentials(SCOPES)), cache_discovery=False)
+    return _discovery_build("calendar", "v3", http=_authorized_http(_shared_credentials(SCOPES)), cache_discovery=False)
 
 
 def drive_client():
