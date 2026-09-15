@@ -422,6 +422,12 @@ def deadline_label(value: datetime, now: datetime, lang: str) -> str:
     return text
 
 
+def task_title(task, homework_url: str) -> str:
+    """A homework title that opens that very assignment in the LMS (owner, 2026-09-15: «there is no
+    link to the exact homework»). ``homework_url`` is the LMS's ``/homework`` page."""
+    return f'<a href="{escape(homework_url.rstrip("/"))}/{int(task.id)}"><b>{escape(task.title or "")}</b></a>'
+
+
 def homework_answer(group, tasks: Sequence, now: datetime, lang: str, url: str) -> str:
     """Open tasks first (soonest deadline on top), then the ones whose deadline just passed."""
     if not tasks:
@@ -435,7 +441,7 @@ def homework_answer(group, tasks: Sequence, now: datetime, lang: str, url: str) 
         else:
             key = "overdue" if task.due_date < now else "due"
             deadline = t(lang, key, date=deadline_label(task.due_date, now, lang))
-        lines.append(f"• <b>{escape(task.title or '')}</b> — {escape(deadline)}")
+        lines.append(f"• {task_title(task, url)} — {escape(deadline)}")
     return join(header(group.name), t(lang, "homework"), *lines, t(lang, "open", url=escape(url)))
 
 

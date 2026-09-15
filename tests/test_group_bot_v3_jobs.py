@@ -242,7 +242,8 @@ def test_no_automatic_text_raises_its_voice():
     group = SimpleNamespace(name="G", schedule_config=MWF_2030)
     texts = [*digest.GREETINGS, *digest.CLOSERS,
              watch.notice_text(group, watch.pattern_of(group), watch.pattern_of(group)),
-             digest.last_chance_text(SimpleNamespace(title="Essay", due_date=AT_1005 + timedelta(hours=3)), AT_1005)]
+             digest.last_chance_text(SimpleNamespace(id=1, title="Essay", due_date=AT_1005 + timedelta(hours=3)),
+                                     AT_1005)]
     assert not [text for text in texts if "!" in text]
 
 
@@ -268,7 +269,8 @@ def test_a_deadline_alone_is_worth_a_digest(live):
     _homework(live, "Essay <2>", datetime(2026, 9, 14, 18, 59))
     live["tick"](digest, AT_1005)
     [sent] = live["calls"]["post"]
-    assert "Дедлайны:\n• <b>Essay &lt;2&gt;</b> — сегодня до 23:59" in sent["text"]
+    assert "Дедлайны:\n• <a href=\"https://lms.mastereducation.kz/homework/" in sent["text"]
+    assert "<b>Essay &lt;2&gt;</b></a> — сегодня до 23:59" in sent["text"], "the title opens that very homework"
     assert "📝" not in sent["text"], "the morning digest is the soft one"
 
 
@@ -291,7 +293,8 @@ def test_the_last_chance_comes_three_hours_before_the_deadline(live):
     assert live["calls"]["post"] == []
     live["tick"](digest, datetime(2026, 9, 14, 12, 5))
     [sent] = live["calls"]["post"]
-    assert sent["text"] == "⏰ До дедлайна 3 часа: <b>Reading Test 4</b> — до 20:00. Кто ещё не сдал — самое время 🏃"
+    assert sent["text"] == (f'⏰ До дедлайна 3 часа: <a href="https://lms.mastereducation.kz/homework/{task.id}">'
+                            "<b>Reading Test 4</b></a> — до 20:00. Кто ещё не сдал — самое время 🏃")
     assert sent["key"] == f"digest:last_chance:{live['linked'].id}:{task.id}:2026-09-14T15:00:00"
 
     task.due_date = datetime(2026, 9, 14, 16, 0)                                 # moved by an hour
@@ -306,8 +309,10 @@ def test_tasks_due_at_the_same_time_are_one_reminder(live):
     _homework(live, "Later task", datetime(2026, 9, 14, 17, 0))
     live["tick"](digest, datetime(2026, 9, 14, 12, 5))
     [sent] = live["calls"]["post"]
-    assert sent["text"] == ("⏰ До дедлайна 3 часа — до 20:00:\n• <b>Unit 8: Functions</b>\n"
-                            "• <b>Article &lt;Annotation&gt;</b>\nКто ещё не сдал — самое время 🏃")
+    base = "https://lms.mastereducation.kz/homework"
+    assert sent["text"] == (f'⏰ До дедлайна 3 часа — до 20:00:\n• <a href="{base}/{first.id}"><b>Unit 8: Functions</b></a>\n'
+                            f'• <a href="{base}/{second.id}"><b>Article &lt;Annotation&gt;</b></a>\n'
+                            "Кто ещё не сдал — самое время 🏃")
     ids = "+".join(str(i) for i in sorted((first.id, second.id)))
     assert sent["key"] == f"digest:last_chance:{live['linked'].id}:{ids}:2026-09-14T15:00:00"
     live["tick"](digest, datetime(2026, 9, 14, 12, 10))
@@ -319,7 +324,8 @@ def test_a_last_chance_falling_in_quiet_hours_waits_for_eight_and_says_the_real_
     live["tick"](digest, datetime(2026, 9, 15, 2, 0))                           # 07:00: quiet
     assert live["calls"]["post"] == []
     live["tick"](digest, datetime(2026, 9, 15, 3, 0))                           # 08:00
-    assert live["calls"]["post"][0]["text"].startswith("⏰ До дедлайна 1 час 30 минут: <b>Vocabulary</b> — до 09:30.")
+    text = live["calls"]["post"][0]["text"]
+    assert text.startswith("⏰ До дедлайна 1 час 30 минут: <a href=") and "<b>Vocabulary</b></a> — до 09:30." in text
 
 
 def test_a_deadline_that_passes_during_the_night_gets_no_reminder(live):

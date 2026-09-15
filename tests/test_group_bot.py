@@ -199,9 +199,10 @@ def test_homework_is_titles_and_deadlines_and_nobodys_name(chat):
                       content="—", is_active=True, is_hidden=False, due_date=datetime(2026, 9, 14, 18, 59)))
     db.flush()
     text = chat["at"]("какое дз и до когда?")["answer"]
-    assert "• <b>Listening 2</b> — до 14 сентября, 23:59 (сегодня)" in text
-    assert "• <b>Reading Test 4</b> — до 16 сентября, 23:59" in text
-    assert "• <b>Essay &lt;1&gt;</b> — срок прошёл 12 сентября, 23:59" in text
+    assert "<b>Listening 2</b></a> — до 14 сентября, 23:59 (сегодня)" in text
+    assert "<b>Reading Test 4</b></a> — до 16 сентября, 23:59" in text
+    assert "<b>Essay &lt;1&gt;</b></a> — срок прошёл 12 сентября, 23:59" in text
+    assert text.count('• <a href="https://lms.mastereducation.kz/homework/') == 3, "each title opens its homework"
     assert text.index("Listening 2") < text.index("Reading Test 4") < text.index("Essay"), \
         "open tasks come first, soonest on top; a passed deadline goes last"
     assert "/homework" in text

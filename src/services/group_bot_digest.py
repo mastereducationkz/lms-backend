@@ -33,6 +33,12 @@ from src.services import group_bot_outbox as outbox
 from src.services import group_bot_render as render
 from src.services import group_bot_settings
 from src.services.operational_groups import event_has_operational_group_clause
+from src.services.recording_watch_links import lms_url
+
+
+def _title(task) -> str:
+    """The task's title as a link to that assignment in the LMS."""
+    return render.task_title(task, lms_url("/homework"))
 
 FLAG = "ENABLE_TELEGRAM_DIGEST"
 MORNING, EVENING = time(10, 0), time(20, 0)
@@ -141,7 +147,7 @@ def _deadline_lines(tasks: list, now: datetime, *, soft: bool) -> list:
             day = "завтра"
         else:
             day = f"{due.day} {render.MONTHS['ru'][due.month - 1]}"
-        lines.append(f"• <b>{escape(task.title or '')}</b> — {day} до {due:%H:%M}")
+        lines.append(f"• {_title(task)} — {day} до {due:%H:%M}")
     return lines
 
 
@@ -186,7 +192,7 @@ def time_left(delta: timedelta) -> str:
 def last_chance_text(task, now: datetime) -> str:
     due = render.local(task.due_date)
     day = " (завтра)" if due.date() != render.local(now).date() else ""
-    return (f"⏰ До дедлайна {time_left(task.due_date - now)}: <b>{escape(task.title or '')}</b> — "
+    return (f"⏰ До дедлайна {time_left(task.due_date - now)}: {_title(task)} — "
             f"до {due:%H:%M}{day}. Кто ещё не сдал — самое время 🏃")
 
 
@@ -198,7 +204,7 @@ def last_chance_group_text(tasks: list, now: datetime) -> str:
     due = render.local(tasks[0].due_date)
     day = " (завтра)" if due.date() != render.local(now).date() else ""
     lines = [f"⏰ До дедлайна {time_left(tasks[0].due_date - now)} — до {due:%H:%M}{day}:"]
-    lines += [f"• <b>{escape(task.title or '')}</b>" for task in tasks]
+    lines += [f"• {_title(task)}" for task in tasks]
     lines.append("Кто ещё не сдал — самое время 🏃")
     return "\n".join(lines)
 
