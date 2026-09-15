@@ -132,6 +132,22 @@ def credentials(scopes: Optional[list] = None):
     )
 
 
+# Every Google call gets a deadline, per socket operation. Without one httplib2 waits for ever:
+# on 2026-09-15 one Meet response never arrived and the recordings worker sat in poll() for over
+# an hour — no attendance saved, no recordings claimed, no rooms for new lessons — until the
+# scheduler was restarted. With a timeout the call raises, the worker's step logs it and the next
+# tick carries on. Two minutes is far above any real response; downloads read in chunks under it.
+GOOGLE_HTTP_TIMEOUT_SECONDS = 120
+
+
+def _authorized_http(creds):
+    """An authorised HTTP transport that gives up on a silent connection."""
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+
+    return AuthorizedHttp(creds, http=httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_SECONDS))
+
+
 def _discovery_build(*args, **kwargs):
     """Import googleapiclient lazily.
 
@@ -148,7 +164,7 @@ def _discovery_build(*args, **kwargs):
 def _client(api: str, version: str):
     # cache_discovery=False: the default file cache is unwritable in the container and
     # logs a warning on every single build() call.
-    return _discovery_build(api, version, credentials=credentials(), cache_discovery=False)
+    return _discovery_build(api, version, http=_authorized_http(credentials()), cache_discovery=False)
 
 
 def calendar_client():
@@ -157,7 +173,7 @@ def calendar_client():
 
 def group_calendars_client():
     """Calendar API with the `calendar` scope: creating and sharing the per-group calendars."""
-    return _discovery_build("calendar", "v3", credentials=credentials(SCOPES), cache_discovery=False)
+    return _discovery_build("calendar", "v3", http=_authorized_http(credentials(SCOPES)), cache_discovery=False)
 
 
 def drive_client():

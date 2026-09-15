@@ -126,6 +126,45 @@ def test_a_call_google_has_not_handed_over_holds_the_record_back_for_a_while(roo
     assert later["state"] == "ready" and later["partial"] is True
 
 
+def test_short_calls_around_the_lesson_do_not_make_it_judged(room):
+    """2026-09-15: teachers checked their rooms at 18:58, the worker stalled right after saving those
+    few-second calls, and taught, recorded lessons read "Teacher never joined" for everyone."""
+    db, world = room["db"], room["world"]
+    room["teacher"].workspace_email = "gulzada@mastereducation.kz"
+    taught = world["lesson"](room["group"], days_ahead=-2, meeting_url="https://meet.google.com/tau-ghtx-now")
+    start, end = taught.start_datetime, taught.end_datetime
+    for a, b in ((-2, -1.9), (-0.5, 0.03)):  # a five-second check; one that ran 1.5 s past the start
+        db.add(MeetConference(event_id=taught.id, conference_record=f"conferenceRecords/check-{next(_names)}",
+                              started_at=start + timedelta(minutes=a), ended_at=start + timedelta(minutes=b),
+                              synced_at=start + timedelta(minutes=10)))
+    db.add(Attendance(event_id=taught.id, user_id=room["aya"].id, status="present"))
+    db.flush()
+
+    record = meet_presence.lesson(db, taught, end + timedelta(hours=1))
+    assert record["state"] == "waiting", "the lesson's own call has not been saved yet"
+    assert not record.get("flags")
+
+    # Once the lesson's own call is saved, it is judged as usual.
+    db.add(MeetConference(event_id=taught.id, conference_record=f"conferenceRecords/lesson-{next(_names)}",
+                          started_at=start + timedelta(minutes=1), ended_at=end,
+                          synced_at=end + timedelta(minutes=10)))
+    db.flush()
+    assert meet_presence.lesson(db, taught, end + timedelta(hours=1))["state"] == "ready"
+
+
+def test_a_room_with_only_calls_around_the_lesson_is_judged_after_waiting_long_enough(room):
+    db, world = room["db"], room["world"]
+    room["teacher"].workspace_email = "gulzada@mastereducation.kz"
+    skipped = world["lesson"](room["group"], days_ahead=-2, meeting_url="https://meet.google.com/ski-pped-now")
+    start = skipped.start_datetime
+    db.add(MeetConference(event_id=skipped.id, conference_record=f"conferenceRecords/early-{next(_names)}",
+                          started_at=start - timedelta(minutes=20), ended_at=start - timedelta(minutes=15),
+                          synced_at=start))
+    db.flush()
+    later = skipped.end_datetime + meet_presence.GIVE_UP_WAITING_AFTER + timedelta(minutes=1)
+    assert meet_presence.lesson(db, skipped, later)["state"] == "ready"
+
+
 # ── lateness ─────────────────────────────────────────────────────────────────────────────
 
 def test_late_students_and_a_late_teacher_who_ended_early(room):

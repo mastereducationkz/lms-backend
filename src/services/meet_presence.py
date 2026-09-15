@@ -58,6 +58,13 @@ LESSON_MARGIN = timedelta(minutes=30)
 COMPLETE_AFTER = timedelta(minutes=20)
 # A call Google will not hand over does not hide the rest of the lesson for ever.
 GIVE_UP_WAITING_AFTER = timedelta(hours=6)
+# A lesson is judged only once a saved call overlaps the lesson itself by this much. Rooms are
+# opened before the lesson — a teacher checks the link, a student arrives early — and those short
+# calls are saved first. On 2026-09-15 the worker stalled right after saving them, and five
+# lessons that were taught and recorded showed "Teacher never joined" and every present mark as
+# "never joined". Not the 30-minute margin: an 18:58 five-second check sits inside it, and one
+# check call ran 1.5 s past the start.
+LESSON_CALL_MIN_OVERLAP = timedelta(minutes=5)
 # Google keeps conference records about this long; an older lesson with nothing saved simply
 # predates the record, which is not the same as nobody coming.
 GOOGLE_KEEPS = timedelta(days=30)
@@ -346,6 +353,12 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
         return {**unjudged, "state": "waiting"}
     if not any(c.synced_at for c in conferences):
         return {**unjudged, "state": "unavailable" if now > end + GOOGLE_KEEPS else "none"}
+    lesson_call_saved = any(
+        c.synced_at and min(c.ended_at or now, end) - max(c.started_at or start, start) >= LESSON_CALL_MIN_OVERLAP
+        for c in conferences
+    )
+    if not lesson_call_saved and now < end + GIVE_UP_WAITING_AFTER:
+        return {**unjudged, "state": "waiting"}  # only calls around the lesson so far, not the lesson's own
 
     lo, hi = start - LESSON_MARGIN, end + LESSON_MARGIN
     ended_at = {c.id: c.ended_at or now for c in conferences}

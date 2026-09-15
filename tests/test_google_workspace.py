@@ -140,9 +140,11 @@ def test_enabled_needs_both(configured_env):
 def captured_build(monkeypatch):
     calls = []
 
-    def _fake_build(api, version, credentials=None, cache_discovery=None):
-        calls.append({"api": api, "version": version,
-                      "credentials": credentials, "cache_discovery": cache_discovery})
+    def _fake_build(api, version, http=None, cache_discovery=None):
+        # Clients are built on an authorised transport with a deadline (never bare credentials):
+        # an HTTP call without a timeout froze the recordings worker for an hour on 2026-09-15.
+        calls.append({"api": api, "version": version, "http": http,
+                      "credentials": getattr(http, "credentials", None), "cache_discovery": cache_discovery})
         return object()
 
     monkeypatch.setattr(google_workspace, "_discovery_build", _fake_build)
@@ -160,6 +162,7 @@ def test_clients_target_the_right_api(configured_env, captured_build, factory, a
     assert captured_build[0]["api"] == api
     assert captured_build[0]["version"] == version
     assert captured_build[0]["credentials"].refresh_token == "rtoken"
+    assert captured_build[0]["http"].http.timeout == google_workspace.GOOGLE_HTTP_TIMEOUT_SECONDS
     # The container's discovery cache is unwritable; leaving this on logs a warning per call.
     assert captured_build[0]["cache_discovery"] is False
 
