@@ -64,6 +64,7 @@ TEXT = {
         "recordings": "🎥 Записи уроков (нужен вход в LMS):",
         "no_recordings": "Записей уроков пока нет.",
         "weekly": "🧪 Weekly mock:",
+        "weekly_live": "идёт сейчас", "weekly_done": "завершён",
         "no_weekly": "Ближайший weekly mock для группы пока не опубликован.",
         "help": ("Отвечаю на вопросы по группе:\n"
                  "/schedule — расписание: дни и время\n/lessons — ближайшие уроки с датами\n"
@@ -108,6 +109,7 @@ TEXT = {
         "recordings": "🎥 Сабақ жазбалары (LMS-ке кіру керек):",
         "no_recordings": "Сабақ жазбалары әзірге жоқ.",
         "weekly": "🧪 Weekly mock:",
+        "weekly_live": "қазір жүріп жатыр", "weekly_done": "аяқталды",
         "no_weekly": "Топ үшін жақын weekly mock әлі жарияланбаған.",
         "help": ("Топ бойынша сұрақтарға жауап беремін:\n"
                  "/schedule — сабақ кестесі: күндер мен уақыт\n/lessons — жақын сабақтар\n"
@@ -151,6 +153,7 @@ TEXT = {
         "recordings": "🎥 Lesson recordings (LMS login required):",
         "no_recordings": "There are no lesson recordings yet.",
         "weekly": "🧪 Weekly mock:",
+        "weekly_live": "live now", "weekly_done": "finished",
         "no_weekly": "The group's next weekly mock has not been published yet.",
         "help": ("I answer questions about this group:\n"
                  "/schedule — schedule: days and times\n/lessons — upcoming lesson dates\n"
@@ -395,18 +398,37 @@ def next_answer(group, lesson, now: datetime, lang: str) -> str:
     return join(header(group.name), next_line(lesson, now, lang))
 
 
+def deadline_label(value: datetime, now: datetime, lang: str) -> str:
+    """«15 сентября, 23:59 (сегодня)» — a date inside a sentence, never «до Сегодня»."""
+    d, today = local(value), local(now).date()
+    months = MONTHS.get(lang, MONTHS["ru"])
+    text = f"{months[d.month - 1]} {d.day}" if lang == "en" else f"{d.day} {months[d.month - 1]}"
+    text = f"{text}, {d:%H:%M}"
+    if d.date() == today:
+        return f"{text} ({t(lang, 'today').lower()})"
+    if d.date() == today + timedelta(days=1):
+        return f"{text} ({t(lang, 'tomorrow').lower()})"
+    return text
+
+
 def homework_answer(group, tasks: Sequence, now: datetime, lang: str, url: str) -> str:
+    """Open tasks first (soonest deadline on top), then the ones whose deadline just passed."""
     if not tasks:
         return join(header(group.name), t(lang, "no_homework"))
+    late = [task for task in tasks if task.due_date is not None and task.due_date < now]
+    ordered = [task for task in tasks if task not in late] + late
     lines = []
-    for task in tasks:
+    for task in ordered[:HOMEWORK_LINES]:
         if task.due_date is None:
             deadline = t(lang, "no_due")
         else:
             key = "overdue" if task.due_date < now else "due"
-            deadline = t(lang, key, date=when(task.due_date, None, now, lang))
+            deadline = t(lang, key, date=deadline_label(task.due_date, now, lang))
         lines.append(f"• <b>{escape(task.title or '')}</b> — {escape(deadline)}")
     return join(header(group.name), t(lang, "homework"), *lines, t(lang, "open", url=escape(url)))
+
+
+HOMEWORK_LINES = 5
 
 
 def recordings_answer(group, recordings: Sequence[tuple], now: datetime, lang: str) -> str:
@@ -418,13 +440,22 @@ def recordings_answer(group, recordings: Sequence[tuple], now: datetime, lang: s
     return join(header(group.name), t(lang, "recordings"), *lines)
 
 
-def weekly_answer(group, tests: Sequence, lang: str) -> str:
+def weekly_answer(group, tests: Sequence, now: datetime, lang: str) -> str:
+    """Live and upcoming mocks first with when they open; a finished one (kept a few days,
+    because the weekend set is asked about all week) says it is over."""
     if not tests:
         return join(header(group.name), t(lang, "no_weekly"))
+    finished = [test for test in tests if test.end_datetime is not None and test.end_datetime < now]
     lines = []
-    for test in tests:
-        lines.append(f"• {escape(test.title or '')}")
-        if test.meeting_url:
+    for test in [test for test in tests if test not in finished] + finished:
+        if test in finished:
+            status = t(lang, "weekly_done")
+        elif test.start_datetime <= now:
+            status = t(lang, "weekly_live")
+        else:
+            status = when(test.start_datetime, test.end_datetime, now, lang)
+        lines.append(f"• {escape(test.title or '')} — {escape(status)}")
+        if test.meeting_url and test not in finished:
             lines.append(f"  🔗 {escape(test.meeting_url)}")
     return join(header(group.name), t(lang, "weekly"), *lines)
 

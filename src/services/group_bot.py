@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 MAX_QUESTION_CHARS = 1000
 LESSONS_SHOWN = 5
 SPAN_LESSONS_SHOWN = 14
-HOMEWORK_SHOWN = 5
+HOMEWORK_SHOWN = 8          # fetched; the answer shows 5, open ones before overdue ones
 RECORDINGS_SHOWN = 3
 # A weekly set commonly opens early in the day and is asked about throughout the weekend. Keep
 # the current set available for a few days, then prefer the next published one.
@@ -191,7 +191,7 @@ def fact_answer(db, group: Group, intent: intents.Intent, now: datetime, lang: s
     if name == "recording":
         return render.recordings_answer(group, _recordings(db, group), now, lang)
     if name == "weekly":
-        return render.weekly_answer(group, _weekly_tests(db, group, now), lang)
+        return render.weekly_answer(group, _weekly_tests(db, group, now), now, lang)
     raise ValueError(f"not a fact intent: {name}")
 
 

@@ -180,9 +180,15 @@ def test_homework_is_titles_and_deadlines_and_nobodys_name(chat):
     db.add(Assignment(group_id=chat["linked"].id, title="Essay <1>", assignment_type="homework",
                       content="—", is_active=True, is_hidden=False, due_date=datetime(2026, 9, 12, 18, 59)))
     db.flush()
+    db.add(Assignment(group_id=chat["linked"].id, title="Listening 2", assignment_type="homework",
+                      content="—", is_active=True, is_hidden=False, due_date=datetime(2026, 9, 14, 18, 59)))
+    db.flush()
     text = chat["at"]("какое дз и до когда?")["answer"]
-    assert "• <b>Essay &lt;1&gt;</b> — срок прошёл Сб, 12 сентября, 23:59" in text
-    assert "• <b>Reading Test 4</b> — до Ср, 16 сентября, 23:59" in text
+    assert "• <b>Listening 2</b> — до 14 сентября, 23:59 (сегодня)" in text
+    assert "• <b>Reading Test 4</b> — до 16 сентября, 23:59" in text
+    assert "• <b>Essay &lt;1&gt;</b> — срок прошёл 12 сентября, 23:59" in text
+    assert text.index("Listening 2") < text.index("Reading Test 4") < text.index("Essay"), \
+        "open tasks come first, soonest on top; a passed deadline goes last"
     assert "/homework" in text
     assert "Аяулым" not in text
     for word in ("сдал", "не сдали", "1 из", "человек"):
@@ -218,6 +224,18 @@ def test_a_weekly_mock_uses_its_group_linked_calendar_event(chat):
     out = chat["at"]("когда будет следующий викли мок тест?")
     assert "IELTS Weekly Test · 12.09-13.09" in out["answer"]
     assert "https://ielts.mastereducation.kz/weekly-sets/15" in out["answer"]
+
+
+def test_a_weekly_mock_says_whether_it_is_open_live_or_over(chat):
+    chat["on"](12, hour=4, minute=0, event_type="weekly_test", title="Weekly · 12.09-13.09",
+               meeting_url="https://ielts.mastereducation.kz/weekly-sets/15")
+    chat["on"](14, hour=5, minute=0, event_type="weekly_test", title="Weekly · live",
+               meeting_url="https://ielts.mastereducation.kz/weekly-sets/16")
+    text = chat["at"]("/weekly", command="weekly")["answer"]
+    assert "• Weekly · live — идёт сейчас" in text
+    assert "• Weekly · 12.09-13.09 — завершён" in text
+    assert "weekly-sets/15" not in text, "a finished mock has no link to follow"
+    assert text.index("Weekly · live") < text.index("12.09-13.09")
 
 
 def test_no_weekly_mock_says_so(chat):
