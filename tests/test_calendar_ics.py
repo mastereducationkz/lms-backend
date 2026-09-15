@@ -51,6 +51,19 @@ def test_long_cyrillic_lines_fold_without_breaking_characters():
     assert folded.replace("\r\n ", "") == line
 
 
+def test_staff_typed_titles_lose_their_stray_spaces():
+    """Seen in the first real group calendar (2026-09-15): « Maps » gave «Дедлайн:  Maps  до 17:00»."""
+    from types import SimpleNamespace
+
+    from src.services.calendar_items import deadline_item, weekly_item
+
+    task = SimpleNamespace(id=6974, title="  Maps \n", due_date=datetime(2026, 9, 8, 12, 0), updated_at=None)
+    assert deadline_item(task).summary == "📝 Дедлайн: Maps до 17:00"
+    weekly = SimpleNamespace(id=1, title=" IELTS  Weekly Test ", meeting_url=None,
+                             start_datetime=NOW, end_datetime=NOW, updated_at=None)
+    assert weekly_item(weekly).summary == "IELTS Weekly Test"
+
+
 def test_sequence_grows_with_the_update_time():
     assert sequence(None) == 0
     assert sequence(datetime(2026, 9, 15, 10, 1)) > sequence(datetime(2026, 9, 15, 10, 0))

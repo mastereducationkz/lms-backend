@@ -56,17 +56,22 @@ def weekly_item(event) -> CalendarItem:
     # A weekly test links to its platform set; a Meet link is never copied out.
     link = event.meeting_url if event.meeting_url and not _is_meet(event.meeting_url) else lesson_link(event.id)
     return CalendarItem(
-        key=f"weekly-{event.id}", summary=event.title or "Weekly mock",
+        key=f"weekly-{event.id}", summary=_clean(event.title) or "Weekly mock",
         description=f"Открыть: {link}", start=event.start_datetime, end=event.end_datetime,
         url=link, updated=getattr(event, "updated_at", None),
     )
+
+
+def _clean(title: Optional[str]) -> str:
+    """Titles are typed by staff: « Maps » must not become «Дедлайн:  Maps  до 17:00»."""
+    return " ".join((title or "").split())
 
 
 def deadline_item(task) -> CalendarItem:
     local = task.due_date + ALMATY_OFFSET
     link = lms_url(f"/homework/{task.id}")
     return CalendarItem(
-        key=f"deadline-{task.id}", summary=f"📝 Дедлайн: {task.title} до {local:%H:%M}",
+        key=f"deadline-{task.id}", summary=f"📝 Дедлайн: {_clean(task.title)} до {local:%H:%M}",
         description=f"Сдать в LMS: {link}", day=local.date(), url=link,
         updated=getattr(task, "updated_at", None),
     )
