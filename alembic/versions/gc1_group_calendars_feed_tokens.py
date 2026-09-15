@@ -1,13 +1,13 @@
 """group_google_calendars + calendar_feed_tokens — calendar subscriptions
 
 Revision ID: gc1_group_calendars_feed_tokens
-Revises: gb1_group_bot_question_intent
+Revises: gb2_group_bot_v3_tables
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "gc1_group_calendars_feed_tokens"
-down_revision = "gb1_group_bot_question_intent"
+down_revision = "gb2_group_bot_v3_tables"
 branch_labels = None
 depends_on = None
 

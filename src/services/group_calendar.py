@@ -26,8 +26,8 @@ from typing import Optional
 from src.announcements.models import TelegramGroupLink
 from src.config import SessionLocal
 from src.events.calendar_models import GroupGoogleCalendar
-from src.schemas.models import Event, EventGroup, Group, UserInDB
-from src.services import calendar_items, google_workspace, workspace_directory
+from src.schemas.models import Event, Group, UserInDB
+from src.services import calendar_items, google_workspace
 from src.utils.auth_utils import SECRET_KEY
 
 logger = logging.getLogger(__name__)
@@ -65,24 +65,12 @@ def _int_env(name: str, default: int) -> int:
 # ── which groups get a calendar ──────────────────────────────────────────────────────────
 
 def is_live(db, group: Group, now: Optional[datetime] = None) -> bool:
-    """Active, not over, its regular teacher connected to a Workspace account that is not
-    suspended, a linked Telegram chat, and lessons ahead. (Same rule as the group bot's
-    ``group_bot_settings.is_live``; kept here so the two can ship independently.)"""
-    now = now or _now()
-    if not group.is_active or group.is_over or not group.teacher_id:
-        return False
-    teacher = db.get(UserInDB, group.teacher_id)
-    email = (teacher.workspace_email or "").strip().lower() if teacher else ""
-    if not email:
-        return False
-    directory = workspace_directory.accounts_by_email(db)
-    if directory is None or email not in directory or directory[email].get("suspended"):
-        return False
-    if db.query(TelegramGroupLink.id).filter(TelegramGroupLink.lms_group_id == group.id).first() is None:
-        return False
-    return db.query(Event.id).join(EventGroup, EventGroup.event_id == Event.id).filter(
-        EventGroup.group_id == group.id, Event.is_active.is_(True), Event.event_type == "class",
-        Event.end_datetime > now).first() is not None
+    """A group gets a calendar exactly when its chat is live for the group bot — one rule
+    (:func:`group_bot_settings.is_live`): active, not over, its regular teacher connected to a
+    Workspace account that is not suspended, a linked chat, and lessons ahead."""
+    from src.services import group_bot_settings
+
+    return group_bot_settings.is_live(db, group, now or _now())
 
 
 def live_groups(db, now: Optional[datetime] = None) -> list[Group]:
