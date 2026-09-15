@@ -247,7 +247,7 @@ def test_a_weekly_mock_says_whether_it_is_open_live_or_over(chat):
     chat["on"](14, hour=5, minute=0, event_type="weekly_test", title="Weekly · live",
                meeting_url="https://ielts.mastereducation.kz/weekly-sets/16")
     text = chat["at"]("/weekly", command="weekly")["answer"]
-    assert "• Weekly · live — идёт сейчас" in text
+    assert "• Weekly · live — открыт до 14 сентября, 11:00 (сегодня)" in text
     assert "• Weekly · 12.09-13.09 — завершён" in text
     assert "weekly-sets/15" not in text, "a finished mock has no link to follow"
     assert text.index("Weekly · live") < text.index("12.09-13.09")

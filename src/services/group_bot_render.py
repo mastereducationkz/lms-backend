@@ -66,7 +66,7 @@ TEXT = {
         "recordings": "🎥 Записи уроков (нужен вход в LMS):",
         "no_recordings": "Записей уроков пока нет.",
         "weekly": "🧪 Weekly mock:",
-        "weekly_live": "идёт сейчас", "weekly_done": "завершён",
+        "weekly_live": "идёт сейчас", "weekly_done": "завершён", "weekly_open_until": "открыт до {date}",
         "no_weekly": "Ближайший weekly mock для группы пока не опубликован.",
         "help": ("Отвечаю на вопросы по группе:\n"
                  "/schedule — расписание: дни и время\n/lessons — ближайшие уроки с датами\n"
@@ -113,7 +113,7 @@ TEXT = {
         "recordings": "🎥 Сабақ жазбалары (LMS-ке кіру керек):",
         "no_recordings": "Сабақ жазбалары әзірге жоқ.",
         "weekly": "🧪 Weekly mock:",
-        "weekly_live": "қазір жүріп жатыр", "weekly_done": "аяқталды",
+        "weekly_live": "қазір жүріп жатыр", "weekly_done": "аяқталды", "weekly_open_until": "{date} дейін ашық",
         "no_weekly": "Топ үшін жақын weekly mock әлі жарияланбаған.",
         "help": ("Топ бойынша сұрақтарға жауап беремін:\n"
                  "/schedule — сабақ кестесі: күндер мен уақыт\n/lessons — жақын сабақтар\n"
@@ -159,7 +159,7 @@ TEXT = {
         "recordings": "🎥 Lesson recordings (LMS login required):",
         "no_recordings": "There are no lesson recordings yet.",
         "weekly": "🧪 Weekly mock:",
-        "weekly_live": "live now", "weekly_done": "finished",
+        "weekly_live": "live now", "weekly_done": "finished", "weekly_open_until": "open until {date}",
         "no_weekly": "The group's next weekly mock has not been published yet.",
         "help": ("I answer questions about this group:\n"
                  "/schedule — schedule: days and times\n/lessons — upcoming lesson dates\n"
@@ -456,6 +456,9 @@ def weekly_answer(group, tests: Sequence, now: datetime, lang: str) -> str:
     for test in [test for test in tests if test not in finished] + finished:
         if test in finished:
             status = t(lang, "weekly_done")
+        elif test.start_datetime <= now and test.end_datetime is not None:
+            # A set stays open for a week; "until when" is what a student needs.
+            status = t(lang, "weekly_open_until", date=deadline_label(test.end_datetime, now, lang))
         elif test.start_datetime <= now:
             status = t(lang, "weekly_live")
         else:
