@@ -1603,9 +1603,11 @@ def get_event_participants(
     # 4. Fetch existing attendance records from Attendance (single source of truth)
     student_ids = [s.id for s in students]
     att_map = AttendanceService.get_attendance_map_for_events(db, [event_id], student_ids)
-    # (user_id, event_id) -> {status, score, activity_score}
+    # (user_id, event_id) -> {status, score, activity_score, excused, excuse_note}
 
     # 5. Build results
+    from src.services.attendance_status import is_excused
+
     results = []
     for s in students:
         att = att_map.get((s.id, event_id))
@@ -1615,6 +1617,13 @@ def get_event_participants(
             attendance_status=attendance_status_to_ui(att["status"] if att else None),
             activity_score=(att["activity_score"] if att else None),
             last_updated=None,
+            # Читается тем же экраном, который её и ставит. Флаг проводится через
+            # ``is_excused``, а не отдаётся сырым: инвариант «уважительная только на
+            # пропуске» защищён на записи в LMS, но в эту таблицу пишет ещё и CRM, и
+            # строка excused=true при статусе present — рассинхрон, который читатель
+            # обязан считать обычным присутствием.
+            excused=is_excused(att["status"], att["excused"]) if att else False,
+            excuse_note=(att["excuse_note"] if att else None),
         ))
         
     return results
