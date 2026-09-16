@@ -248,12 +248,23 @@ class AttendanceService:
             record.excused_by_user_id = None
             record.excused_at = None
         elif excused is not None:
-            record.excused = excused
-            record.excuse_note = excuse_note.strip() if (excused and excuse_note) else None
-            record.excused_by_user_id = excused_by_user_id if excused else None
-            record.excused_at = (
-                datetime.now(timezone.utc).replace(tzinfo=None) if excused else None
-            )
+            if excused:
+                new_note = excuse_note.strip() if excuse_note else None
+                # Авторство переписывается только когда уважительность действительно
+                # меняется: строка в неё переходит или переписана причина. Сетка сохраняет
+                # колонку целиком, поэтому нетронутая уважительная строка приезжает сюда
+                # при каждой правке соседней ячейки — безусловная простановка отдавала бы
+                # чужую отметку последнему, кто открыл экран, и сдвигала бы дату.
+                if not record.excused or new_note != record.excuse_note:
+                    record.excused_by_user_id = excused_by_user_id
+                    record.excused_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                record.excused = True
+                record.excuse_note = new_note
+            else:
+                record.excused = False
+                record.excuse_note = None
+                record.excused_by_user_id = None
+                record.excused_at = None
 
         if flush:
             db.flush()
