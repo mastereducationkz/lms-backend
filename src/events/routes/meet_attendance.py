@@ -25,7 +25,7 @@ from src.schemas.models import (
     MeetParticipant,
     UserInDB,
 )
-from src.services import meet_presence, meet_talk, recordings_status, talk_settings
+from src.services import meet_presence, meet_talk, recording_progress, recordings_status, talk_settings
 from src.utils.utc_json import utc_z
 
 router = APIRouter()
@@ -258,6 +258,7 @@ def list_lesson_records(
     records, batch = meet_presence.records_with_batch(db, events, now)
     talk_on = talk_settings.enabled(db)
     talk = meet_talk.summaries(db, events, records, batch, now) if talk_on else {}
+    recordings = recording_progress.summaries(db, events, now)
     items = []
     for record in records:
         teacher = record.get("teacher")
@@ -280,6 +281,7 @@ def list_lesson_records(
             "reviewed": record.get("reviewed", 0),
             "flags": record.get("flags") or [],
             "talk": talk.get(record["event_id"]),
+            "recording": recordings.get(record["event_id"]),
         })
     return {"items": items, "from": utc_z(date_from), "to": utc_z(date_to),
             "review_options": meet_presence.review_options(), "talk_enabled": talk_on,
