@@ -1450,7 +1450,11 @@ def get_group_full_attendance_matrix(
             lesson_data[str(idx + 1)] = {
                 "event_id": event.id,
                 "attendance_status": status,
-                "activity_score": activity_score
+                "activity_score": activity_score,
+                # Уважительность — надстройка над «Не был», а не новый статус: клиент,
+                # который про эти поля не знает, продолжает рисовать обычный пропуск.
+                "excused": att_data["excused"] if att_data else False,
+                "excuse_note": att_data["excuse_note"] if att_data else None,
             }
             
         student_rows.append({

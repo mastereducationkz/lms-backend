@@ -467,3 +467,69 @@ def test_the_grid_response_carries_the_excuse(db, event_and_student, marking_tea
     assert cells, "урок не попал в сетку — проверьте week_number фикстуры"
     assert cells[0]["excused"] is True
     assert cells[0]["excuse_note"] == "соревнования"
+
+
+def test_the_attendance_matrix_carries_the_excuse(db, event_and_student, marking_teacher, teacher_group):
+    """`/curator/full-attendance/{group_id}` (`get_group_full_attendance_matrix`) is the
+    matrix the mobile teacher attendance screen reopens — `useAttendanceEditor.ts` reads its
+    per-cell `attendance_status` to seed the editor. It builds its own cell dict from the
+    same `AttendanceService.get_attendance_map_for_events` map the grid uses, but — unlike
+    the grid — never carried `excused`/`excuse_note` onto that cell, so a teacher's reason
+    was silently dropped the moment this screen reopened.
+
+    The function is plain `def`, not async, so it's called directly, no asyncio.run needed.
+    Like the grid, it authorises a teacher caller on `group.teacher_id == current_user.id`,
+    which `teacher_group`/`marking_teacher` already satisfy. It also needs the same two rows
+    the grid test added by hand: an `EventGroup` linking the event to the group (events are
+    found by joining EventGroup/EventCourse, not by event.teacher_id) and a `GroupStudent`
+    membership row (student_ids come from GroupStudent).
+
+    A second student with no attendance row at all is added to prove the *other* half of
+    the invariant: an unmarked cell must default to `excused: False, excuse_note: None`
+    rather than leaving the keys off or defaulting to None/None — the grid's own test never
+    exercised this default, so it stays unverified twice if skipped here too.
+    """
+    from src.courses.models import GroupStudent
+    from src.schemas.models import EventGroup, UserInDB
+    from src.gamification.routes.leaderboard import get_group_full_attendance_matrix
+
+    event_id, excused_user_id = event_and_student
+    db.add(EventGroup(event_id=event_id, group_id=teacher_group.id))
+    db.add(GroupStudent(group_id=teacher_group.id, student_id=excused_user_id))
+
+    unmarked_student = UserInDB(
+        name="Тест Немаркированный", email=f"exc-um-{datetime.now().timestamp()}@test.local",
+        hashed_password="x", role="student",
+    )
+    db.add(unmarked_student)
+    db.flush()
+    db.add(GroupStudent(group_id=teacher_group.id, student_id=unmarked_student.id))
+    db.flush()
+
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=excused_user_id, status="absent",
+        excused=True, excuse_note="соревнования",
+    )
+    db.flush()
+
+    payload = get_group_full_attendance_matrix(
+        teacher_group.id, current_user=marking_teacher, db=db,
+    )
+
+    rows_by_student = {row["student_id"]: row for row in payload["students"]}
+
+    excused_cells = [
+        cell for cell in rows_by_student[excused_user_id]["lessons"].values()
+        if cell["event_id"] == event_id
+    ]
+    assert excused_cells, "урок не попал в матрицу"
+    assert excused_cells[0]["excused"] is True
+    assert excused_cells[0]["excuse_note"] == "соревнования"
+
+    unmarked_cells = [
+        cell for cell in rows_by_student[unmarked_student.id]["lessons"].values()
+        if cell["event_id"] == event_id
+    ]
+    assert unmarked_cells, "урок не попал в матрицу"
+    assert unmarked_cells[0]["excused"] is False
+    assert unmarked_cells[0]["excuse_note"] is None
