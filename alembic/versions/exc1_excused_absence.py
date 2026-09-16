@@ -1,7 +1,7 @@
 """attendances: уважительный пропуск — флаг, причина, кто и когда
 
 Revision ID: exc1_excused_absence
-Revises: rec1_lesson_recordings
+Revises: ma9_fix_cancelled_attendance
 Create Date: 2026-09-16
 
 Написано руками, а не автогенерацией: autogenerate на этом проекте стабильно вытаскивает
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 
 revision = "exc1_excused_absence"
-down_revision = "rec1_lesson_recordings"
+down_revision = "ma9_fix_cancelled_attendance"
 branch_labels = None
 depends_on = None
 
