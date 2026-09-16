@@ -559,6 +559,31 @@ def test_report_counts_excused_absences_separately(db, event_and_student, teache
     assert section["absences"][0]["excuse_note"] == "болел"
 
 
+def test_report_counts_an_excused_absence_stored_under_a_synonym_status(
+    db, event_and_student, teacher_group
+):
+    """``absent_excused`` is computed via ``is_excused``, not ``a.status == "absent"``: a
+    row can carry any of the absent-equivalent raw statuses (``missed``, ``no``, ``0``,
+    e.g. from a CRM import), and the count must not silently miss it just because the
+    literal spelling differs from the one the surrounding filters happen to use."""
+    from src.courses.models import GroupStudent
+    from src.reports.services import _attendance_section
+    from src.schemas.models import EventGroup
+
+    event_id, user_id = event_and_student
+    db.add(EventGroup(event_id=event_id, group_id=teacher_group.id))
+    db.add(GroupStudent(group_id=teacher_group.id, student_id=user_id))
+    db.flush()
+
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="missed",
+        excused=True, excuse_note="болел",
+    )
+    db.flush()
+    section = _attendance_section(db, user_id)
+    assert section["absent_excused"] == 1
+
+
 # --- сохранение, которое про уважительность не знает ---------------------------------------
 #
 # Оба пишущих контракта объявляют ``excused`` тристабильным (``None`` — «не сообщаю»).

@@ -31,6 +31,7 @@ from src.exams.models import BluebookResult, ExamResult
 from src.gamification.models import DailyQuestionCompletion
 from src.auth.models import PointHistory
 from src.assignments.models import AssignmentLinkedLesson
+from src.services.attendance_status import is_excused
 
 
 def _iso(value) -> Optional[str]:
@@ -253,7 +254,10 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
     absent = sum(1 for _, a in marked if a.status == "absent")
     # Разрез, а не вычет: «absent» остаётся полным числом пропусков. Уважительный пропуск
     # считается пропуском — это принятое решение, и отчёт не имеет права его пересматривать.
-    absent_excused = sum(1 for _, a in marked if a.status == "absent" and a.excused)
+    # Проведено через ``is_excused``, а не через сырой ``a.status == "absent" and a.excused``:
+    # верно оно было только потому, что фильтры вокруг используют тот же строковый литерал,
+    # а это совпадение обязано быть явным, а не молчаливым.
+    absent_excused = sum(1 for _, a in marked if is_excused(a.status, a.excused))
     total = len(marked)
     return {
         "marked_total": total,
