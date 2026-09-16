@@ -134,6 +134,11 @@ class AttendanceRecord(BaseModel):
     student_id: int
     status: str
     activity_score: Optional[float] = None
+    #: Пропуск по уважительной причине. Дефолт false — старый клиент, который об этом поле
+    #: не знает, шлёт обычный пропуск, ровно как раньше.
+    excused: bool = False
+    #: Свободный текст; обязателен, когда стоит ``excused``. Роут отвечает 422, если пусто.
+    excuse_note: Optional[str] = None
 
 
 class AttendanceBulkUpdateSchema(BaseModel):

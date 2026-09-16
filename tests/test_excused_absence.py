@@ -206,3 +206,102 @@ def test_the_map_carries_the_excuse(db, event_and_student):
     m = AttendanceService.get_attendance_map_for_events(db, [event_id], [user_id])
     assert m[(user_id, event_id)]["excused"] is True
     assert m[(user_id, event_id)]["excuse_note"] == "семейные"
+
+
+from fastapi import HTTPException
+
+from src.courses.models import Group
+from src.events.models import EventGroup
+from src.events.routes.events import update_event_attendance
+from src.events.schemas import AttendanceBulkUpdateSchema, AttendanceRecord
+
+
+@pytest.fixture()
+def marking_teacher(db, event_and_student):
+    """A teacher that both `check_event_access` and `can_mark_event_attendance` accept for
+    the event from `event_and_student`.
+
+    `can_mark_event_attendance` skips straight to an `event.teacher_id` equality check once
+    that column is set — and `event_and_student` sets it, to its own (unrelated) teacher — so
+    the group/EventGroup path it otherwise falls back to never runs unless that column is
+    cleared here. Clearing it also keeps `check_event_access` passing via the same
+    group-ownership route, since both checks read the same `EventGroup`/`Group` rows.
+    """
+    from src.schemas.models import UserInDB
+
+    event_id, _ = event_and_student
+    teacher = UserInDB(
+        name="Замещающий Учитель", email=f"exc-mt-{datetime.now().timestamp()}@test.local",
+        hashed_password="x", role="teacher",
+    )
+    db.add(teacher)
+    db.flush()
+
+    group = Group(name="Excused-absence marking group", teacher_id=teacher.id)
+    db.add(group)
+    db.flush()
+    db.add(EventGroup(event_id=event_id, group_id=group.id))
+
+    event = db.query(Event).filter(Event.id == event_id).first()
+    event.teacher_id = None
+    db.flush()
+
+    return teacher
+
+
+def test_event_endpoint_stores_the_excuse(db, event_and_student, marking_teacher):
+    event_id, user_id = event_and_student
+    update_event_attendance(
+        event_id,
+        AttendanceBulkUpdateSchema(
+            attendance=[
+                AttendanceRecord(
+                    student_id=user_id, status="missed",
+                    excused=True, excuse_note="был на олимпиаде",
+                )
+            ]
+        ),
+        db,
+        marking_teacher,
+    )
+    row = AttendanceService.get_by_event_and_user(db, event_id, user_id)
+    assert row.status == "absent"
+    assert row.excused is True
+    assert row.excuse_note == "был на олимпиаде"
+    assert row.excused_by_user_id == marking_teacher.id
+
+
+def test_event_endpoint_refuses_an_excuse_without_a_note(db, event_and_student, marking_teacher):
+    event_id, user_id = event_and_student
+    with pytest.raises(HTTPException) as exc:
+        update_event_attendance(
+            event_id,
+            AttendanceBulkUpdateSchema(
+                attendance=[
+                    AttendanceRecord(student_id=user_id, status="missed", excused=True)
+                ]
+            ),
+            db,
+            marking_teacher,
+        )
+    assert exc.value.status_code == 422
+    assert "причин" in exc.value.detail.lower()
+
+
+def test_event_endpoint_refuses_an_excused_present(db, event_and_student, marking_teacher):
+    event_id, user_id = event_and_student
+    with pytest.raises(HTTPException) as exc:
+        update_event_attendance(
+            event_id,
+            AttendanceBulkUpdateSchema(
+                attendance=[
+                    AttendanceRecord(
+                        student_id=user_id, status="attended",
+                        excused=True, excuse_note="болел",
+                    )
+                ]
+            ),
+            db,
+            marking_teacher,
+        )
+    assert exc.value.status_code == 422

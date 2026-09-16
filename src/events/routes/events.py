@@ -1665,15 +1665,34 @@ def update_event_attendance(
         raise HTTPException(status_code=400, detail=future_reason)
 
     # 2. Bulk upsert via AttendanceService (single source of truth)
-    updates = [
-        {
-            "user_id": record.student_id,
-            "status": ep_status_to_attendance_status(record.status),
-            "score": 1 if record.status in ("attended", "late") else 0,
-            "activity_score": record.activity_score,
-        }
-        for record in data.attendance
-    ]
+    from src.services.attendance_status import validate_excused
+
+    updates = []
+    for record in data.attendance:
+        status = ep_status_to_attendance_status(record.status)
+        # Проверяем до записи и на весь батч сразу: половина сохранённой колонки хуже, чем
+        # честный отказ. Клиент (сетка, мобильное, замены) обязан спросить причину до
+        # отправки, так что сюда доходит только рассинхрон версий или обход интерфейса.
+        try:
+            validate_excused(status, record.excused, record.excuse_note)
+        except ValueError as err:
+            detail = (
+                "Уважительный пропуск требует причину"
+                if str(err) == "excused_requires_note"
+                else "Уважительной может быть только отметка о пропуске"
+            )
+            raise HTTPException(status_code=422, detail=detail)
+        updates.append(
+            {
+                "user_id": record.student_id,
+                "status": status,
+                "score": 1 if record.status in ("attended", "late") else 0,
+                "activity_score": record.activity_score,
+                "excused": record.excused,
+                "excuse_note": record.excuse_note,
+                "excused_by_user_id": current_user.id if record.excused else None,
+            }
+        )
     AttendanceService.bulk_upsert_for_event(db, event_id, updates)
     db.commit()
     return {"message": "Attendance updated successfully"}
