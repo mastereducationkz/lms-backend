@@ -297,3 +297,113 @@ def test_excluded_slots_survive_a_save_that_keeps_the_days_and_reset_when_they_c
 
     _generate(world, start_date=start, lessons_count=4, items=[MIXED[0]])
     assert not world["group"].schedule_config.get("excluded_slot_keys")
+
+
+# ── (e) the save recomputes «Завершена» in the same request ─────────────────────────
+
+
+@pytest.mark.parametrize("was_over, lessons_count, expected", [
+    (False, 3, True),    # the count is now met by three lessons taught long ago: finished
+    (True, 6, False),    # three more lessons are needed: the group is running again
+])
+def test_generate_recomputes_is_over(world, was_over, lessons_count, expected):
+    from src.services.group_completion_service import compute_is_over
+
+    db, group, monday = world["db"], world["group"], world["monday"]
+    start = monday - timedelta(weeks=10)
+    group.schedule_config = {
+        "start_date": start.isoformat(), "weeks_count": 12, "lessons_count": 5,
+        "schedule_items": [{"day_of_week": MON, "time_of_day": "18:00", "duration_minutes": 60}],
+    }
+    group.is_over = was_over
+    for week in (0, 1, 2):  # taught eight to ten weeks ago; the grace Wednesday is long past
+        _lesson(world, _utc_naive(start + timedelta(weeks=week), 18))
+    db.flush()
+
+    _generate(world, start_date=start, lessons_count=lessons_count,
+              items=[{"day_of_week": MON, "time_of_day": "18:00", "duration_minutes": 60}])
+
+    bounds = [(e.start_datetime, e.end_datetime) for e in _active(world)]
+    assert compute_is_over(group.schedule_config, bounds) is expected
+    assert group.is_over is expected
+
+
+# ── (f) the request is validated before anything is written ─────────────────────────
+
+
+@pytest.fixture
+def api(world):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.config import get_db
+    from src.gamification.routes.leaderboard import router
+    from src.routes.auth import get_current_user_dependency
+
+    app = FastAPI()
+    app.include_router(router, prefix="/leaderboard")
+    app.dependency_overrides[get_db] = lambda: world["db"]
+    app.dependency_overrides[get_current_user_dependency] = lambda: world["admin"]
+    return TestClient(app)
+
+
+def _body(world, **overrides):
+    body = {
+        "group_id": world["group"].id,
+        "start_date": (world["monday"] + timedelta(days=14)).isoformat(),
+        "schedule_items": [{"day_of_week": MON, "time_of_day": "18:00", "duration_minutes": 60}],
+        "lessons_count": 2,
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.parametrize("overrides", [
+    {"schedule_items": [{"day_of_week": 7, "time_of_day": "18:00"}]},
+    {"schedule_items": [{"day_of_week": -1, "time_of_day": "18:00"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "24:00"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "18:60"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "1800"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "18:00:00"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": ""}]},
+    {"schedule_items": []},
+    {"lessons_count": 0},
+    {"lessons_count": 501},
+    {"weeks_count": 0},
+    {"weeks_count": 53},
+], ids=[
+    "day_7", "day_negative", "hour_24", "minute_60", "no_colon", "seconds", "empty_time",
+    "no_items", "lessons_0", "lessons_501", "weeks_0", "weeks_53",
+])
+def test_an_invalid_generate_request_is_a_422_and_writes_nothing(world, api, overrides):
+    response = api.post("/leaderboard/curator/schedule/generate", json=_body(world, **overrides))
+
+    assert response.status_code == 422, response.text
+    assert _active(world) == []
+    assert world["group"].schedule_config in (None, {})
+
+
+def test_a_valid_generate_request_still_goes_through(world, api):
+    body = _body(world, weeks_count=52, schedule_items=[
+        {"day_of_week": MON, "time_of_day": "00:00", "duration_minutes": 60},
+        {"day_of_week": 6, "time_of_day": "23:59"},
+    ])
+
+    response = api.post("/leaderboard/curator/schedule/generate", json=body)
+
+    assert response.status_code == 200, response.text
+    assert len(_active(world)) == 2
+    assert [(i["day_of_week"], i["time_of_day"]) for i in world["group"].schedule_config["schedule_items"]] == [
+        (MON, "00:00"), (6, "23:59"),
+    ]
+
+
+def test_the_largest_counts_are_accepted():
+    from src.gamification.routes.leaderboard import ScheduleGenerationSchema
+
+    data = ScheduleGenerationSchema(
+        group_id=1, start_date=date(2026, 9, 21), lessons_count=500, weeks_count=52,
+        schedule_items=[{"day_of_week": 6, "time_of_day": "23:59"}],
+    )
+
+    assert (data.lessons_count, data.weeks_count) == (500, 52)

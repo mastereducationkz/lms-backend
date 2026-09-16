@@ -2144,8 +2144,9 @@ def update_attendance(
         return {"status": "success", "mode": "legacy"}
 
 class ScheduleItem(BaseModel):
-    day_of_week: int # 0=Mon, ... 6=Sun
-    time_of_day: str # "18:00"
+    day_of_week: int = Field(..., ge=0, le=6)  # 0=Mon, ... 6=Sun
+    #: "HH:MM", 00:00–23:59. Anything else used to be stored as typed and read back as 19:00.
+    time_of_day: str = Field(..., pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
     #: How long this day's lessons run. Omitted means «what this day already has» (see
     #: `_resolve_item_minutes`), so an old cached client cannot flatten a group to hours.
     duration_minutes: Optional[int] = Field(None, ge=15, le=300)
@@ -2153,9 +2154,10 @@ class ScheduleItem(BaseModel):
 class ScheduleGenerationSchema(BaseModel):
     group_id: int
     start_date: date
-    schedule_items: List[ScheduleItem]
-    weeks_count: int = 12
-    lessons_count: Optional[int] = None
+    #: At least one day: the week limit below divides by how many there are.
+    schedule_items: List[ScheduleItem] = Field(..., min_length=1)
+    weeks_count: int = Field(12, ge=1, le=52)
+    lessons_count: Optional[int] = Field(None, ge=1, le=500)
 
 class GroupScheduleItemResponse(BaseModel):
     day_of_week: int
@@ -2275,6 +2277,12 @@ def generate_schedule(
 
     # Save config for future use
     group.schedule_config = new_cfg
+    # «Завершена» follows the lessons this save left behind — a count now met with nothing
+    # ahead closes the group (after its grace Wednesday), new lessons re-open it — in the same
+    # transaction, as the CRM's save does, instead of waiting for an unrelated page to run it.
+    from src.services.group_completion_service import sync_groups_over_status
+
+    sync_groups_over_status(db, [group.id], commit=False)
     db.commit()
     
     return {"message": f"Schedule generated successfully. Created {lessons_created} individual lessons."}
