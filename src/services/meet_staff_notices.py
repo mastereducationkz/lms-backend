@@ -234,12 +234,24 @@ def _utc(value: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def lesson_calls(meet, lesson: dict) -> list:
+    """The room's calls that overlap the lesson (from ``EARLY_VISIT`` before it to its end).
+
+    Overlap, not "started near the start": on 16.09 students opened Abzal's 20:30 room at 19:52
+    and that one call ran the whole lesson, recording included. Judged by its start time it was
+    left out, and the summary called a taught, recorded lesson empty.
+    """
+    calls = _pages(meet.conferenceRecords().list, "conferenceRecords",
+                   filter=f'space.meeting_code="{lesson["code"]}"')
+    return [c for c in calls
+            if (_utc(c.get("startTime")) or datetime.max) <= lesson["end"]
+            and (_utc(c.get("endTime")) or datetime.max) >= lesson["start"] - EARLY_VISIT]
+
+
 def _anyone_came(meet, lesson: dict) -> bool:
     if lesson["id"] in _VISITED:
         return True
-    calls = _pages(meet.conferenceRecords().list, "conferenceRecords",
-                   filter=f'space.meeting_code="{lesson["code"]}"')
-    came = any((_utc(c.get("startTime")) or datetime.min) >= lesson["start"] - EARLY_VISIT for c in calls)
+    came = bool(lesson_calls(meet, lesson))
     if came:
         _VISITED.add(lesson["id"])
     return came

@@ -55,7 +55,8 @@ class FakeMeet:
             return _Call({"conferenceRecords": [{"name": n, "space": c["space"]}
                                                 for n, c in self.calls.items() if c["live"]]})
         assert filter == f'space.meeting_code="{CODE}"'
-        return _Call({"conferenceRecords": [{"name": n, "space": c["space"], "startTime": _z(c["start"])}
+        return _Call({"conferenceRecords": [{"name": n, "space": c["space"], "startTime": _z(c["start"]),
+                                             **({"endTime": _z(c["end"])} if c.get("end") else {})}
                                             for n, c in self.calls.items()]})
 
 
@@ -225,6 +226,21 @@ def test_a_room_people_visited_and_left_is_not_empty(lesson):
     assert lesson["posted"] == []
 
 
+def test_a_call_opened_long_before_the_lesson_and_left_during_it_is_not_an_empty_room(lesson):
+    # 16.09, Abzal's 20:30: students opened the room at 19:52 and that one call ran the lesson.
+    lesson["meet"].calls["conferenceRecords/early"] = {
+        "space": SPACE, "start": START - timedelta(minutes=38), "end": START + timedelta(minutes=5), "live": False}
+    lesson["run"](11)
+    assert lesson["posted"] == []
+
+
+def test_a_call_that_ended_well_before_the_lesson_does_not_count_as_a_visit(lesson):
+    lesson["meet"].calls["conferenceRecords/morning"] = {
+        "space": SPACE, "start": START - timedelta(hours=5), "end": START - timedelta(hours=4), "live": False}
+    lesson["run"](11)
+    assert "В уроке никого нет" in lesson["posted"][0]["text"]
+
+
 def test_a_failed_send_is_retried_under_the_same_key(lesson):
     lesson["teacher_confirmed"]()
     lesson["in_room"](STUDENT, TEACHER)
@@ -293,6 +309,18 @@ def test_the_summary_goes_out_once_at_22_with_what_went_wrong(lesson, world, mon
     assert "❌ <b>Без записи</b>\n• 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла" in text
     assert "⏰ <b>Учитель опоздал</b>\n• 19:00 SAT July 3 - Лайла: Lesson 9 — Жанатбеккызы Лайла, на 7 мин." in text
     assert "Сигналы за день: 🔴 1 (решено 1)" in text
+
+
+def test_the_summary_counts_a_recorded_call_that_opened_long_before_the_lesson(lesson, monkeypatch):
+    lesson["meet"].calls[CALL] = {"space": SPACE, "start": START - timedelta(minutes=38),
+                                  "end": START + timedelta(minutes=67), "live": False}
+    lesson["recording_from"](-3)
+    monkeypatch.setattr(meet_presence, "records", lambda _db, events, now: [])
+
+    assert meet_staff_digest.send_if_due(lesson["db"], _almaty(time(22, 1))) == "sent"
+    text = lesson["posted"][0]["text"]
+    assert "Уроков в Meet: 1 · с записью 1 · без записи 0" in text
+    assert "Никто не заходил" not in text
 
 
 def test_a_day_without_meet_lessons_sends_no_summary(world, monkeypatch):

@@ -22,7 +22,6 @@ from src.schemas.models import Event, LessonRecording, MeetStaffNotice, UserInDB
 from src.services import google_workspace, meet_presence, meet_recordings
 from src.services import group_bot_render as render
 from src.services import meet_staff_notices as notices
-from src.services.meet_room_closer import _pages
 from src.services.operational_groups import event_has_operational_group_clause
 from src.services.telegram_invitations import _held_in_an_lms_meet_room
 
@@ -51,10 +50,7 @@ def day_lessons(db, day: date, now: datetime) -> list:
 
 def call_state(meet, lesson: dict) -> str:
     """``recorded`` | ``no_recording`` | ``no_call`` — what Meet saw for the lesson's room."""
-    calls = [c for c in _pages(meet.conferenceRecords().list, "conferenceRecords",
-                               filter=f'space.meeting_code="{lesson["code"]}"')
-             if lesson["start"] - notices.EARLY_VISIT
-             <= (notices._utc(c.get("startTime")) or datetime.min) <= lesson["end"]]
+    calls = notices.lesson_calls(meet, lesson)
     if not calls:
         return "no_call"
     for call in calls:
