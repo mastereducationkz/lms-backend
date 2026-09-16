@@ -353,6 +353,7 @@ def test_grid_bulk_stores_the_excuse(db, event_and_student, marking_teacher, tea
     assert row.excused is True
     assert row.excuse_note == "болел"
     assert row.score == 0
+    assert row.excused_by_user_id == marking_teacher.id
 
 
 def test_grid_bulk_refuses_an_excuse_without_a_note(db, event_and_student, marking_teacher, teacher_group):
@@ -372,3 +373,46 @@ def test_grid_bulk_refuses_an_excuse_without_a_note(db, event_and_student, marki
             db,
         )
     assert exc.value.status_code == 422
+
+
+def test_grid_bulk_writes_nothing_when_one_row_is_invalid(
+    db, event_and_student, marking_teacher, teacher_group
+):
+    """The grid saves a column at a time, so the whole batch must be validated before any
+    of it is written. Row 1 here is a perfectly valid mark; row 2's excuse is invalid
+    (excused=True with a blank note). The request must 422, and row 1 must never have
+    been written — not even to the session — proving validation is a pre-pass over the
+    whole batch, not a per-row check interleaved with writes."""
+    from src.schemas.models import UserInDB
+
+    event_id, first_user_id = event_and_student
+    second_student = UserInDB(
+        name="Тест Студентов 2", email=f"exc-2-{datetime.now().timestamp()}@test.local",
+        hashed_password="x", role="student",
+    )
+    db.add(second_student)
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc:
+        update_attendance_bulk(
+            BulkAttendanceInputSchema(
+                updates=[
+                    AttendanceInputSchema(
+                        group_id=teacher_group.id, week_number=1, lesson_index=1,
+                        student_id=first_user_id, score=1, status="attended",
+                        event_id=event_id,
+                    ),
+                    AttendanceInputSchema(
+                        group_id=teacher_group.id, week_number=1, lesson_index=2,
+                        student_id=second_student.id, score=0, status="missed",
+                        event_id=event_id, excused=True, excuse_note="  ",
+                    ),
+                ]
+            ),
+            marking_teacher,
+            db,
+        )
+    assert exc.value.status_code == 422
+
+    row = AttendanceService.get_by_event_and_user(db, event_id, first_user_id)
+    assert row is None

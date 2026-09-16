@@ -21,6 +21,7 @@ from src.services.attendance_service import (
     attendance_status_to_ui,
     ep_status_to_attendance_status,
 )
+from src.services.attendance_status import validate_excused
 
 
 def head_teacher_can_access_group(db: Session, head_teacher_user_id: int, group_id: int) -> bool:
@@ -1857,6 +1858,29 @@ def update_attendance_bulk(
     for item in data.updates:
         _reject_individual_cancellation(item.status)
 
+    # Same reasoning, same shape: the grid saves a column at a time, so validating an
+    # excuse only as its row is written can leave earlier rows already handed to
+    # AttendanceService.upsert_for_event (and thus sitting in the session) before a later
+    # row's excuse fails. Validate every event-based row's excuse fields in their own
+    # pass, before the write loop below touches anything. Legacy schedule-based rows
+    # (no event_id) never carried excuse fields, so they're skipped here exactly as the
+    # write loop below skips them.
+    for item in data.updates:
+        if not item.event_id:
+            continue
+        att_status = ep_status_to_attendance_status(item.status)
+        try:
+            validate_excused(att_status, item.excused, item.excuse_note)
+        except ValueError as err:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Уважительный пропуск требует причину"
+                    if str(err) == "excused_requires_note"
+                    else "Уважительной может быть только отметка о пропуске"
+                ),
+            )
+
     from src.services.event_service import EventService
 
     updated_count = 0
@@ -1883,25 +1907,19 @@ def update_attendance_bulk(
                 continue
             score = 1 if item.status in ("attended", "late") else 0
             att_status = ep_status_to_attendance_status(item.status)
-            # Проверяем до любой записи в батче: сетка сохраняет колонку целиком, и
-            # наполовину применённый батч — это экран, который говорит «сохранено» и врёт.
-            from src.services.attendance_status import validate_excused
-
-            try:
-                validate_excused(att_status, item.excused, item.excuse_note)
-            except ValueError as err:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Уважительный пропуск требует причину"
-                        if str(err) == "excused_requires_note"
-                        else "Уважительной может быть только отметка о пропуске"
-                    ),
-                )
+            # Excuse validation for this row already ran in the pre-pass over the whole
+            # batch above, before this write loop started — nothing left to check here.
+            #
             # Reported, never silently dropped: this loop already `continue`s past rows it
             # cannot write, and a grid that says «сохранено» while quietly discarding half a
-            # column is how people stop trusting the screen. Cancelling stays allowed — you
-            # call a lesson off before it happens, not after.
+            # column is how people stop trusting the screen.
+            #
+            # This branch is unreachable at this call site: `_reject_individual_cancellation`,
+            # run over the whole batch above, already 400s any item whose status maps to
+            # "cancelled" before this loop ever runs, so `att_status == "cancelled"` cannot
+            # occur here. The guard is kept only for shape-parity with the events.py
+            # endpoint — insurance if that earlier rejection is ever relaxed, not live
+            # behavior today.
             if att_status != "cancelled":
                 future_reason = AttendanceService.event_is_unmarkable_because_future(
                     db, real_event_id
