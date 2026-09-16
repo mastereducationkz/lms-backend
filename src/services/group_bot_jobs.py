@@ -22,13 +22,14 @@ from src.services import group_bot_pinned, group_bot_pinned_top, group_bot_sched
 
 logger = logging.getLogger(__name__)
 
-# The hello first: the pinned timetable waits for it.
+# The hello first: the pinned timetable waits for it. Keeping the timetable on top goes last — it can
+# wait a minute, while the digest and a last-chance reminder are due at their time.
 JOBS = (
     ("hello", group_bot_hello),
     ("pinned_timetable", group_bot_pinned),
-    ("pinned_on_top", group_bot_pinned_top),
     ("schedule_change", group_bot_schedule_watch),
     ("digest", group_bot_digest),
+    ("pinned_on_top", group_bot_pinned_top),
 )
 
 
