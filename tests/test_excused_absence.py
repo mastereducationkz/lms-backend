@@ -582,6 +582,11 @@ def test_report_counts_an_excused_absence_stored_under_a_synonym_status(
     db.flush()
     section = _attendance_section(db, user_id)
     assert section["absent_excused"] == 1
+    # The two figures must agree: a row stored under an absent synonym is still an absence,
+    # not just an "excused" one — otherwise the PDF renders the self-contradicting
+    # «Пропущено: 0 (из них по уважительной: 1)».
+    assert section["absent"] == 1
+    assert len(section["absences"]) == 1
 
 
 # --- сохранение, которое про уважительность не знает ---------------------------------------
