@@ -10,6 +10,10 @@ The record is **evidence, never a mark** (owner, 2026-09-11). Marks feed CRM bil
 stay the teacher's. What this adds is flags where the two disagree, plus lateness — and one
 safety rule: while an unconfirmed account was in the room, "never joined" is held back,
 because that account may well be the student.
+
+Since 2026-09-16 each student also gets **Meet's verdict** — present, late or absent under the
+rules Meet will one day take the register by (``lesson_clock`` and ``verdict``). It sits beside
+the mark; a disagreement that changes billing asks for attention, and only a person applies it.
 """
 from __future__ import annotations
 
@@ -41,11 +45,18 @@ from src.services.recording_access import watchable_event_clause
 from src.utils.utc_json import utc_z
 
 # The rules approved by the owner, 2026-09-11.
-STUDENT_LATE_AFTER = timedelta(minutes=5)
-STUDENT_LEFT_EARLY_BEFORE = timedelta(minutes=10)
-ABSENT_BUT_IN_ROOM_FOR = timedelta(minutes=10)
 TEACHER_LATE_AFTER = timedelta(minutes=2)
 TEACHER_ENDED_EARLY_BEFORE = timedelta(minutes=5)
+
+# Meet's verdict (owner, 2026-09-16): late after more than 5 minutes, absent under 75% of the
+# lesson actually held. Whole minutes, every rounding in the student's favour — 5:59 late is on
+# time, 44:01 of a 60-minute lesson is the 45 needed. The same clock times the student flags, so
+# a «late» flag and a «late» verdict can never disagree.
+VERDICT_LATE_AFTER_MINUTES = 5
+VERDICT_PRESENT_SHARE = 0.75
+STUDENT_LEFT_EARLY_AFTER_MINUTES = 10
+# Less teaching than this inside the lesson is not a lesson to follow: the timetable decides.
+TEACHER_CLOCK_MIN_TAUGHT = timedelta(minutes=5)
 
 # A room exists days before its lesson, so not every visit is the lesson: 14156 had two
 # morning test calls. Time in the room this far either side of the lesson counts; the rest
@@ -69,7 +80,10 @@ LESSON_CALL_MIN_OVERLAP = timedelta(minutes=5)
 # predates the record, which is not the same as nobody coming.
 GOOGLE_KEEPS = timedelta(days=30)
 
-MISMATCH_CODES = frozenset({"marked_present_not_joined", "marked_absent_was_in_room", "teacher_not_joined"})
+MISMATCH_CODES = frozenset({"marked_present_not_joined", "marked_present_too_short", "marked_absent_was_in_room",
+                            "teacher_not_joined"})
+# Flags read off Meet's verdict. The watch page (accountants) gets no verdicts (owner, 2026-09-16).
+VERDICT_ONLY_CODES = frozenset({"marked_present_too_short"})
 
 # ── reviewing a flag (owner, 2026-09-11) ─────────────────────────────────────────────────
 # A flag looked at by a person, with the reason, stops asking. A reason is required where the
@@ -80,6 +94,8 @@ _TEACHER_TIMING = [("tech", "Технические проблемы"), ("agreed
 REVIEW_REASONS = {
     "marked_present_not_joined": [("excused", "Отпросился"), ("other_device", "С другого аккаунта или устройства"),
                                   ("outside_meet", "Занимался вне Meet")],
+    "marked_present_too_short": [("excused_early", "Отпросился раньше"), ("connection", "Проблемы со связью"),
+                                 ("other_device", "С другого аккаунта или устройства")],
     "marked_absent_was_in_room": [("not_participating", "Был, но не участвовал")],
     "late": _TIMING,
     "left_early": _TIMING,
@@ -89,7 +105,8 @@ REVIEW_REASONS = {
                            ("tech", "Технические проблемы")],
 }
 OTHER_REASON = ("other", "Другое")
-REASON_REQUIRED = frozenset({"marked_present_not_joined", "marked_absent_was_in_room", "teacher_not_joined"})
+REASON_REQUIRED = frozenset({"marked_present_not_joined", "marked_present_too_short", "marked_absent_was_in_room",
+                             "teacher_not_joined"})
 TEACHER_FLAGS = frozenset({"teacher_late", "ended_early", "teacher_not_joined"})
 # A teacher's own flags are cleared by admins and heads, never by the teacher (owner, 2026-09-11).
 TEACHER_FLAG_REVIEWERS = frozenset({"admin", "head_curator", "head_teacher"})
@@ -201,20 +218,80 @@ def time_inside(spans: list, lo: datetime, hi: datetime) -> timedelta:
     return total
 
 
-def student_flags(start: datetime, end: datetime, spans: list, mark: Optional[str], *,
-                  unconfirmed_in_room: bool) -> list:
+def _whole_minutes(delta: timedelta) -> int:
+    return max(0, int(delta.total_seconds() // 60))
+
+
+def lesson_clock(start: datetime, end: datetime, teacher_spans: list) -> dict:
+    """The stretch students are judged by: the timetable, narrowed to the teacher (owner, 2026-09-16).
+
+    A late teacher moves the start and one who ended early moves the end, so nobody is late or
+    absent for the teacher. The time needed is 75% of what is left, in whole minutes rounded down.
+    Minutes after the scheduled end while the teacher still taught count for the students (up to
+    ``LESSON_MARGIN``) but never raise the time needed. A teacher not in the lesson for at least
+    ``TEACHER_CLOCK_MIN_TAUGHT`` — not seen, a room check, an unconfirmed account — leaves the timetable.
+    """
+    taught = [(a, b) for a, b in merge_spans(teacher_spans) if b > start and a < end]
+    follows_teacher = time_inside(taught, start, end) >= TEACHER_CLOCK_MIN_TAUGHT
+    if follows_teacher:
+        lo, hi = max(start, taught[0][0]), min(end, taught[-1][1])
+        until = max(hi, min(taught[-1][1], end + LESSON_MARGIN))
+    else:
+        lo, hi, until = start, end, end
+    held = _whole_minutes(hi - lo)
+    return {"start": lo, "end": hi, "count_until": until, "held_minutes": held,
+            # 0.75 × whole minutes is exact in binary; the epsilon only guards a future share.
+            "required_minutes": int(held * VERDICT_PRESENT_SHARE + 1e-9), "follows_teacher": follows_teacher}
+
+
+def _stays(clock: dict, spans: list) -> list:
+    """The student's merged stretches in the room that reach into the lesson — a room check that
+    ended before the lesson began is not an arrival."""
+    lo, until = clock["start"], clock["count_until"]
+    return [(a, b) for a, b in merge_spans(spans) if b > lo and a < until]
+
+
+def verdict(clock: dict, spans: list, *, unknown_in_room: bool) -> dict:
+    """Meet's verdict on one student: ``present``, ``late`` or ``absent`` — or None, held back.
+
+    Absent beats late. An unconfirmed account in the room can only add time and an earlier
+    arrival, so while one is there «absent» and «late» wait for it and «present» does not; if the
+    teacher was not seen either, that account may be the teacher, the clock is unknown, and
+    nothing is judged. ``attended`` (present or late, None when unknown) is what billing reads.
+    """
+    stays = _stays(clock, spans)
+    lo, until = clock["start"], clock["count_until"]
+    seconds = sum((min(b, until) - max(a, lo)).total_seconds() for a, b in stays)
+    minutes = math.ceil(seconds / 60)
+    late_minutes = _whole_minutes(stays[0][0] - lo) if stays else 0
+    required = clock["required_minutes"]
+    attended = bool(stays) and minutes >= required
+    judged = "absent" if not attended else "late" if late_minutes > VERDICT_LATE_AFTER_MINUTES else "present"
+
+    clock_unknown = unknown_in_room and not clock["follows_teacher"]
+    held_back = clock_unknown or (unknown_in_room and judged != "present")
+    return {"verdict": None if held_back else judged, "held_back": held_back,
+            "attended": None if clock_unknown or (unknown_in_room and not attended) else attended,
+            "minutes": minutes, "required": required, "late_minutes": late_minutes}
+
+
+def student_flags(clock: dict, spans: list, mark: Optional[str], judged: dict) -> list:
+    """Timing on the verdict's clock, and the marks that disagree with it about attending."""
     flags = []
-    if spans:
-        first, last = min(s[0] for s in spans), max(s[1] for s in spans)
-        if first > start + STUDENT_LATE_AFTER:
-            flags.append({"code": "late", "minutes": _minutes(first - start)})
-        if last < end - STUDENT_LEFT_EARLY_BEFORE:
-            flags.append({"code": "left_early", "minutes": _minutes(end - last)})
-    if mark in ("present", "late") and not spans and not unconfirmed_in_room:
-        flags.append({"code": "marked_present_not_joined"})
-    inside = time_inside(spans, start, end)
-    if mark == "absent" and inside >= ABSENT_BUT_IN_ROOM_FOR:
-        flags.append({"code": "marked_absent_was_in_room", "minutes": int(inside.total_seconds() // 60)})
+    stays = _stays(clock, spans)
+    if stays and judged["late_minutes"] > VERDICT_LATE_AFTER_MINUTES:
+        flags.append({"code": "late", "minutes": judged["late_minutes"]})
+    if stays and _whole_minutes(clock["end"] - stays[-1][1]) > STUDENT_LEFT_EARLY_AFTER_MINUTES:
+        flags.append({"code": "left_early", "minutes": _whole_minutes(clock["end"] - stays[-1][1])})
+    # Present versus late is not a disagreement — late counts as present — only attending is.
+    if mark in ("present", "late") and judged["attended"] is False:
+        if stays:
+            flags.append({"code": "marked_present_too_short", "minutes": judged["minutes"],
+                          "required": judged["required"]})
+        else:
+            flags.append({"code": "marked_present_not_joined"})
+    if mark == "absent" and judged["attended"] is True:
+        flags.append({"code": "marked_absent_was_in_room", "minutes": judged["minutes"]})
     return flags
 
 
@@ -416,22 +493,24 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
     marks = batch.marks.get(event.id, {})
     student_ids = _student_ids(event, batch, end)
     unconfirmed = bool(unknown)
+    clock = lesson_clock(start, end, spans_of.get(event.teacher_id, []) if event.teacher_id else [])
 
-    def person(uid: int, role: str, flags: list) -> dict:
+    def person(uid: int, role: str, flags: list, **extra) -> dict:
         user = batch.users.get(uid)
         return {"user_id": uid, "name": user.name if user else f"User {uid}", "role": role,
                 "mark": marks.get(uid), "accounts": accounts_of.get(uid, []),
-                **_presence(spans_of.get(uid, []), start, end), "flags": flags}
+                **_presence(spans_of.get(uid, []), start, end), "flags": flags, **extra}
+
+    def student(uid: int) -> dict:
+        spans = spans_of.get(uid, [])
+        judged = verdict(clock, spans, unknown_in_room=unconfirmed)
+        return person(uid, "student", student_flags(clock, spans, marks.get(uid), judged), verdict=judged)
 
     teacher = None
     if event.teacher_id:
         teacher = person(event.teacher_id, "teacher",
                          teacher_flags(start, end, spans_of.get(event.teacher_id, []), unconfirmed_in_room=unconfirmed))
-    students = sorted(
-        (person(uid, "student", student_flags(start, end, spans_of.get(uid, []), marks.get(uid),
-                                              unconfirmed_in_room=unconfirmed))
-         for uid in student_ids),
-        key=lambda p: p["name"].lower())
+    students = sorted((student(uid) for uid in student_ids), key=lambda p: p["name"].lower())
     others = sorted(
         (person(uid, getattr(batch.users.get(uid), "role", None) or "other", [])
          for uid in spans_of if uid not in student_ids and uid != event.teacher_id),
@@ -477,7 +556,45 @@ def lesson_record(event, batch: _Batch, now: datetime) -> dict:
         "reviewed": sum(1 for f in flags if f.get("review")),
         "review_options": review_options(),
         "candidates": sorted(candidates, key=lambda c: (c["role"] != "teacher", c["name"].lower())),
+        "rules": verdict_rules(),
+        "clock": {"start": utc_z(clock["start"]), "end": utc_z(clock["end"]),
+                  "count_until": utc_z(clock["count_until"]), "held_minutes": clock["held_minutes"],
+                  "required_minutes": clock["required_minutes"], "follows_teacher": clock["follows_teacher"]},
+        "verdict_summary": verdict_summary(students),
     }
+
+
+def verdict_rules() -> dict:
+    """The rules as numbers, for the pages' legend — one source of truth."""
+    return {"late_after_minutes": VERDICT_LATE_AFTER_MINUTES, "present_share": VERDICT_PRESENT_SHARE}
+
+
+def verdict_summary(students: list) -> dict:
+    """A lesson's verdicts counted: by verdict, how many wait on an account, how many students have
+    no mark yet (and how many of those a verdict could fill), and — among marked students Meet can
+    judge — how many marks agree with it about attending."""
+    summary = {"present": 0, "late": 0, "absent": 0, "held_back": 0,
+               "unmarked": 0, "applicable": 0, "compared": 0, "agree": 0}
+    for s in students:
+        judged, mark = s["verdict"], s.get("mark")
+        if judged["held_back"]:
+            summary["held_back"] += 1
+        else:
+            summary[judged["verdict"]] += 1
+        if mark is None:
+            summary["unmarked"] += 1
+            summary["applicable"] += judged["verdict"] is not None
+        elif mark in ("present", "late", "absent") and judged["attended"] is not None:
+            summary["compared"] += 1
+            summary["agree"] += (mark != "absent") == judged["attended"]
+    return summary
+
+
+def compact_verdicts(record: dict) -> list:
+    """Each student's verdict in a few fields — what the list carries for the attendance journal."""
+    return [{"user_id": s["user_id"], **{k: s["verdict"][k] for k in
+                                         ("verdict", "held_back", "minutes", "required", "late_minutes")}}
+            for s in record.get("students") or []]
 
 
 def records(db, events: list, now: Optional[datetime] = None) -> list:
@@ -523,7 +640,8 @@ def public_participants(record: dict) -> dict:
                 "review": {"reason_label": review.get("reason_label"), "text": review.get("text")} if review else None}
 
     def person(p: dict) -> dict:
-        return {"name": p["name"], "mark": p.get("mark"), **presence(p), "flags": [flag(f) for f in p.get("flags", [])]}
+        return {"name": p["name"], "mark": p.get("mark"), **presence(p),
+                "flags": [flag(f) for f in p.get("flags", []) if f["code"] not in VERDICT_ONLY_CODES]}
 
     if record.get("state") != "ready":
         return {

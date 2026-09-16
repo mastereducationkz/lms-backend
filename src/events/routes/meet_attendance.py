@@ -25,7 +25,7 @@ from src.schemas.models import (
     MeetParticipant,
     UserInDB,
 )
-from src.services import meet_presence, meet_talk, recordings_status, talk_settings
+from src.services import meet_presence, meet_talk, recording_progress, recordings_status, talk_settings
 from src.utils.utc_json import utc_z
 
 router = APIRouter()
@@ -135,6 +135,14 @@ def _can_mark(db, user, event: Event) -> bool:
     return False
 
 
+def _write_mark(db, event: Event, user_id: int, status: str) -> None:
+    """The journal's own write: the same row, the same status vocabulary, the same billing."""
+    from src.services.attendance_service import AttendanceService
+
+    AttendanceService.upsert_for_event(db=db, event_id=event.id, user_id=user_id, status=status,
+                                       score=0 if status == "absent" else 1)
+
+
 def _flag_on(record: dict, user_id: int, code: str) -> Optional[dict]:
     return next((f for f in record.get("flags") or [] if f["user_id"] == user_id and f["code"] == code), None)
 
@@ -162,19 +170,17 @@ def review_flag(
     _may_review(current_user, body.code)
 
     if body.fix_mark:
-        if body.code not in ("marked_present_not_joined", "marked_absent_was_in_room"):
+        if body.code not in ("marked_present_not_joined", "marked_present_too_short", "marked_absent_was_in_room"):
             raise HTTPException(status_code=422, detail="Only a mark that contradicts the room can be corrected here")
         if not _can_mark(db, current_user, event):
             raise HTTPException(status_code=403, detail="You cannot change marks on this lesson")
-        from src.services.attendance_service import AttendanceService
 
-        if body.code == "marked_present_not_joined":
-            status, score = "absent", 0
-        else:
+        if body.code == "marked_absent_was_in_room":
             late = _flag_on(record, body.user_id, "late")
-            status, score = ("late" if late else "present"), 1
-        # The journal's own write: the same row, the same status vocabulary, the same billing.
-        AttendanceService.upsert_for_event(db=db, event_id=event.id, user_id=body.user_id, status=status, score=score)
+            status = "late" if late else "present"
+        else:
+            status = "absent"
+        _write_mark(db, event, body.user_id, status)
         db.commit()
         return meet_presence.lesson(db, event)
 
@@ -212,6 +218,40 @@ def restore_flag(
     event = _visible_lesson(db, current_user, event_id)
     _may_review(current_user, code)
     db.query(MeetFlagReview).filter_by(event_id=event.id, user_id=user_id, code=code).delete()
+    db.commit()
+    return meet_presence.lesson(db, event)
+
+
+class ApplyVerdictsIn(BaseModel):
+    """Which unmarked students take Meet's verdict; none named means every one that has a verdict."""
+    user_ids: Optional[list[int]] = Field(None, max_length=500)
+
+
+@router.post("/lessons/{event_id}/apply-verdicts")
+def apply_verdicts(
+    event_id: int,
+    body: ApplyVerdictsIn,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_user_dependency),
+):
+    """Take the register from Meet for the students nobody has marked (owner, 2026-09-16).
+
+    A person presses it; nothing is written by itself. Only students without a mark, and only
+    those with a verdict — one held back by an unconfirmed account waits. A teacher's mark is
+    never overwritten here: a disagreement is answered flag by flag. Marking rights are the
+    journal's. Returns the lesson's record as it now reads."""
+    event = _visible_lesson(db, current_user, event_id)
+    record = meet_presence.lesson(db, event)
+    if record["state"] != "ready":
+        raise HTTPException(status_code=409, detail="This lesson's Meet record is not complete yet")
+    if not _can_mark(db, current_user, event):
+        raise HTTPException(status_code=403, detail="You cannot change marks on this lesson")
+
+    wanted = set(body.user_ids) if body.user_ids is not None else None
+    for student in record["students"]:
+        judged = student["verdict"]["verdict"]
+        if student["mark"] is None and judged is not None and (wanted is None or student["user_id"] in wanted):
+            _write_mark(db, event, student["user_id"], judged)
     db.commit()
     return meet_presence.lesson(db, event)
 
@@ -258,6 +298,7 @@ def list_lesson_records(
     records, batch = meet_presence.records_with_batch(db, events, now)
     talk_on = talk_settings.enabled(db)
     talk = meet_talk.summaries(db, events, records, batch, now) if talk_on else {}
+    recordings = recording_progress.summaries(db, events, now)
     items = []
     for record in records:
         teacher = record.get("teacher")
@@ -279,9 +320,13 @@ def list_lesson_records(
             "mismatches": record.get("mismatches", 0),
             "reviewed": record.get("reviewed", 0),
             "flags": record.get("flags") or [],
+            "verdict_summary": record.get("verdict_summary"),
+            "verdicts": meet_presence.compact_verdicts(record),
             "talk": talk.get(record["event_id"]),
+            "recording": recordings.get(record["event_id"]),
         })
     return {"items": items, "from": utc_z(date_from), "to": utc_z(date_to),
             "review_options": meet_presence.review_options(), "talk_enabled": talk_on,
+            "verdict_rules": meet_presence.verdict_rules(),
             # What the check with Google Meet is doing, for lessons still waiting on it.
             "sync": recordings_status.snapshot(db, now)}

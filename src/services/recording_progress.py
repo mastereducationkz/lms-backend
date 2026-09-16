@@ -23,6 +23,7 @@ from typing import Optional
 
 from src.schemas.models import LessonRecording, UserInDB
 from src.services import recording_alerts, recording_ingest, recordings_status
+from src.services.recording_access import public_status
 from src.utils.utc_json import utc_z
 
 PHASES = ("downloading", "packaging", "preview", "uploading")
@@ -138,23 +139,77 @@ def of_recording(ctx: Context, recording, event=None, *, staff: bool = False) ->
                      position=ctx.position(recording.id), queue_length=len(ctx.line))
 
 
+def _may_be_recorded(event) -> bool:
+    """A lesson this pipeline records, as far as the lesson alone can say: a class with a Meet link and a teacher."""
+    return event.event_type == "class" and bool(event.meeting_url) and bool(event.teacher_id)
+
+
+def _waiting_stage(event, now: datetime) -> Optional[str]:
+    """What a recorded lesson without a recording yet waits for — None once «no recording» is true.
+
+    Until the missing-recording sweep's grace runs out, «no recording» is not yet true.
+    """
+    end = event.end_datetime or event.start_datetime + timedelta(hours=1)
+    if now < event.start_datetime:
+        return None
+    if now < end:
+        return "lesson_running"
+    if now < end + timedelta(hours=recording_alerts.GRACE_HOURS):
+        return "waiting_for_google"
+    return None
+
+
 def without_recording(db, ctx: Context, event, *, staff: bool = False) -> tuple:
     """``("waiting", progress)`` while a recording can still come for ``event``; ``("missing", None)`` once not.
 
     Only lessons this pipeline records — a Meet link and a teacher with a Workspace account, the rule
-    the missing-recording sweep uses. Until that sweep's grace runs out, «no recording» is not yet true.
+    the missing-recording sweep uses.
     """
-    if event.event_type != "class" or not event.meeting_url or not event.teacher_id:
+    if not _may_be_recorded(event):
         return "missing", None
     if not db.query(UserInDB.workspace_email).filter(UserInDB.id == event.teacher_id).scalar():
         return "missing", None
-    end = event.end_datetime or event.start_datetime + timedelta(hours=1)
-    if ctx.now < event.start_datetime:
+    stage = _waiting_stage(event, ctx.now)
+    if stage is None:
         return "missing", None
-    if ctx.now < end:
+    end = event.end_datetime or event.start_datetime + timedelta(hours=1)
+    if stage == "lesson_running":
         return "waiting", _progress(ctx, "lesson_running", lesson_ended_at=utc_z(end))
     missing_after = end + timedelta(hours=recording_alerts.GRACE_HOURS)
-    if ctx.now < missing_after:
-        return "waiting", _progress(ctx, "waiting_for_google", lesson_ended_at=utc_z(end),
-                                    missing_after=utc_z(missing_after) if staff else None)
-    return "missing", None
+    return "waiting", _progress(ctx, "waiting_for_google", lesson_ended_at=utc_z(end),
+                                missing_after=utc_z(missing_after) if staff else None)
+
+
+def summaries(db, events: list, now: Optional[datetime] = None) -> dict:
+    """Each lesson's recording in two words — ``{event_id: {"status", "duration_seconds"}}`` — for a list of hundreds.
+
+    The words of ``GET /events/{id}/recording``: ready | pending | failed | removed for a recording row,
+    waiting | missing without one (``without_recording``'s rule). At most two queries for the whole
+    list, and no progress or signed links: a page polls ``GET /recordings/status`` for the few still on
+    their way, and the player fetches its own link for its viewer (2026-09-16, Meet attendance).
+    """
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    ids = [e.id for e in events]
+    if not ids:
+        return {}
+    rows = {row.event_id: row for row in (
+        db.query(LessonRecording.event_id, LessonRecording.status, LessonRecording.hls_url,
+                 LessonRecording.duration_seconds)
+        .filter(LessonRecording.event_id.in_(ids))
+    )}
+    # Without a row, only a lesson a recording can still come for needs its teacher looked up.
+    unfound = {e.id for e in events if e.id not in rows and _may_be_recorded(e) and _waiting_stage(e, now)}
+    teacher_ids = {e.teacher_id for e in events if e.id in unfound}
+    with_workspace = {uid for uid, email in (
+        db.query(UserInDB.id, UserInDB.workspace_email).filter(UserInDB.id.in_(teacher_ids))
+    ) if email} if teacher_ids else set()
+
+    out = {}
+    for event in events:
+        row = rows.get(event.id)
+        if row is not None:
+            out[event.id] = {"status": public_status(row), "duration_seconds": row.duration_seconds}
+        else:
+            waiting = event.id in unfound and event.teacher_id in with_workspace
+            out[event.id] = {"status": "waiting" if waiting else "missing", "duration_seconds": None}
+    return out

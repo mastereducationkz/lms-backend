@@ -199,24 +199,29 @@ def test_a_waiting_lesson_says_what_it_is_waiting_for(room):
 
 # ── lateness ─────────────────────────────────────────────────────────────────────────────
 
-def test_late_students_and_a_late_teacher_who_ended_early(room):
+def test_late_students_on_the_teachers_clock_and_a_late_teacher_who_ended_early(room):
+    """Students are timed from when the teacher came to when the teacher left (owner, 2026-09-16)."""
     room["link"](room["joined"]("Gulzada", (4, 52)), room["teacher"])
-    room["link"](room["joined"]("Aya", (7, 45)), room["aya"])
+    room["link"](room["joined"]("Aya", (11, 38)), room["aya"])
     room["link"](room["joined"]("Eldana", (-8, 61)), room["eldana"])
+    room["link"](room["joined"]("Шыңғыс", (7, 45)), room["shyngys"])
 
     record = _record(room)
     assert _codes(record["teacher"]) == {"teacher_late": 4, "ended_early": 8}
-    assert _codes(_student(record, room["aya"])) == {"late": 7, "left_early": 15}
+    assert _codes(_student(record, room["aya"])) == {"late": 7, "left_early": 14}
     assert _codes(_student(record, room["eldana"])) == {}, "early and to the end is simply on time"
+    assert _codes(_student(record, room["shyngys"])) == {}, "3 minutes after the teacher, 7 before the teacher left"
     assert _student(record, room["eldana"])["minutes_in_lesson"] == 60
 
 
-def test_the_thresholds_are_strict(room):
+def test_the_thresholds_count_whole_minutes(room):
     room["link"](room["joined"]("Gulzada", (2, 55)), room["teacher"])
-    room["link"](room["joined"]("Aya", (5, 50)), room["aya"])
+    room["link"](room["joined"]("Aya", (2 + 5 + 59 / 60, 55 - 10 - 59 / 60)), room["aya"])
+    room["link"](room["joined"]("Eldana", (8, 44)), room["eldana"])
     record = _record(room)
     assert _codes(record["teacher"]) == {}, "2 min late and 5 min early are within the rules"
-    assert _codes(_student(record, room["aya"])) == {}, "5 min late and 10 min early are within the rules"
+    assert _codes(_student(record, room["aya"])) == {}, "5:59 late and 10:59 early are within the rules"
+    assert _codes(_student(record, room["eldana"])) == {"late": 6, "left_early": 11}
 
 
 # ── marks against the room ───────────────────────────────────────────────────────────────
@@ -244,13 +249,14 @@ def test_an_unconfirmed_account_holds_never_joined_back(room):
     assert "marked_present_not_joined" in _codes(_student(_record(room), room["aya"]))
 
 
-def test_marked_absent_but_in_the_room_ten_minutes_or_more(room):
-    room["link"](room["joined"]("Aya", (0, 15)), room["aya"])
-    room["link"](room["joined"]("Eldana", (0, 5)), room["eldana"])
+def test_marked_absent_but_in_the_lesson_three_quarters_of_it(room):
+    """Was «10 minutes or more»; since 2026-09-16 it is Meet's verdict that disagrees: 45 of 60."""
+    room["link"](room["joined"]("Aya", (0, 45)), room["aya"])
+    room["link"](room["joined"]("Eldana", (0, 44)), room["eldana"])
     room["mark"](room["aya"], "absent")
     room["mark"](room["eldana"], "absent")
     record = _record(room)
-    assert _codes(_student(record, room["aya"]))["marked_absent_was_in_room"] == 15
+    assert _codes(_student(record, room["aya"]))["marked_absent_was_in_room"] == 45
     assert "marked_absent_was_in_room" not in _codes(_student(record, room["eldana"]))
 
 
