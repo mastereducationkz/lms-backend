@@ -210,8 +210,6 @@ def test_the_map_carries_the_excuse(db, event_and_student):
 
 from fastapi import HTTPException
 
-from src.courses.models import Group
-from src.events.models import EventGroup
 from src.events.routes.events import update_event_attendance
 from src.events.schemas import AttendanceBulkUpdateSchema, AttendanceRecord
 
@@ -219,13 +217,16 @@ from src.events.schemas import AttendanceBulkUpdateSchema, AttendanceRecord
 @pytest.fixture()
 def marking_teacher(db, event_and_student):
     """A teacher that both `check_event_access` and `can_mark_event_attendance` accept for
-    the event from `event_and_student`.
+    the event from `event_and_student`, through the ordinary path: the event's own teacher
+    marking their own lesson.
 
-    `can_mark_event_attendance` skips straight to an `event.teacher_id` equality check once
-    that column is set — and `event_and_student` sets it, to its own (unrelated) teacher — so
-    the group/EventGroup path it otherwise falls back to never runs unless that column is
-    cleared here. Clearing it also keeps `check_event_access` passing via the same
-    group-ownership route, since both checks read the same `EventGroup`/`Group` rows.
+    `can_mark_event_attendance` short-circuits on `event.teacher_id == user.id` whenever that
+    column is set (`src/utils/permissions.py`), never reaching its Group/EventGroup fallback —
+    that fallback is only for legacy lessons that never recorded a teacher. Pointing
+    `event.teacher_id` at this teacher hits that equality branch directly.
+    `check_event_access`'s teacher branch also falls through to the same
+    `event.teacher_id == user.id` check once its EventGroup/Course loops find nothing, so no
+    Group or EventGroup rows are needed for either function here.
     """
     from src.schemas.models import UserInDB
 
@@ -237,13 +238,8 @@ def marking_teacher(db, event_and_student):
     db.add(teacher)
     db.flush()
 
-    group = Group(name="Excused-absence marking group", teacher_id=teacher.id)
-    db.add(group)
-    db.flush()
-    db.add(EventGroup(event_id=event_id, group_id=group.id))
-
     event = db.query(Event).filter(Event.id == event_id).first()
-    event.teacher_id = None
+    event.teacher_id = teacher.id
     db.flush()
 
     return teacher
