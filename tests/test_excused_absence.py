@@ -16,6 +16,31 @@ from src.services.attendance_status import (
 )
 
 
+@pytest.fixture
+def db():
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session as SASession
+    from src.config import engine
+    try:
+        connection = engine.connect()
+    except OperationalError:
+        pytest.skip("No database available")
+    trans = connection.begin()
+    session = SASession(bind=connection)
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart(sess, transaction):
+        if transaction.nested and not transaction._parent.nested:
+            sess.begin_nested()
+    try:
+        yield session
+    finally:
+        event.remove(session, "after_transaction_end", _restart)
+        session.close(); trans.rollback(); connection.close()
+
+
 def test_vocabulary_is_untouched_by_the_new_flag():
     """Если этот тест упал — значит в множества добавили значение, и вместе с ним
     поехали проценты, «отмечено» и списание урока с баланса."""
@@ -52,3 +77,37 @@ def test_is_excused_requires_both_halves():
     assert is_excused("absent", True) is True
     assert is_excused("absent", False) is False
     assert is_excused("present", True) is False
+
+
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+
+# `src.schemas.models` first, deliberately — same pre-existing circular import documented in
+# tests/test_attendance_future_lesson_guard.py: importing `src.events.models` before the model
+# package has finished loading trips it.
+from src.schemas.models import Event  # noqa: F401  isort: skip
+from src.events.models import Attendance
+
+
+def test_new_rows_default_to_unexcused(db):
+    """История остаётся неуважительной: дефолт — это и есть принятое решение по ней."""
+    row = Attendance(event_id=None, lesson_schedule_id=None, user_id=1, status="absent")
+    # Ни один из новых атрибутов не задан вызывающим.
+    assert row.excused in (False, None)
+    assert row.excuse_note is None
+    assert row.excused_by_user_id is None
+    assert row.excused_at is None
+
+
+def test_the_columns_exist_in_the_database(db):
+    cols = {
+        r[0]
+        for r in db.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'attendances'"
+            )
+        ).fetchall()
+    }
+    assert {"excused", "excuse_note", "excused_by_user_id", "excused_at"} <= cols
