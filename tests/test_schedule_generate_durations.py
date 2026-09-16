@@ -362,6 +362,11 @@ def _body(world, **overrides):
     {"schedule_items": [{"day_of_week": 7, "time_of_day": "18:00"}]},
     {"schedule_items": [{"day_of_week": -1, "time_of_day": "18:00"}]},
     {"schedule_items": [{"day_of_week": MON, "time_of_day": "24:00"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "25:00"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "18"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "ab"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "9:5"}]},
+    {"schedule_items": [{"day_of_week": MON, "time_of_day": "009:00"}]},
     {"schedule_items": [{"day_of_week": MON, "time_of_day": "18:60"}]},
     {"schedule_items": [{"day_of_week": MON, "time_of_day": "1800"}]},
     {"schedule_items": [{"day_of_week": MON, "time_of_day": "18:00:00"}]},
@@ -372,7 +377,8 @@ def _body(world, **overrides):
     {"weeks_count": 0},
     {"weeks_count": 53},
 ], ids=[
-    "day_7", "day_negative", "hour_24", "minute_60", "no_colon", "seconds", "empty_time",
+    "day_7", "day_negative", "hour_24", "hour_25", "hour_only", "letters", "one_digit_minute",
+    "three_digit_hour", "minute_60", "no_colon", "seconds", "empty_time",
     "no_items", "lessons_0", "lessons_501", "weeks_0", "weeks_53",
 ])
 def test_an_invalid_generate_request_is_a_422_and_writes_nothing(world, api, overrides):
@@ -396,6 +402,19 @@ def test_a_valid_generate_request_still_goes_through(world, api):
     assert [(i["day_of_week"], i["time_of_day"]) for i in world["group"].schedule_config["schedule_items"]] == [
         (MON, "00:00"), (6, "23:59"),
     ]
+
+
+def test_an_old_client_sending_a_one_digit_hour_is_accepted_and_stored_padded(world, api):
+    """The LMS front before this branch sent the time as typed; «9:00» must keep working."""
+    start = world["monday"] + timedelta(days=14)
+    body = _body(world, start_date=start.isoformat(), lessons_count=1,
+                 schedule_items=[{"day_of_week": MON, "time_of_day": "9:00"}])
+
+    response = api.post("/leaderboard/curator/schedule/generate", json=body)
+
+    assert response.status_code == 200, response.text
+    assert world["group"].schedule_config["schedule_items"][0]["time_of_day"] == "09:00"
+    assert [e.start_datetime for e in _active(world)] == [_utc_naive(start, 9)]
 
 
 def test_the_largest_counts_are_accepted():

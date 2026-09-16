@@ -12,7 +12,7 @@ from src.schemas.models import (
     LeaderboardConfig, LeaderboardConfigSchema, LeaderboardConfigUpdateSchema,
     CourseGroupAccess, CourseHeadTeacher, Event, EventGroup, EventParticipant
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from src.services.schedule_plan import DEFAULT_SLOT_MINUTES, weekly_slot_minutes
 from src.routes.auth import get_current_user_dependency
 from src.curator.freeze_mirror import freeze_index
@@ -2145,11 +2145,18 @@ def update_attendance(
 
 class ScheduleItem(BaseModel):
     day_of_week: int = Field(..., ge=0, le=6)  # 0=Mon, ... 6=Sun
-    #: "HH:MM", 00:00–23:59. Anything else used to be stored as typed and read back as 19:00.
-    time_of_day: str = Field(..., pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    #: "H:MM" or "HH:MM", 0:00–23:59, stored zero-padded. Anything else used to be stored as
+    #: typed and read back as 19:00. A one-digit hour stays accepted: the LMS front before
+    #: per-day lengths sent the time as typed, and a cached copy of it must keep saving.
+    time_of_day: str = Field(..., pattern=r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
     #: How long this day's lessons run. Omitted means «what this day already has» (see
     #: `_resolve_item_minutes`), so an old cached client cannot flatten a group to hours.
     duration_minutes: Optional[int] = Field(None, ge=15, le=300)
+
+    @field_validator("time_of_day")
+    @classmethod
+    def _pad_hour(cls, value: str) -> str:
+        return value.zfill(5)
 
 class ScheduleGenerationSchema(BaseModel):
     group_id: int
