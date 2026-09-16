@@ -88,6 +88,7 @@ from sqlalchemy import text
 # package has finished loading trips it.
 from src.schemas.models import Event  # noqa: F401  isort: skip
 from src.events.models import Attendance
+from src.courses.models import Group
 
 
 def test_new_rows_default_to_unexcused(db):
@@ -215,7 +216,32 @@ from src.events.schemas import AttendanceBulkUpdateSchema, AttendanceRecord
 
 
 @pytest.fixture()
-def marking_teacher(db, event_and_student):
+def teacher_group(db):
+    """A `Group` for `/leaderboard/curator/attendance/bulk`'s auth check, which — unlike the
+    events endpoint — authorises on `group.teacher_id`, not `event.teacher_id`:
+    `update_attendance_bulk` looks the group up by `item.group_id` and skips the row unless
+    `group.teacher_id == current_user.id`. Its own teacher, shared with `marking_teacher`,
+    is created here rather than borrowed from `event_and_student`'s teacher so this fixture
+    has no dependency on that one.
+    """
+    from src.schemas.models import UserInDB
+
+    teacher = UserInDB(
+        name="Замещающий Учитель", email=f"exc-mt-{datetime.now().timestamp()}@test.local",
+        hashed_password="x", role="teacher",
+    )
+    db.add(teacher)
+    db.flush()
+
+    group = Group(name="Тестовая группа", teacher_id=teacher.id)
+    db.add(group)
+    db.flush()
+
+    return group
+
+
+@pytest.fixture()
+def marking_teacher(db, event_and_student, teacher_group):
     """A teacher that both `check_event_access` and `can_mark_event_attendance` accept for
     the event from `event_and_student`, through the ordinary path: the event's own teacher
     marking their own lesson.
@@ -227,16 +253,14 @@ def marking_teacher(db, event_and_student):
     `check_event_access`'s teacher branch also falls through to the same
     `event.teacher_id == user.id` check once its EventGroup/Course loops find nothing, so no
     Group or EventGroup rows are needed for either function here.
+
+    Shares its identity with `teacher_group.teacher_id` so `update_attendance_bulk`'s
+    group-based auth check accepts it too.
     """
     from src.schemas.models import UserInDB
 
     event_id, _ = event_and_student
-    teacher = UserInDB(
-        name="Замещающий Учитель", email=f"exc-mt-{datetime.now().timestamp()}@test.local",
-        hashed_password="x", role="teacher",
-    )
-    db.add(teacher)
-    db.flush()
+    teacher = db.query(UserInDB).filter(UserInDB.id == teacher_group.teacher_id).first()
 
     event = db.query(Event).filter(Event.id == event_id).first()
     event.teacher_id = teacher.id
@@ -299,5 +323,52 @@ def test_event_endpoint_refuses_an_excused_present(db, event_and_student, markin
             ),
             db,
             marking_teacher,
+        )
+    assert exc.value.status_code == 422
+
+
+from src.gamification.routes.leaderboard import (
+    AttendanceInputSchema,
+    BulkAttendanceInputSchema,
+    update_attendance_bulk,
+)
+
+
+def test_grid_bulk_stores_the_excuse(db, event_and_student, marking_teacher, teacher_group):
+    event_id, user_id = event_and_student
+    update_attendance_bulk(
+        BulkAttendanceInputSchema(
+            updates=[
+                AttendanceInputSchema(
+                    group_id=teacher_group.id, week_number=1, lesson_index=1,
+                    student_id=user_id, score=0, status="missed", event_id=event_id,
+                    excused=True, excuse_note="болел",
+                )
+            ]
+        ),
+        marking_teacher,
+        db,
+    )
+    row = AttendanceService.get_by_event_and_user(db, event_id, user_id)
+    assert row.excused is True
+    assert row.excuse_note == "болел"
+    assert row.score == 0
+
+
+def test_grid_bulk_refuses_an_excuse_without_a_note(db, event_and_student, marking_teacher, teacher_group):
+    event_id, user_id = event_and_student
+    with pytest.raises(HTTPException) as exc:
+        update_attendance_bulk(
+            BulkAttendanceInputSchema(
+                updates=[
+                    AttendanceInputSchema(
+                        group_id=teacher_group.id, week_number=1, lesson_index=1,
+                        student_id=user_id, score=0, status="missed", event_id=event_id,
+                        excused=True, excuse_note="  ",
+                    )
+                ]
+            ),
+            marking_teacher,
+            db,
         )
     assert exc.value.status_code == 422

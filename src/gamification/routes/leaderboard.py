@@ -1806,6 +1806,11 @@ class AttendanceInputSchema(BaseModel):
     status: str = "present"
     event_id: Optional[int] = None
     activity_score: Optional[float] = None  # Activity score out of 10
+    #: Пропуск по уважительной причине + свободный текст причины. Дефолты повторяют
+    #: поведение до фичи, поэтому клиент, который их не шлёт, работает как раньше —
+    #: включая мобильную очередь, чьи старые записи переотправляются вслепую.
+    excused: bool = False
+    excuse_note: Optional[str] = None
 
 class BulkAttendanceInputSchema(BaseModel):
     updates: List[AttendanceInputSchema]
@@ -1878,18 +1883,35 @@ def update_attendance_bulk(
                 continue
             score = 1 if item.status in ("attended", "late") else 0
             att_status = ep_status_to_attendance_status(item.status)
+            # Проверяем до любой записи в батче: сетка сохраняет колонку целиком, и
+            # наполовину применённый батч — это экран, который говорит «сохранено» и врёт.
+            from src.services.attendance_status import validate_excused
+
+            try:
+                validate_excused(att_status, item.excused, item.excuse_note)
+            except ValueError as err:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Уважительный пропуск требует причину"
+                        if str(err) == "excused_requires_note"
+                        else "Уважительной может быть только отметка о пропуске"
+                    ),
+                )
             # Reported, never silently dropped: this loop already `continue`s past rows it
             # cannot write, and a grid that says «сохранено» while quietly discarding half a
-            # column is how people stop trusting the screen.
-            future_reason = AttendanceService.event_is_unmarkable_because_future(
-                db, real_event_id
-            )
-            if future_reason:
-                skipped_future.append(
-                    {"event_id": real_event_id, "student_id": item.student_id,
-                     "reason": future_reason}
+            # column is how people stop trusting the screen. Cancelling stays allowed — you
+            # call a lesson off before it happens, not after.
+            if att_status != "cancelled":
+                future_reason = AttendanceService.event_is_unmarkable_because_future(
+                    db, real_event_id
                 )
-                continue
+                if future_reason:
+                    skipped_future.append(
+                        {"event_id": real_event_id, "student_id": item.student_id,
+                         "reason": future_reason}
+                    )
+                    continue
             AttendanceService.upsert_for_event(
                 db=db,
                 event_id=real_event_id,
@@ -1897,6 +1919,9 @@ def update_attendance_bulk(
                 status=att_status,
                 score=score,
                 activity_score=item.activity_score,
+                excused=item.excused,
+                excuse_note=item.excuse_note,
+                excused_by_user_id=current_user.id if item.excused else None,
             )
             updated_count += 1
             continue
