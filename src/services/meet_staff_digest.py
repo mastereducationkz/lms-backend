@@ -14,6 +14,11 @@ not judged there yet, and the summary says how many.
 ``REFRESH_EVERY``, and within a minute when one of that day's lessons is edited; when it reads
 differently the message is edited in place and — since Telegram tells nobody about an edit — a
 silent reply lists what changed (➖ / ➕ per section).
+
+**A lesson that took place stays in its day** (owner, 2026-09-17): on 16.09 a group was marked finished
+after its last lesson, and that recorded lesson silently left the summary (60 → 59). The day's lessons
+are those of an operational group *or* those that really ran — a saved Meet call over the lesson, or a
+recording. And the reply names every lesson that joined or left the day, with why.
 """
 from __future__ import annotations
 
@@ -23,9 +28,10 @@ from datetime import date, datetime, time, timedelta
 from html import escape
 from typing import Optional
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, exists, func, or_
 
-from src.schemas.models import Event, LessonRecording, MeetStaffNotice, UserInDB
+from src.schemas.models import (Event, EventGroup, Group, GroupStudent, LessonRecording, MeetConference,
+                                MeetStaffNotice, UserInDB)
 from src.services import google_workspace, meet_presence, meet_recordings
 from src.services import group_bot_outbox as outbox
 from src.services import group_bot_render as render
@@ -43,22 +49,100 @@ LINES_PER_SECTION = 12
 TEXT_LIMIT = 3900
 
 
-def day_lessons(db, day: date, now: datetime) -> list:
+def _took_place_clause():
+    """The lesson really ran: a saved Meet call overlapping it, or a recording of it."""
+    return or_(
+        exists().where(and_(MeetConference.event_id == Event.id,
+                            MeetConference.started_at < Event.end_datetime,
+                            or_(MeetConference.ended_at.is_(None), MeetConference.ended_at > Event.start_datetime))
+                       ).correlate(Event),
+        exists().where(and_(LessonRecording.event_id == Event.id, LessonRecording.status != "missing")).correlate(Event),
+    )
+
+
+def _day_window(day: date) -> tuple:
     start = datetime.combine(day, time(0)) - render.ALMATY_OFFSET
+    return start, start + timedelta(days=1)
+
+
+def day_lessons(db, day: date, now: datetime) -> list:
+    start, end = _day_window(day)
     return (
         db.query(Event)
         .filter(
             Event.event_type == "class",
             Event.is_active.is_(True),
             Event.start_datetime >= start,
-            Event.start_datetime < start + timedelta(days=1),
+            Event.start_datetime < end,
             Event.start_datetime <= now,
             _held_in_an_lms_meet_room(),
-            event_has_operational_group_clause(),
+            # A group finished or turned off later does not take back a lesson it held (owner, 2026-09-17).
+            or_(event_has_operational_group_clause(), _took_place_clause()),
         )
         .order_by(Event.start_datetime, Event.id)
         .all()
     )
+
+
+def lesson_lines(db, day: date, now: datetime) -> dict:
+    """{event id (str): its bullet line} for the day's lessons — what a summary remembers to name changes."""
+    events = day_lessons(db, day, now)
+    teachers = dict(db.query(UserInDB.id, UserInDB.name)
+                    .filter(UserInDB.id.in_({e.teacher_id for e in events if e.teacher_id} or {-1})).all())
+    return {str(e.id): _line({"title": e.title, "start": e.start_datetime}, teachers.get(e.teacher_id))
+            for e in events}
+
+
+def _kept_only_because_it_ran(db, ids: list) -> set:
+    """Of these lessons, the ones in the day only because they ran — their groups are no longer operational."""
+    if not ids:
+        return set()
+    operational = {eid for (eid,) in db.query(Event.id).filter(Event.id.in_(ids), event_has_operational_group_clause())}
+    return {eid for eid in ids if eid not in operational}
+
+
+def _groups_note(db, event_id: int) -> str:
+    groups = db.query(Group).join(EventGroup, EventGroup.group_id == Group.id).filter(EventGroup.event_id == event_id).all()
+    if not groups:
+        return "урок без группы"
+    if all(g.is_over for g in groups):
+        return "группа завершена"
+    if all(g.is_active is False for g in groups):
+        return "группа отключена"
+    has_students = (db.query(GroupStudent.id).join(UserInDB, UserInDB.id == GroupStudent.student_id)
+                    .filter(GroupStudent.group_id.in_([g.id for g in groups]), UserInDB.is_active.is_(True)).first())
+    return "в группе не осталось активных учеников" if has_students is None else "группа больше не в работе"
+
+
+def why_left(db, event_id: int, day: date, now: datetime) -> str:
+    """Why a lesson that was in the day's summary is not any more."""
+    event = db.get(Event, event_id)
+    if event is None:
+        return "урок удалён"
+    start, end = _day_window(day)
+    if not event.is_active:
+        return "урок отменён"
+    if not (start <= event.start_datetime < end):
+        return f"перенесён на {render.local(event.start_datetime):%d.%m в %H:%M}"
+    if event.start_datetime > now:
+        return f"перенесён на {render.local(event.start_datetime):%H:%M}, ещё не начался"
+    if not db.query(Event.id).filter(Event.id == event_id, _held_in_an_lms_meet_room()).first():
+        return "урок больше не в комнате LMS Meet"
+    if event.event_type != "class":
+        return "больше не урок группы"
+    return _groups_note(db, event_id)
+
+
+def why_joined(db, event_id: int, since: Optional[datetime], kept: set) -> str:
+    """Why a lesson is in the day's summary now and was not before."""
+    event = db.get(Event, event_id)
+    if event_id in kept:
+        return f"урок прошёл — остаётся в сводке, хотя {_groups_note(db, event_id)}"
+    if since is not None and event.created_at is not None and event.created_at.replace(tzinfo=None) > since:
+        return "новый урок"
+    if since is not None and event.updated_at is not None and event.updated_at.replace(tzinfo=None) > since:
+        return "урок изменён: перенесён на этот день или восстановлен"
+    return "снова учитывается в сводке"
 
 
 def call_state(meet, lesson: dict) -> str:
@@ -176,9 +260,10 @@ def send_if_due(db, now: datetime, meet=None) -> Optional[str]:
         row.status = "skipped"
         db.commit()
         return "skipped"
+    lessons = lesson_lines(db, day, now)
     status = notices._deliver(db, notice.id, text, f"meet-digest:{day.isoformat()}")
     if status == "sent":
-        _remember(db, notice.id, text=text, rendered_at=now)
+        _remember(db, notice.id, text=text, rendered_at=now, lessons=lessons)
     return status
 
 
@@ -222,13 +307,21 @@ def _read(text: str) -> tuple:
     return (head_lines[1] if len(head_lines) > 1 else ""), sections
 
 
-def changes_text(day: date, old: str, new: str) -> Optional[str]:
-    """What a reader of the old summary needs to know → the reply, or None when only notes moved."""
+LESSONS_TITLE = "📚 <b>Уроки дня</b>"
+
+
+def changes_text(day: date, old: str, new: str, left: tuple = (), joined: tuple = ()) -> Optional[str]:
+    """What a reader of the old summary needs to know → the reply, or None when only notes moved.
+
+    ``left`` / ``joined``: bullet lines of lessons that left or joined the day, each ending «: why»
+    (owner, 2026-09-17: «Было 60 · Стало 59» alone did not say which lesson or why)."""
     old_counts, old_sections = _read(old)
     new_counts, new_sections = _read(new)
     parts = []
     if old_counts != new_counts:
         parts += [f"Было: {old_counts}", f"Стало: {new_counts}"]
+    if left or joined:
+        parts += ["", LESSONS_TITLE, *(f"➖ {line[2:]}" for line in left), *(f"➕ {line[2:]}" for line in joined)]
     titles = list(new_sections) + [t for t in old_sections if t not in new_sections]
     for title in titles:
         before, after = old_sections.get(title, []), new_sections.get(title, [])
@@ -261,6 +354,21 @@ def _post_pending_reply(notice_id: int, db, day: date, message_id: int) -> None:
         logger.warning("summary %s: update reply failed, retrying next tick: %s", day, result.get("error"))
 
 
+def _lesson_changes(db, day: date, now: datetime, details: dict, lessons: dict, since: Optional[datetime]) -> tuple:
+    """(left, joined): bullet lines «• HH:MM title — teacher: why» of lessons that left or joined the day.
+
+    A summary kept before it remembered its lessons had them under the old rule — operational groups
+    only — so its baseline is today's lessons without those kept only because they ran."""
+    old = details.get("lessons")
+    if old is None:
+        kept = _kept_only_because_it_ran(db, [int(i) for i in lessons])
+        old = {i: line for i, line in lessons.items() if int(i) not in kept}
+    kept = _kept_only_because_it_ran(db, [int(i) for i in lessons if i not in old])
+    left = tuple(f"{line}: {why_left(db, int(i), day, now)}" for i, line in old.items() if i not in lessons)
+    joined = tuple(f"{line}: {why_joined(db, int(i), since, kept)}" for i, line in lessons.items() if i not in old)
+    return left, joined
+
+
 def refresh_sent(db, now: datetime, meet=None) -> int:
     """Re-read the summaries still live; edit and reply where they changed. Returns how many changed."""
     today = render.local(now).date()
@@ -286,11 +394,13 @@ def refresh_sent(db, now: datetime, meet=None) -> int:
 
         text = digest_text(db, day, now, meet) or (
             f"📋 <b>Meet — итоги дня, {day:%d.%m}</b>\nУроков в Meet: 0")
+        lessons = lesson_lines(db, day, now)
         old = details.get("text")
         if old is None or old == text:
             # No baseline yet (sent before summaries were kept true), or nothing to say.
-            _remember(db, notice_id, text=text, rendered_at=now)
+            _remember(db, notice_id, text=text, rendered_at=now, lessons=lessons)
             continue
+        left, joined = _lesson_changes(db, day, now, details, lessons, rendered_at)
         group_id, _ = notices.target()
         edited = outbox.edit(group_id, message_id, f"{text}\n\n✏️ Обновлено {render.local(now):%d.%m в %H:%M}", None)
         if edited["gone"]:
@@ -300,8 +410,8 @@ def refresh_sent(db, now: datetime, meet=None) -> int:
             _remember(db, notice_id, rendered_at=now)  # try again in REFRESH_EVERY
             logger.warning("summary %s: edit failed: %s", day, edited.get("description"))
             continue
-        reply = changes_text(day, old, text)
-        _remember(db, notice_id, text=text, rendered_at=now,
+        reply = changes_text(day, old, text, left, joined)
+        _remember(db, notice_id, text=text, rendered_at=now, lessons=lessons,
                   pending_reply=reply, pending_update=(details.get("updates", 0) + 1) if reply else None)
         if reply:
             _post_pending_reply(notice_id, db, day, message_id)
