@@ -870,15 +870,17 @@ async def get_weekly_lessons_with_hw_status(
     if event_ids:
         raw_map = AttendanceService.get_attendance_map_for_events(db, event_ids, student_ids)
         for (uid, eid), att in raw_map.items():
+            # ``is_excused`` классифицирует *хранимый* статус, а не подпись для интерфейса:
+            # "missed" в словаре статусов не значит ничего, и уважительность на нём
+            # схлопнулась бы в False у каждой строки. Поэтому флаг считается здесь, от
+            # ``att["status"]``, до перевода в UI-значение. Заметка следует за тем же
+            # флагом, иначе клиент видит причину рядом с зелёной клеткой.
+            excused = is_excused(att["status"], att["excused"])
             attendance_map[(uid, eid)] = {
                 "status": attendance_status_to_ui(att["status"]),
                 "activity_score": att["activity_score"],
-                # ``is_excused`` классифицирует *хранимый* статус, а не подпись для интерфейса:
-                # "missed" в словаре статусов не значит ничего, и уважительность на нём
-                # схлопнулась бы в False у каждой строки. Поэтому флаг считается здесь, от
-                # ``att["status"]``, до перевода в UI-значение.
-                "excused": is_excused(att["status"], att["excused"]),
-                "excuse_note": att["excuse_note"],
+                "excused": excused,
+                "excuse_note": att["excuse_note"] if excused else None,
             }
 
     
@@ -1451,17 +1453,19 @@ def get_group_full_attendance_matrix(
             att_data = attendance_map.get((student.id, event.id))
             status = attendance_status_to_ui(att_data["status"] if att_data else None)
             activity_score = att_data["activity_score"] if att_data else None
+            # Уважительность — надстройка над «Не был», а не новый статус: клиент,
+            # который про эти поля не знает, продолжает рисовать обычный пропуск.
+            # Флаг проводится через ``is_excused`` от хранимого статуса: в эту таблицу
+            # пишет и CRM, чей ``upsert_attendance`` переставляет absent → present, не
+            # трогая колонку, а CHECK в БД сторожит только «есть причина». Заметка
+            # следует за тем же флагом, иначе клиент видит причину рядом с зелёной клеткой.
+            excused = is_excused(att_data["status"], att_data["excused"]) if att_data else False
             lesson_data[str(idx + 1)] = {
                 "event_id": event.id,
                 "attendance_status": status,
                 "activity_score": activity_score,
-                # Уважительность — надстройка над «Не был», а не новый статус: клиент,
-                # который про эти поля не знает, продолжает рисовать обычный пропуск.
-                # Флаг проводится через ``is_excused`` от хранимого статуса: в эту таблицу
-                # пишет и CRM, чей ``upsert_attendance`` переставляет absent → present, не
-                # трогая колонку, а CHECK в БД сторожит только «есть причина».
-                "excused": is_excused(att_data["status"], att_data["excused"]) if att_data else False,
-                "excuse_note": att_data["excuse_note"] if att_data else None,
+                "excused": excused,
+                "excuse_note": att_data["excuse_note"] if att_data and excused else None,
             }
             
         student_rows.append({

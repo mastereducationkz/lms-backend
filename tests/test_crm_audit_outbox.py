@@ -138,9 +138,18 @@ def test_marking_an_absence_excused_reaches_the_crm():
     assert "'excuse_note', NEW.excuse_note" in sql
 
 
+def test_correcting_only_the_excuse_note_reaches_the_crm():
+    """Правка текста причины при уже стоящем флаге не трогает ни `status`, ни `excused` —
+    без отдельного условия в стороже это никогда не породило бы событие, и CRM держала бы
+    устаревшую причину в своей истории аудита сколько угодно долго."""
+    assert (
+        "NEW.excuse_note IS DISTINCT FROM OLD.excuse_note" in triggers.ATTENDANCE_TRIGGER_SQL
+    )
+
+
 def test_an_attendance_update_that_changes_neither_still_does_not_enqueue():
     """Сторож расширен, а не снят: отметка сохраняется колонками, и запись, не меняющая
-    ни статуса, ни уважительности, по-прежнему обязана возвращать NULL."""
+    ни статуса, ни уважительности, ни причины, по-прежнему обязана возвращать NULL."""
     sql = triggers.ATTENDANCE_TRIGGER_SQL
     assert "IF (TG_OP = 'UPDATE') AND NOT (" in sql
     assert "RETURN NULL" in sql

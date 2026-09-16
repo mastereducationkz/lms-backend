@@ -287,10 +287,13 @@ BEGIN
         -- Уважительность — вторая половина отметки, а не косметика: снятие урока с
         -- баланса зависит от неё ровно так же, как от статуса. Переход absent → absent
         -- + excused не меняет ни одной буквы в status, поэтому без этой ветки CRM никогда
-        -- бы не узнала, что уже списанный урок пора вернуть.
+        -- бы не узнала, что уже списанный урок пора вернуть. Правка одной только причины
+        -- (текста excuse_note) при уже стоящем флаге — тот же случай: status и excused не
+        -- меняются, а CRM обязана увидеть исправленную причину, а не хранить старую.
         IF (TG_OP = 'UPDATE') AND NOT (
             NEW.status IS DISTINCT FROM OLD.status
             OR NEW.excused IS DISTINCT FROM OLD.excused
+            OR NEW.excuse_note IS DISTINCT FROM OLD.excuse_note
         ) THEN
             RETURN NULL;
         END IF;

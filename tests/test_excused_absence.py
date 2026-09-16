@@ -933,6 +933,7 @@ def test_the_grid_does_not_render_an_excuse_on_a_present_cell(
     assert cells, "урок не попал в сетку"
     assert cells[0]["attendance_status"] == "attended"
     assert cells[0]["excused"] is False
+    assert cells[0]["excuse_note"] is None
 
 
 def test_the_matrix_does_not_render_an_excuse_on_a_present_cell(
@@ -952,6 +953,7 @@ def test_the_matrix_does_not_render_an_excuse_on_a_present_cell(
     assert cells, "урок не попал в матрицу"
     assert cells[0]["attendance_status"] == "attended"
     assert cells[0]["excused"] is False
+    assert cells[0]["excuse_note"] is None
 
 
 def test_the_lesson_card_does_not_render_an_excuse_on_a_present_cell(
@@ -964,6 +966,7 @@ def test_the_lesson_card_does_not_render_an_excuse_on_a_present_cell(
     mine = [r for r in rows if r.student_id == user_id]
     assert mine[0].attendance_status == "attended"
     assert mine[0].excused is False
+    assert mine[0].excuse_note is None
 
 
 # --- отчёт ---------------------------------------------------------------------------------
