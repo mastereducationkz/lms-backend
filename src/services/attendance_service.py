@@ -113,7 +113,7 @@ class AttendanceService:
         student_ids: List[int],
     ) -> Dict[Tuple[int, int], Dict]:
         """
-        Return a lookup dict: (user_id, event_id) → {status, score, activity_score}.
+        Return a lookup dict: (user_id, event_id) → {status, score, activity_score, excused, excuse_note}.
 
         Used by leaderboard and full-attendance matrix endpoints.
         """
@@ -133,6 +133,8 @@ class AttendanceService:
                 "status": row.status,
                 "score": row.score,
                 "activity_score": row.activity_score,
+                "excused": bool(row.excused),
+                "excuse_note": row.excuse_note,
             }
             for row in rows
         }
@@ -189,13 +191,30 @@ class AttendanceService:
         score: int = 0,
         activity_score: Optional[float] = None,
         notes: Optional[str] = None,
+        excused: Optional[bool] = None,
+        excuse_note: Optional[str] = None,
+        excused_by_user_id: Optional[int] = None,
         flush: bool = True,
     ) -> Attendance:
         """
         Create or update an Attendance record for (event_id, user_id).
 
         Does NOT commit — callers are responsible for db.commit().
+
+        ``excused`` тристабилен намеренно. ``None`` — «вызывающий про уважительность не
+        знает»: таких путей в коде большинство (перепривязка урока, импорт, старые клиенты),
+        и любой из них, обнуляя флаг по умолчанию, тихо снимал бы причину, которую поставил
+        учитель. ``True``/``False`` — явное решение вызывающего.
+
+        Уход статуса из «пропуска» снимает уважительность всегда, даже при ``excused=None``:
+        «Ув.» превратившееся в «Был» — это отмена пропуска, и строка, оставшаяся
+        уважительной при статусе present, нарушает инвариант словаря.
         """
+        from src.services.attendance_status import normalize_status, validate_excused
+
+        if excused is not None:
+            validate_excused(status, excused, excuse_note)
+
         record = (
             db.query(Attendance)
             .filter(
@@ -223,6 +242,19 @@ class AttendanceService:
             )
             db.add(record)
 
+        if normalize_status(status) != "absent":
+            record.excused = False
+            record.excuse_note = None
+            record.excused_by_user_id = None
+            record.excused_at = None
+        elif excused is not None:
+            record.excused = excused
+            record.excuse_note = excuse_note.strip() if (excused and excuse_note) else None
+            record.excused_by_user_id = excused_by_user_id if excused else None
+            record.excused_at = (
+                datetime.now(timezone.utc).replace(tzinfo=None) if excused else None
+            )
+
         if flush:
             db.flush()
         return record
@@ -249,6 +281,9 @@ class AttendanceService:
                 status=item["status"],
                 score=item.get("score", 0),
                 activity_score=item.get("activity_score"),
+                excused=item.get("excused"),
+                excuse_note=item.get("excuse_note"),
+                excused_by_user_id=item.get("excused_by_user_id"),
                 flush=False,
             )
             count += 1

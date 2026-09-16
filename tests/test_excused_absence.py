@@ -79,7 +79,7 @@ def test_is_excused_requires_both_halves():
     assert is_excused("present", True) is False
 
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
@@ -111,3 +111,98 @@ def test_the_columns_exist_in_the_database(db):
         ).fetchall()
     }
     assert {"excused", "excuse_note", "excused_by_user_id", "excused_at"} <= cols
+
+
+@pytest.fixture()
+def event_and_student(db):
+    """Прошедший урок и один студент на нём — минимум, который принимает запись."""
+    from src.events.models import Event
+    from src.schemas.models import UserInDB
+
+    student = UserInDB(
+        name="Тест Студентов", email=f"exc-{datetime.now().timestamp()}@test.local",
+        hashed_password="x", role="student",
+    )
+    teacher = UserInDB(
+        name="Тест Учителев", email=f"exc-t-{datetime.now().timestamp()}@test.local",
+        hashed_password="x", role="teacher",
+    )
+    db.add_all([student, teacher])
+    db.flush()
+    start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    event = Event(
+        title="Урок", event_type="class", start_datetime=start,
+        end_datetime=start + timedelta(hours=1), is_active=True,
+        teacher_id=teacher.id, created_by=teacher.id,
+    )
+    db.add(event)
+    db.flush()
+    return event.id, student.id
+
+
+from src.services.attendance_service import AttendanceService
+
+
+def test_upsert_stores_the_excuse(db, event_and_student):
+    event_id, user_id = event_and_student
+    row = AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent",
+        excused=True, excuse_note="предупредил заранее", excused_by_user_id=user_id,
+    )
+    assert row.excused is True
+    assert row.excuse_note == "предупредил заранее"
+    assert row.excused_at is not None
+
+
+def test_moving_off_absent_clears_the_excuse(db, event_and_student):
+    """Учитель переставил «Ув.» на «Был». Сетка шлёт новый статус и ничего про
+    уважительность — строка не имеет права остаться уважительной при статусе present,
+    иначе в базе появится то, что инвариант запрещает."""
+    event_id, user_id = event_and_student
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent",
+        excused=True, excuse_note="болел",
+    )
+    row = AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="present",
+    )
+    assert row.excused is False
+    assert row.excuse_note is None
+    assert row.excused_at is None
+
+
+def test_an_unaware_caller_does_not_wipe_the_excuse(db, event_and_student):
+    """Пути, которые про уважительность не знают (перепривязка урока, импорт), не должны
+    снимать её, пока статус остаётся пропуском."""
+    event_id, user_id = event_and_student
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent",
+        excused=True, excuse_note="олимпиада",
+    )
+    row = AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent", score=0,
+    )
+    assert row.excused is True
+    assert row.excuse_note == "олимпиада"
+
+
+def test_upsert_refuses_an_invalid_excuse(db, event_and_student):
+    event_id, user_id = event_and_student
+    with pytest.raises(ValueError) as exc:
+        AttendanceService.upsert_for_event(
+            db, event_id=event_id, user_id=user_id, status="absent",
+            excused=True, excuse_note="",
+        )
+    assert str(exc.value) == "excused_requires_note"
+
+
+def test_the_map_carries_the_excuse(db, event_and_student):
+    event_id, user_id = event_and_student
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent",
+        excused=True, excuse_note="семейные",
+    )
+    db.flush()
+    m = AttendanceService.get_attendance_map_for_events(db, [event_id], [user_id])
+    assert m[(user_id, event_id)]["excused"] is True
+    assert m[(user_id, event_id)]["excuse_note"] == "семейные"
