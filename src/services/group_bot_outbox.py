@@ -98,7 +98,7 @@ def post(support_group_id: int, text: str, idempotency_key: str, *, silent: bool
                                      actor_name=ACTOR_NAME, json_body=body,
                                      timeout=SEND_TIMEOUT_SECONDS) or {}
         return {"status": "sent", "telegram_message_id": result.get("telegram_message_id"),
-                "pinned": result.get("pinned"), "error": None}
+                "pinned": result.get("pinned"), "pin_error": result.get("pin_error"), "error": None}
     except HTTPException as exc:
         detail = f"{exc.status_code}: {exc.detail}"[:500]
         status = "skipped" if exc.status_code in (400, 404, 409, 422) else "failed"
@@ -107,19 +107,39 @@ def post(support_group_id: int, text: str, idempotency_key: str, *, silent: bool
         return {"status": "failed", "telegram_message_id": None, "error": str(exc)[:500]}
 
 
+def _act(path: str, body: dict) -> dict:
+    """One Support message verb → its JSON plus ``ok``, ``gone`` and ``status_code``; never raises."""
+    try:
+        result = support_client.call("POST", path, actor_email=SYSTEM_ACTOR, actor_name=ACTOR_NAME,
+                                     json_body=body, timeout=SEND_TIMEOUT_SECONDS) or {}
+    except HTTPException as exc:
+        return {"ok": False, "gone": False, "status_code": exc.status_code,
+                "description": f"{exc.status_code}: {exc.detail}"[:500]}
+    except Exception as exc:
+        return {"ok": False, "gone": False, "status_code": None, "description": str(exc)[:500]}
+    return {**result, "ok": bool(result.get("ok")), "gone": bool(result.get("gone")), "status_code": 200}
+
+
 def edit(support_group_id: int, message_id: int, text: str, reply_markup: Optional[dict]) -> dict:
-    """Edit one of the bot's messages → ``{"ok", "gone", "description"}``; never raises."""
+    """Edit one of the bot's messages → ``{"ok", "gone", "description"}``; never raises.
+
+    Without ``reply_markup`` the message loses its buttons.
+    """
     body = {"telegram_group_id": support_group_id, "message_id": message_id, "text": text,
             "parse_mode": "HTML", "disable_web_page_preview": True}
     if reply_markup:
         body["reply_markup"] = reply_markup
-    try:
-        result = support_client.call("POST", "/telegram/messages/edit", actor_email=SYSTEM_ACTOR,
-                                     actor_name=ACTOR_NAME, json_body=body,
-                                     timeout=SEND_TIMEOUT_SECONDS) or {}
-    except HTTPException as exc:
-        return {"ok": False, "gone": False, "description": f"{exc.status_code}: {exc.detail}"[:500]}
-    except Exception as exc:
-        return {"ok": False, "gone": False, "description": str(exc)[:500]}
-    return {"ok": bool(result.get("ok")), "gone": bool(result.get("gone")),
-            "description": result.get("description")}
+    return _act("/telegram/messages/edit", body)
+
+
+def delete(support_group_id: int, message_id: int) -> dict:
+    return _act("/telegram/messages/delete", {"telegram_group_id": support_group_id, "message_id": message_id})
+
+
+def unpin(support_group_id: int, message_id: int) -> dict:
+    return _act("/telegram/messages/unpin", {"telegram_group_id": support_group_id, "message_id": message_id})
+
+
+def top_pinned(support_group_id: int) -> dict:
+    """The message in the bar at the top of the chat → ``{"ok", "pinned_message_id", ...}``."""
+    return _act("/telegram/messages/pinned", {"telegram_group_id": support_group_id})

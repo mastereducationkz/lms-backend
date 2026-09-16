@@ -45,6 +45,8 @@ def chat(world, monkeypatch):
     group_bot_settings.update(db, admin, enabled=True)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(group_bot_intents, "_cache", group_bot_intents.OrderedDict())
+    # The endpoint reads the clock itself; the lessons below are dated around NOW, not today.
+    monkeypatch.setattr(group_bot, "_now", lambda: NOW)
 
     def ask(text, support_group_id=SUPPORT_CHAT, **fields):
         fields.setdefault("format", "html")

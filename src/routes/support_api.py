@@ -383,3 +383,23 @@ def group_button_popup(body: GroupPopupIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="The group bot is off for this group")
     except ValueError:
         raise HTTPException(status_code=422, detail="Unknown button action")
+
+
+class GroupPinnedIn(BaseModel):
+    """Support saw a message pinned in a group chat."""
+
+    support_group_id: int
+    telegram_chat_id: Optional[int] = None
+    message_id: int
+
+
+@router.post("/telegram/group-pinned", dependencies=[Depends(verify_support_api_key)])
+def group_message_pinned(body: GroupPinnedIn, db: Session = Depends(get_db)):
+    """A newer pin pushes the pinned timetable out of the bar at the top of the chat (owner,
+    2026-09-16): the chat is checked in a minute and the timetable re-posted on top — see
+    :mod:`src.services.group_bot_pinned_top`. ``due`` is whether this chat has a timetable below it.
+    """
+    from src.services import group_bot_pinned_top
+
+    return {"due": group_bot_pinned_top.note_pin(db, support_group_id=body.support_group_id,
+                                                 message_id=body.message_id)}

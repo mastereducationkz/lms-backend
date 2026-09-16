@@ -196,7 +196,8 @@ class TelegramPinnedTimetable(Base):
     """The one pinned timetable message in a group's chat, edited in place as the timetable moves.
 
     ``removed_at`` is final: when someone unpins or deletes it, the bot respects that and never
-    posts or pins it again (owner).
+    posts or pins it again (owner). It is also kept on top of the chat's pins — re-posted when a
+    newer message is pinned (owner, 2026-09-16; :mod:`src.services.group_bot_pinned_top`).
     """
 
     __tablename__ = "telegram_pinned_timetables"
@@ -215,6 +216,17 @@ class TelegramPinnedTimetable(Base):
     posted_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=True)
     removed_at = Column(DateTime, nullable=True)
+    #: Read the chat's top pin at this time — a newer pin was reported, or an unpin needs confirming.
+    check_due_at = Column(DateTime, nullable=True)
+    #: The newest pin Support reported above this message.
+    reported_pin_id = Column(BigInteger, nullable=True)
+    pin_checked_at = Column(DateTime, nullable=True)
+    #: The first read that found the timetable no longer pinned; a second one confirms it.
+    unpinned_seen_at = Column(DateTime, nullable=True)
+    #: While re-posting on top: the old copy, to delete once the new one is pinned.
+    raising_from_id = Column(BigInteger, nullable=True)
+    raises = Column(Integer, nullable=False, default=0, server_default="0")
+    raise_attempts = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class TelegramScheduleWatch(Base):
