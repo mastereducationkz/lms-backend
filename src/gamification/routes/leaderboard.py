@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, or_
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime, date, timedelta
 
 from src.config import get_db
@@ -12,7 +12,8 @@ from src.schemas.models import (
     LeaderboardConfig, LeaderboardConfigSchema, LeaderboardConfigUpdateSchema,
     CourseGroupAccess, CourseHeadTeacher, Event, EventGroup, EventParticipant
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from src.services.schedule_plan import DEFAULT_SLOT_MINUTES, weekly_slot_minutes
 from src.routes.auth import get_current_user_dependency
 from src.curator.freeze_mirror import freeze_index
 from src.curator.access_blocks import access_block_index
@@ -2145,6 +2146,9 @@ def update_attendance(
 class ScheduleItem(BaseModel):
     day_of_week: int # 0=Mon, ... 6=Sun
     time_of_day: str # "18:00"
+    #: How long this day's lessons run. Omitted means «what this day already has» (see
+    #: `_resolve_item_minutes`), so an old cached client cannot flatten a group to hours.
+    duration_minutes: Optional[int] = Field(None, ge=15, le=300)
 
 class ScheduleGenerationSchema(BaseModel):
     group_id: int
@@ -2153,11 +2157,44 @@ class ScheduleGenerationSchema(BaseModel):
     weeks_count: int = 12
     lessons_count: Optional[int] = None
 
+class GroupScheduleItemResponse(BaseModel):
+    day_of_week: int
+    time_of_day: str
+    duration_minutes: int = 60
+
 class GroupScheduleResponse(BaseModel):
     start_date: date
     weeks_count: int
     lessons_count: Optional[int] = None
-    schedule_items: List[ScheduleItem]
+    schedule_items: List[GroupScheduleItemResponse]
+
+
+def _slot_time_key(raw: Any) -> str:
+    """``"HH:MM"`` as the schedule rules read a slot's time (unparseable → 19:00)."""
+    text = str(raw or "19:00").strip()[:5]
+    try:
+        return datetime.strptime(text, "%H:%M").strftime("%H:%M")
+    except ValueError:
+        return "19:00"
+
+
+def _resolve_item_minutes(item: ScheduleItem, stored: dict) -> int:
+    """This item's length: the request's → the stored slot's (same day and time, then same
+    day) → an hour. ``stored`` is ``weekly_slot_minutes`` of the group's current config."""
+    if item.duration_minutes is not None:
+        return item.duration_minutes
+    same_slot = stored.get((item.day_of_week, _slot_time_key(item.time_of_day)))
+    if same_slot is not None:
+        return same_slot
+    for (weekday, _at), minutes in stored.items():
+        if weekday == item.day_of_week:
+            return minutes
+    return DEFAULT_SLOT_MINUTES
+
+
+def _stored_item_minutes(item: Any) -> int:
+    """A stored item's length by the schedule rules — missing or out of range reads as 60."""
+    return next(iter(weekly_slot_minutes({"schedule_items": [item]}).values()), DEFAULT_SLOT_MINUTES)
 
 
 @router.post("/curator/schedule/generate")
@@ -2199,54 +2236,45 @@ def generate_schedule(
     frequency = len(data.schedule_items)
     week_limit = math.ceil(lessons_count / frequency) + 2
 
-    start_date = data.start_date
-    KZ_OFFSET = timedelta(hours=5)
+    old_cfg = group.schedule_config if isinstance(group.schedule_config, dict) else {}
+    stored_minutes = weekly_slot_minutes(old_cfg)
+    new_cfg = {
+        "start_date": data.start_date.isoformat(),
+        "weeks_count": week_limit,
+        "lessons_count": lessons_count,
+        "schedule_items": [
+            {
+                "day_of_week": item.day_of_week,
+                "time_of_day": item.time_of_day,
+                "duration_minutes": _resolve_item_minutes(item, stored_minutes),
+            }
+            for item in data.schedule_items
+        ],
+    }
+    # Slots excluded in the CRM name a date and time of the old pattern; they only still mean
+    # something while the days, times and lengths are the ones they were excluded from.
+    if old_cfg.get("excluded_slot_keys") and weekly_slot_minutes(new_cfg) == stored_minutes:
+        new_cfg["excluded_slot_keys"] = old_cfg["excluded_slot_keys"]
 
-    all_lesson_dates = []
-    for week in range(week_limit):
-        for item in data.schedule_items:
-            try:
-                time_obj = datetime.strptime(item.time_of_day, "%H:%M").time()
-            except ValueError:
-                time_obj = datetime.strptime("19:00", "%H:%M").time()
+    # The CRM's save: the course is counted from the lessons already begun (not replayed from
+    # start_date), approved cancellations stay cancelled, and a lesson already on a kept slot
+    # stays put with its own length unless its day's length changed.
+    from src.services.schedule_reconciliation import apply_group_schedule
 
-            days_ahead = item.day_of_week - start_date.weekday()
-            if days_ahead < 0:
-                days_ahead += 7
-
-            target_date = start_date + timedelta(days=days_ahead) + timedelta(weeks=week)
-            target_dt_kz = datetime.combine(target_date, time_obj)
-            target_dt_utc = target_dt_kz - KZ_OFFSET
-
-            if target_date >= start_date:
-                all_lesson_dates.append(target_dt_utc)
-
-    all_lesson_dates.sort()
-    all_lesson_dates = all_lesson_dates[:lessons_count]
-
-    from datetime import timezone as _tz
-    from src.services.schedule_reconciliation import reconcile_group_schedule
-
-    dt_utc = lambda d: d.replace(tzinfo=_tz.utc) if d.tzinfo is None else d
-    desired_slots = [(dt_utc(dt), ln) for ln, dt in enumerate(all_lesson_dates, start=1)]
-
-    result = reconcile_group_schedule(
-        db=db,
-        group_id=data.group_id,
-        desired_slots=desired_slots,
+    result = apply_group_schedule(
+        db,
+        data.group_id,
+        new_cfg,
+        previous_config=old_cfg,
         group_name=group.name,
         teacher_id=group.teacher_id,
         created_by=current_user.id,
+        fallback_start=data.start_date,
     )
     lessons_created = result["updated"] + result["created"]
 
     # Save config for future use
-    group.schedule_config = {
-        "start_date": data.start_date.isoformat(),
-        "weeks_count": week_limit,
-        "lessons_count": lessons_count,
-        "schedule_items": [item.dict() for item in data.schedule_items]
-    }
+    group.schedule_config = new_cfg
     db.commit()
     
     return {"message": f"Schedule generated successfully. Created {lessons_created} individual lessons."}
@@ -2278,7 +2306,11 @@ def get_group_schedule(
             "start_date": config.get("start_date"),
             "weeks_count": config.get("weeks_count", 12),
             "lessons_count": config.get("lessons_count"),
-            "schedule_items": config.get("schedule_items", [])
+            "schedule_items": [
+                {**item, "duration_minutes": _stored_item_minutes(item)}
+                if isinstance(item, dict) else item
+                for item in config.get("schedule_items", [])
+            ]
         }
 
     events = db.query(Event).join(EventGroup).filter(

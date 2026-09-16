@@ -205,7 +205,9 @@ def test_a_time_shift_and_renumbering_preserve_the_substitute(world):
     """The lesson moves day and is retitled; the occurrence override travels with it."""
     db, azamat, nuray, group = world["db"], world["azamat"], world["nuray"], world["group"]
     original = datetime.utcnow() + timedelta(days=3)
-    moved = datetime.utcnow() + timedelta(days=4)
+    # Whole minutes, like every slot a schedule generates: the planner pairs and writes
+    # lessons at minute precision, so a target of 06:47:23.702 is written as 06:47.
+    moved = (datetime.utcnow() + timedelta(days=4)).replace(second=0, microsecond=0)
 
     ev = world["lesson"](when=original, teacher_id=nuray.id)
     world["approve"](ev.id, nuray.id)
