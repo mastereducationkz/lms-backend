@@ -123,6 +123,29 @@ def test_every_payload_carries_a_stable_event_id():
         assert "'event_id', v_event_id" in sql
 
 
+def test_marking_an_absence_excused_reaches_the_crm():
+    """Уважительность — вторая половина отметки, а не косметика: снятие урока с баланса
+    зависит от неё ровно так же, как от статуса. Переход absent → absent + excused не
+    меняет ни одной буквы в `status`, поэтому со сторожем «только по статусу» события не
+    было бы вовсе — а значит уже списанный урок никогда бы не вернулся."""
+    sql = triggers.ATTENDANCE_TRIGGER_SQL
+    assert "NEW.excused IS DISTINCT FROM OLD.excused" in sql
+    # И сторож, и полезная нагрузка: без второго CRM получила бы событие, из которого
+    # не видно, что именно изменилось.
+    assert "'excused', OLD.excused" in sql
+    assert "'excused', NEW.excused" in sql
+    assert "'excuse_note', OLD.excuse_note" in sql
+    assert "'excuse_note', NEW.excuse_note" in sql
+
+
+def test_an_attendance_update_that_changes_neither_still_does_not_enqueue():
+    """Сторож расширен, а не снят: отметка сохраняется колонками, и запись, не меняющая
+    ни статуса, ни уважительности, по-прежнему обязана возвращать NULL."""
+    sql = triggers.ATTENDANCE_TRIGGER_SQL
+    assert "IF (TG_OP = 'UPDATE') AND NOT (" in sql
+    assert "RETURN NULL" in sql
+
+
 def test_uninstall_drops_both_triggers_and_functions():
     sql = triggers.uninstall_sql()
     assert sql.count("DROP TRIGGER IF EXISTS") == 4
