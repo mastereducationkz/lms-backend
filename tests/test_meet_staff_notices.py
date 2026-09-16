@@ -441,6 +441,77 @@ def test_a_summary_sent_before_it_kept_a_copy_takes_todays_reading_as_its_baseli
     assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 22))) == 1
 
 
+# --- which lessons the day holds, and why one joined or left (owner, 2026-09-17) ---------------
+
+
+def _group_of(summary):
+    from src.schemas.models import EventGroup, Group
+
+    return (summary["db"].query(Group).join(EventGroup, EventGroup.group_id == Group.id)
+            .filter(EventGroup.event_id == summary["event"].id).one())
+
+
+def _update_reply(summary):
+    return next(p["text"] for p in summary["posted"][1:] if p.get("reply_to_message_id"))
+
+
+def test_a_lesson_that_ran_stays_in_its_day_when_its_group_finishes_later(summary):
+    """16.09: a group was marked finished after its last lesson, and that recorded lesson left the
+    summary (60 → 59) with no word on which or why. A lesson that really ran stays."""
+    db = summary["db"]
+    db.add(LessonRecording(event_id=summary["event"].id, status="ready"))
+    _group_of(summary).is_over = True
+    db.flush()
+    assert meet_staff_digest.refresh_sent(db, _almaty(time(22, 20))) == 0
+    assert summary["edits"] == [] and len(summary["posted"]) == 1
+
+
+def test_a_lesson_that_never_ran_leaves_with_its_groups_reason(summary):
+    _group_of(summary).is_over = True  # no call saved, no recording: a stale lesson of a finished group
+    summary["db"].flush()
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 1
+    reply = _update_reply(summary)
+    assert "Было: Уроков в Meet: 1 · с записью 1 · без записи 0\nСтало: Уроков в Meet: 0" in reply
+    assert ("📚 <b>Уроки дня</b>\n"
+            "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: группа завершена") in reply
+
+
+def test_a_cancelled_lesson_is_named_with_why(summary):
+    event = summary["event"]
+    event.is_active = False
+    summary["db"].flush()
+    event.updated_at = _almaty(time(22, 4))
+    summary["db"].flush()
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 5))) == 1
+    assert "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: урок отменён" in _update_reply(summary)
+
+
+def test_a_lesson_moved_to_another_day_says_where_it_went(summary):
+    _move_lesson(summary, 24 * 60, edited_at=_almaty(time(22, 4)))
+    # Moved off the day, it no longer counts as «one of the day's lessons edited»: the 15-minute re-read finds it.
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 1
+    assert "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: перенесён на 17.09 в 18:00" in \
+        _update_reply(summary)
+
+
+def test_a_summary_from_before_it_remembered_its_lessons_explains_a_lesson_kept_because_it_ran(summary):
+    """The 16.09 summary itself: it was kept under the old rule, so a finished group's lesson that ran
+    comes back once — and the reply says why."""
+    db = summary["db"]
+    db.add(LessonRecording(event_id=summary["event"].id, status="ready"))
+    _group_of(summary).is_over = True
+    notice = db.query(MeetStaffNotice).filter_by(kind="digest").one()
+    notice.details = {"text": "📋 <b>Meet — итоги дня, 16.09</b>\nУроков в Meet: 0",
+                      "rendered_at": _almaty(time(22, 1)).isoformat()}
+    db.flush()
+    assert meet_staff_digest.refresh_sent(db, _almaty(time(22, 20))) == 1
+    reply = _update_reply(summary)
+    assert ("📚 <b>Уроки дня</b>\n➕ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: "
+            "урок прошёл — остаётся в сводке, хотя группа завершена") in reply
+    stored = db.query(MeetStaffNotice).filter_by(kind="digest").one().details["lessons"]
+    assert stored == {str(summary["event"].id): "• 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла"}
+
+
 def test_a_day_without_meet_lessons_sends_no_summary(world, monkeypatch):
     posted = []
     monkeypatch.setattr(support_client, "call", lambda *a, **k: posted.append(k) or {})
