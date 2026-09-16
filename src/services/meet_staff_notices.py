@@ -5,14 +5,14 @@ Owner, 2026-09-16. The Support bot posts them into a topic of the curators' grou
 «Meet Notifications»); the LMS report bot never posts there. Every minute, beside the room
 closer, for each lesson running in one of our Meet rooms:
 
+- 🔴 ``no_recording`` — 3 min in, people in the room for a minute, no recording in the call —
+  whoever is or is not in the room. Auto-recording starts only for an organisation account on a
+  computer browser: the Meet app on an iPhone/iPad never starts it, not even on a work account
+  (tested live 2026-09-16), and teachers who cannot get into their Workspace account yet teach from a
+  personal one, so a staff member joins to start it. Replied to when the recording starts.
 - 🟠 ``teacher_absent`` — 5 min in, people in the room and none of the teacher's confirmed Google
-  accounts among them: late, or joined on another account. It says outright whether the lesson is
-  recording, and while it is open it stands in for the no-recording notice — a missing teacher is
-  why nothing records. Replied to once the teacher has been in the room a minute.
-- 🔴 ``no_recording`` — 3 min in, people in the room for a minute, no recording in the call.
-  Auto-recording starts only for an organisation account on a computer browser: the Meet app on an
-  iPhone/iPad never starts it, not even on a work account (tested live 2026-09-16). Replied to when
-  the recording starts.
+  accounts among them: late, or joined on another account. Its own message, saying outright whether
+  the lesson is recording. Replied to once the teacher has been in the room a minute.
 - ⚪ ``empty_room`` — 10 min in, nobody has come to the room at all: cancelled, or another link.
 
 The evening summary lives in :mod:`src.services.meet_staff_digest`. A notice is one
@@ -101,6 +101,8 @@ def no_recording_text(lesson: dict, *, now: datetime, people: int, since: dateti
     if teacher_in_room:
         hint = ("Учитель в комнате, но запись не стартует — скорее всего, он зашёл через приложение "
                 "Meet на телефоне или планшете, или с личного аккаунта.")
+    elif teacher_in_room is False:
+        hint = "Рабочего аккаунта учителя в комнате нет — он ещё не зашёл или зашёл с личного аккаунта."
     else:
         hint = "Аккаунты учителя в Meet ещё не подтверждены — не видно, в комнате ли он."
     return (
@@ -287,18 +289,16 @@ def check_lesson(db, meet, lesson: dict, conference: Optional[dict], notices: di
         return
 
     if arrived is not None and now - arrived >= SETTLE:
-        if absent is None and teacher_in_room is False and elapsed >= TEACHER_ABSENT_AFTER:
-            _raise(db, "teacher_absent", lesson, now,
-                   teacher_absent_text(lesson, now=now, people=len(still_in), recording=recording_since is not None),
-                   summary)
-            return  # it says whether the lesson records; the red notice waits for the teacher
-        # Red is for a teacher who is there (or cannot be seen): an absent one gets orange at 5 min.
-        absent_open = absent is not None and absent.resolved_at is None
-        if (silent is None and recording_since is None and elapsed >= NO_RECORDING_AFTER
-                and teacher_in_room is not False and not absent_open):
+        # Two separate questions (owner, 2026-09-16): is it recording — whoever is in the room, since a
+        # staff member may be the one who starts it — and is the teacher's work account there.
+        if silent is None and recording_since is None and elapsed >= NO_RECORDING_AFTER:
             _raise(db, "no_recording", lesson, now,
                    no_recording_text(lesson, now=now, people=len(still_in), since=arrived,
                                      teacher_in_room=teacher_in_room),
+                   summary)
+        if absent is None and teacher_in_room is False and elapsed >= TEACHER_ABSENT_AFTER:
+            _raise(db, "teacher_absent", lesson, now,
+                   teacher_absent_text(lesson, now=now, people=len(still_in), recording=recording_since is not None),
                    summary)
     elif (not still_in and "empty_room" not in notices and elapsed >= EMPTY_ROOM_AFTER
           and not any(k in notices for k in LESSON_KINDS) and not _anyone_came(meet, lesson)):

@@ -146,39 +146,57 @@ def test_teacher_in_the_room_without_a_recording_gets_one_red_notice_in_the_cura
     assert f"https://meet.google.com/{CODE}" in body["text"]
 
 
-def test_absent_teacher_gets_orange_at_five_minutes_saying_nothing_records_and_no_red(lesson):
+def test_no_recording_is_red_at_three_minutes_even_when_the_teachers_work_account_is_missing(lesson):
+    # A teacher who cannot get into Workspace yet teaches from a personal account; staff join to record.
     lesson["teacher_confirmed"]()
     lesson["in_room"](STUDENT)
 
     lesson["run"](4)
-    assert lesson["posted"] == []  # the teacher may still come: no red in the meantime
+    assert len(lesson["posted"]) == 1
+    red = lesson["posted"][0]["text"]
+    assert "Урок идёт без записи" in red and "Рабочего аккаунта учителя в комнате нет" in red
+
     lesson["run"](6)
     lesson["run"](8)
+    assert len(lesson["posted"]) == 2  # the teacher question is its own message
+    orange = lesson["posted"][1]["text"]
+    assert "Учитель не зашёл в урок" in orange and "Урок не записывается" in orange
+    assert "зашёл с другого (личного) аккаунта" in orange
 
-    assert len(lesson["posted"]) == 1
-    text = lesson["posted"][0]["text"]
-    assert "Учитель не зашёл в урок" in text and "Урок не записывается" in text
-    assert "зашёл с другого (личного) аккаунта" in text
 
-
-def test_teacher_arriving_on_the_ipad_app_resolves_orange_then_red_follows(lesson):
+def test_staff_joining_to_record_resolves_red_while_the_teacher_is_still_missing(lesson):
     lesson["teacher_confirmed"]()
     lesson["in_room"](STUDENT)
+    lesson["run"](4)
+    lesson["joins"]("users/staff", at=5)
+    lesson["recording_from"](5)
     lesson["run"](6)
-    orange_id = 500 + len(lesson["posted"])
+
+    assert "Запись началась в 18:05" in lesson["posted"][1]["text"]
+    assert lesson["posted"][1]["reply_to_message_id"] == 501
+    orange = lesson["posted"][2]["text"]
+    assert "Учитель не зашёл в урок" in orange and "✅ Запись идёт." in orange
+
+
+def test_teacher_arriving_on_the_ipad_app_resolves_orange_and_red_stays_open(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT)
+    lesson["run"](6)  # both due in one tick: red, then orange
+    assert [p["text"].split("\n")[0] for p in lesson["posted"]] == ["🔴 <b>Урок идёт без записи</b>",
+                                                                     "🟠 <b>Учитель не зашёл в урок</b>"]
+    orange_id = 502
 
     lesson["joins"](TEACHER, at=8)
     lesson["run"](8.5)
-    assert len(lesson["posted"]) == 1  # not a minute in the room yet
+    assert len(lesson["posted"]) == 2  # not a minute in the room yet
     lesson["run"](9)
 
-    reply = lesson["posted"][1]
+    reply = lesson["posted"][2]
     assert reply["reply_to_message_id"] == orange_id and reply["message_thread_id"] == 13771
     assert "Учитель зашёл в 18:08" in reply["text"] and "Записи всё ещё нет" in reply["text"]
 
     lesson["run"](10)
-    assert "Урок идёт без записи" in lesson["posted"][2]["text"]
-    assert len(lesson["posted"]) == 3
+    assert len(lesson["posted"]) == 3  # red is already out, and still unresolved
 
 
 def test_a_recording_that_starts_after_the_red_notice_gets_a_reply(lesson):
