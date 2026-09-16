@@ -117,12 +117,20 @@ class MeetRoomCloserWorker:
             self._thread.join(timeout=max(5, self.poll_interval + 5))
 
     def tick(self) -> int:
+        closed = self._run(close_lingering_rooms, "Meet room closer")
+        # Same live rooms, same minute: is each running lesson actually being recorded?
+        from src.services.recording_watchdog import check_recordings_started
+        self._run(check_recordings_started, "Recording watchdog")
+        return closed
+
+    @staticmethod
+    def _run(step, label: str) -> int:
         db = SessionLocal()
         try:
-            return close_lingering_rooms(db)
+            return step(db)
         except Exception as e:
             db.rollback()
-            logger.error("Meet room closer tick failed: %s", e, exc_info=True)
+            logger.error("%s tick failed: %s", label, e, exc_info=True)
             return 0
         finally:
             db.close()

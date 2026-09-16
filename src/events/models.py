@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, func, text
+from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, JSON, func, text
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -218,6 +218,33 @@ class MissingRecordingLog(Base):
         UniqueConstraint("event_id", name="uq_missing_recording_event"),
         Index("ix_missing_recording_teacher", "teacher_id"),
         Index("ix_missing_recording_resolved", "resolved_at"),
+    )
+
+
+class RecordingStartAlert(Base):
+    """A lesson that was running with people in the room and no recording — staff were told.
+
+    MissingRecordingLog notices the gap hours after the lesson, for payroll; this one is raised
+    while the lesson is still on, so someone can join from a browser and start the recording.
+    One row per lesson: it is both the "already told" guard and the handle for the follow-up
+    reply once the recording does start.
+    """
+
+    __tablename__ = "recording_start_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
+    conference_record = Column(String, nullable=False)
+    # None = none of the teacher's Google accounts is confirmed, so presence could not be seen.
+    teacher_in_room = Column(Boolean, nullable=True)
+    people_in_room = Column(Integer, nullable=False, default=0)
+    alerted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    recording_started_at = Column(DateTime, nullable=True)
+    # [{"chat": "<chat>[:<topic>]", "message_id": n}] — where the alert went, for the reply.
+    messages = Column(JSON, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_recording_start_alert_event"),
     )
 
 

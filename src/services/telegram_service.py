@@ -23,6 +23,46 @@ def get_admin_chat_ids() -> List[str]:
     return [chat_id.strip() for chat_id in TELEGRAM_ADMIN_CHAT_IDS if chat_id.strip()]
 
 
+def recording_alert_chats() -> List[str]:
+    """Where live "lesson running without a recording" alerts go.
+
+    Its own list on purpose, NOT the admin chats: those also receive full database backups
+    (``send_backup_to_admins``), so a group chat must never be added there. An entry is
+    ``<chat_id>`` or ``<chat_id>:<topic_id>`` for a topic of a forum supergroup.
+    """
+    raw = os.getenv("TELEGRAM_RECORDING_ALERT_CHATS", "")
+    return [chat.strip() for chat in raw.split(",") if chat.strip()]
+
+
+def send_message_sync(chat: str, text: str, reply_to: Optional[int] = None,
+                      parse_mode: str = "HTML") -> Optional[int]:
+    """Send one message from a worker thread; returns its message_id, or None if it failed.
+
+    ``chat`` may name a forum topic as ``<chat_id>:<topic_id>``. Never raises: an alert that
+    could not be delivered is logged, and the caller carries on with the other chats.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN not configured, skipping message to %s", chat)
+        return None
+    chat_id, _, topic = chat.partition(":")
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode,
+               "link_preview_options": {"is_disabled": True}}
+    if topic:
+        payload["message_thread_id"] = int(topic)
+    if reply_to:
+        payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+    try:
+        response = httpx.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                              json=payload, timeout=10.0)
+        body = response.json()
+        if response.status_code == 200 and body.get("ok"):
+            return body["result"]["message_id"]
+        logger.error("Telegram message to %s failed: %s", chat, body.get("description") or response.text)
+    except Exception as e:
+        logger.error("Telegram message to %s failed: %s", chat, e)
+    return None
+
+
 async def send_telegram_message(chat_id: str, message: str, parse_mode: str = "HTML") -> bool:
     """
     Send a message to a specific Telegram chat.
