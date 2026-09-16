@@ -233,16 +233,20 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
         marked.append((e, a))
     marked.sort(key=lambda pair: pair[0].start_datetime or datetime.min)
 
-    def _rows(status: str) -> List[Dict[str, Any]]:
-        return [
-            {
-                "date": _iso(e.start_datetime),
-                "title": e.title,
-                "excused": bool(a.excused),
-                "excuse_note": a.excuse_note,
-            }
-            for e, a in marked if a.status == status
-        ]
+    def _rows(status: str, with_excuse: bool = False) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for e, a in marked:
+            if a.status != status:
+                continue
+            row = {"date": _iso(e.start_datetime), "title": e.title}
+            # Уважительность живёт только на пропуске. На опоздании эти два ключа были бы
+            # всегда False/None — поле, которое ничего не означает, но которое читатель
+            # отчёта рано или поздно попробует прочитать.
+            if with_excuse:
+                row["excused"] = bool(a.excused)
+                row["excuse_note"] = a.excuse_note
+            rows.append(row)
+        return rows
 
     present = sum(1 for _, a in marked if a.status == "present")
     late = sum(1 for _, a in marked if a.status == "late")
@@ -258,7 +262,7 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
         "absent": absent,
         "absent_excused": absent_excused,
         "attendance_pct": round((present + late) / total * 100, 2) if total else None,
-        "absences": _rows("absent"),
+        "absences": _rows("absent", with_excuse=True),
         "lates": _rows("late"),
     }
 
