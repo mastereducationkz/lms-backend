@@ -81,11 +81,13 @@ def live_links(db, now: datetime) -> list[tuple[Group, TelegramGroupLink]]:
 
 
 def post(support_group_id: int, text: str, idempotency_key: str, *, silent: bool,
-         pin: bool = False, reply_markup: Optional[dict] = None) -> dict:
+         pin: bool = False, reply_markup: Optional[dict] = None,
+         topic_id: Optional[int] = None, reply_to: Optional[int] = None) -> dict:
     """One message → ``{"status": sent|skipped|failed, "telegram_message_id", "error"}``.
 
     400/404/409/422 are ``skipped`` (the chat can never take it: unknown, unapproved, malformed);
     anything else is ``failed`` and retried by the caller while it has attempts left.
+    ``topic_id`` posts into a topic of a forum group; ``reply_to`` answers an earlier message.
     """
     body = {"telegram_group_id": support_group_id, "text": text, "idempotency_key": idempotency_key,
             "silent": silent, "disable_web_page_preview": True, "parse_mode": "HTML"}
@@ -93,6 +95,10 @@ def post(support_group_id: int, text: str, idempotency_key: str, *, silent: bool
         body["pin"] = True
     if reply_markup:
         body["reply_markup"] = reply_markup
+    if topic_id:
+        body["message_thread_id"] = topic_id
+    if reply_to:
+        body["reply_to_message_id"] = reply_to
     try:
         result = support_client.call("POST", "/telegram/messages", actor_email=SYSTEM_ACTOR,
                                      actor_name=ACTOR_NAME, json_body=body,

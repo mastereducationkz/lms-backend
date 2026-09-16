@@ -118,9 +118,9 @@ class MeetRoomCloserWorker:
 
     def tick(self) -> int:
         closed = self._run(close_lingering_rooms, "Meet room closer")
-        # Same live rooms, same minute: is each running lesson actually being recorded?
-        from src.services.recording_watchdog import check_recordings_started
-        self._run(check_recordings_started, "Recording watchdog")
+        # Same live rooms, same minute: staff hear about a lesson going wrong while it runs.
+        from src.services import meet_staff_notices
+        self._run(meet_staff_notices.run, "Meet staff notices")
         return closed
 
     @staticmethod
