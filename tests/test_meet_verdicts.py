@@ -125,9 +125,19 @@ def test_an_unconfirmed_account_holds_back_absent_and_late_but_not_present():
     assert (present["verdict"], present["held_back"]) == ("present", False)
 
 
+def test_a_held_back_verdict_still_says_what_the_confirmed_accounts_show():
+    """2026-09-17: «not known yet» beside the student's own confirmed account read as if that account
+    were the unconfirmed one. The page now says «Late 9 min?» — the verdict on what is confirmed."""
+    assert judge((12, 60), unknown_in_room=True)["provisional"] == "late"
+    assert judge((0, 20), unknown_in_room=True)["provisional"] == "absent"
+    assert judge((0, 60), unknown_in_room=True)["provisional"] == "present"
+    assert judge((0, 60))["provisional"] == "present", "the same field when nothing is held back"
+
+
 def test_when_even_the_teacher_is_not_known_nothing_is_judged():
     v = judge((0, 60), teacher=(), unknown_in_room=True)
     assert (v["verdict"], v["held_back"], v["attended"]) == (None, True, None), "that account may be a late teacher"
+    assert v["provisional"] == "present", "on the timetable, until that account is named"
 
 
 # ── the record: marks against the verdict ────────────────────────────────────────────────
@@ -190,7 +200,7 @@ def test_the_list_carries_each_students_verdict_for_the_journal(room):
     assert listing["verdict_rules"] == {"late_after_minutes": 5, "present_share": 0.75}
     item = next(i for i in listing["items"] if i["event_id"] == room["lesson"].id)
     aya = next(v for v in item["verdicts"] if v["user_id"] == room["aya"].id)
-    assert aya == {"user_id": room["aya"].id, "verdict": "late", "held_back": False,
+    assert aya == {"user_id": room["aya"].id, "verdict": "late", "held_back": False, "provisional": "late",
                    "minutes": 53, "required": 45, "late_minutes": 7}
     assert item["verdict_summary"]["unmarked"] == 3
 

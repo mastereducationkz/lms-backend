@@ -258,6 +258,10 @@ def verdict(clock: dict, spans: list, *, unknown_in_room: bool) -> dict:
     arrival, so while one is there «absent» and «late» wait for it and «present» does not; if the
     teacher was not seen either, that account may be the teacher, the clock is unknown, and
     nothing is judged. ``attended`` (present or late, None when unknown) is what billing reads.
+
+    ``provisional`` is the verdict on the confirmed accounts alone, also while held back: a page says
+    «Late 9 min?» rather than hiding it — on 2026-09-17 a bare «not known yet» beside the student's own
+    confirmed account read as if that account were the unconfirmed one.
     """
     stays = _stays(clock, spans)
     lo, until = clock["start"], clock["count_until"]
@@ -270,7 +274,7 @@ def verdict(clock: dict, spans: list, *, unknown_in_room: bool) -> dict:
 
     clock_unknown = unknown_in_room and not clock["follows_teacher"]
     held_back = clock_unknown or (unknown_in_room and judged != "present")
-    return {"verdict": None if held_back else judged, "held_back": held_back,
+    return {"verdict": None if held_back else judged, "held_back": held_back, "provisional": judged,
             "attended": None if clock_unknown or (unknown_in_room and not attended) else attended,
             "minutes": minutes, "required": required, "late_minutes": late_minutes}
 
@@ -593,7 +597,8 @@ def verdict_summary(students: list) -> dict:
 def compact_verdicts(record: dict) -> list:
     """Each student's verdict in a few fields — what the list carries for the attendance journal."""
     return [{"user_id": s["user_id"], **{k: s["verdict"][k] for k in
-                                         ("verdict", "held_back", "minutes", "required", "late_minutes")}}
+                                         ("verdict", "held_back", "provisional", "minutes", "required",
+                                          "late_minutes")}}
             for s in record.get("students") or []]
 
 
