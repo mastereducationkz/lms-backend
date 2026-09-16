@@ -82,6 +82,9 @@ def lesson(world, monkeypatch):
     posted = []
 
     def call(method, path, *, actor_email, actor_name="", json_body=None, timeout=None, **_):
+        if path == "/telegram/messages/edit":
+            edits.append(json_body)
+            return {"ok": not edit_gone, "gone": bool(edit_gone)}
         assert (method, path) == ("POST", "/telegram/messages")
         posted.append(json_body)
         if fail_next:
@@ -90,7 +93,7 @@ def lesson(world, monkeypatch):
             raise HTTPException(status_code=503, detail="retry")
         return {"status": "sent", "telegram_message_id": 500 + len(posted)}
 
-    fail_next = []
+    fail_next, edits, edit_gone = [], [], []
     monkeypatch.setattr(google_workspace, "meet_client", lambda: meet)
     monkeypatch.setattr(meet_recordings, "space_meet_code", lambda space: CODE if space == SPACE else None)
     monkeypatch.setattr(support_client, "call", call)
@@ -119,6 +122,7 @@ def lesson(world, monkeypatch):
         return meet_staff_notices.run(db, now=START + timedelta(minutes=minute))
 
     return {"db": db, "event": event, "meet": meet, "posted": posted, "fail_next": fail_next, "run": run,
+            "edits": edits, "edit_gone": edit_gone,
             "in_room": in_room, "joins": joins, "recording_from": recording_from,
             "teacher_confirmed": teacher_confirmed}
 
@@ -339,6 +343,102 @@ def test_the_summary_counts_a_recorded_call_that_opened_long_before_the_lesson(l
     text = lesson["posted"][0]["text"]
     assert "Уроков в Meet: 1 · с записью 1 · без записи 0" in text
     assert "Никто не заходил" not in text
+
+
+# --- a sent summary stays true ------------------------------------------------------------------
+
+
+@pytest.fixture
+def summary(lesson, monkeypatch):
+    """A 22:01 summary whose one late teacher is as late as the lesson's start time says."""
+    lesson["in_room"](STUDENT, TEACHER, live=False)
+    lesson["recording_from"](0)
+    def records(_db, events, now):
+        return [{"event_id": e.id, "state": "ready",
+                 "teacher": {"name": "Жанатбеккызы Лайла",
+                             "flags": [{"code": "teacher_late",
+                                        "minutes": 14 - int((e.start_datetime - START).total_seconds() // 60)}]}}
+                for e in events]
+
+    monkeypatch.setattr(meet_presence, "records", records)
+    assert meet_staff_digest.send_if_due(lesson["db"], _almaty(time(22, 1))) == "sent"
+    return lesson
+
+
+def _move_lesson(summary, minutes: int, edited_at: datetime):
+    event = summary["event"]
+    event.start_datetime = START + timedelta(minutes=minutes)
+    event.end_datetime = event.start_datetime + timedelta(hours=1)
+    summary["db"].flush()
+    event.updated_at = edited_at  # after flush: onupdate would stamp the real clock
+    summary["db"].flush()
+
+
+def test_a_lesson_edited_after_the_summary_edits_it_and_replies_with_what_changed(summary):
+    digest = summary["posted"][0]
+    assert "18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 14 мин." in digest["text"]
+
+    _move_lesson(summary, 10, edited_at=_almaty(time(22, 4)))
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 5))) == 1
+
+    edit = summary["edits"][0]
+    assert edit["message_id"] == 501 and edit["telegram_group_id"] == 210
+    assert "18:10 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 4 мин." in edit["text"]
+    assert edit["text"].endswith("✏️ Обновлено 16.09 в 22:05")
+    reply = summary["posted"][1]
+    assert reply["reply_to_message_id"] == 501 and reply["message_thread_id"] == 13771 and reply["silent"]
+    assert reply["idempotency_key"] == "meet-digest:2026-09-16:update:1"
+    assert reply["text"] == ("✏️ <b>Сводка за 16.09 обновлена</b>\n\n⏰ <b>Учитель опоздал</b>\n"
+                             "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 14 мин.\n"
+                             "➕ 18:10 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 4 мин.")
+
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 6))) == 0
+    _move_lesson(summary, 5, edited_at=_almaty(time(22, 7)))
+    meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 8)))
+    assert summary["posted"][2]["idempotency_key"] == "meet-digest:2026-09-16:update:2"
+    assert len(summary["edits"]) == 2
+
+
+def test_an_unchanged_summary_is_reread_but_not_touched(summary):
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 10))) == 0  # not due yet
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 0  # due, same text
+    assert summary["edits"] == [] and len(summary["posted"]) == 1
+
+
+def test_notes_alone_changing_edit_without_a_reply(summary, monkeypatch):
+    original = meet_staff_digest.digest_text
+
+    def with_a_note(db, day, now, meet=None):
+        return original(db, day, now, meet) + "\n\n⏳ Опоздания ещё не посчитаны для 1 недавно закончившихся уроков."
+
+    monkeypatch.setattr(meet_staff_digest, "digest_text", with_a_note)
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 1
+    assert len(summary["edits"]) == 1 and len(summary["posted"]) == 1
+
+
+def test_a_summary_is_kept_true_for_a_day_then_left_alone(summary):
+    _move_lesson(summary, 10, edited_at=_almaty(time(23, 0)) + timedelta(days=1))
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 2)) + timedelta(days=1)) == 0
+    assert summary["edits"] == []
+
+
+def test_a_deleted_summary_message_is_not_edited_again(summary):
+    summary["edit_gone"].append(True)
+    _move_lesson(summary, 10, edited_at=_almaty(time(22, 4)))
+    meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 5)))
+    _move_lesson(summary, 12, edited_at=_almaty(time(22, 6)))
+    meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 30)))
+    assert len(summary["edits"]) == 1 and len(summary["posted"]) == 1
+
+
+def test_a_summary_sent_before_it_kept_a_copy_takes_todays_reading_as_its_baseline(summary):
+    notice = summary["db"].query(MeetStaffNotice).filter_by(kind="digest").one()
+    notice.details = None
+    summary["db"].flush()
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 0
+    assert summary["edits"] == []
+    _move_lesson(summary, 10, edited_at=_almaty(time(22, 21)))
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 22))) == 1
 
 
 def test_a_day_without_meet_lessons_sends_no_summary(world, monkeypatch):

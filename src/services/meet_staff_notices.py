@@ -345,6 +345,8 @@ def run(db, now: Optional[datetime] = None) -> dict:
         status = meet_staff_digest.send_if_due(db, now)
         if status:
             summary[f"digest:{status}"] += 1
+        if meet_staff_digest.refresh_sent(db, now):
+            summary["digest:refreshed"] += 1
     except Exception as e:
         db.rollback()
         logger.warning("meet digest: %s", e)

@@ -8,24 +8,37 @@ Recording is read from ``lesson_recordings`` when the pipeline already claimed t
 Meet otherwise (Google shows a recording the moment it starts, the claim comes an hour later).
 Punctuality is :mod:`src.services.meet_presence` — lessons that ended in the last ~20 minutes are
 not judged there yet, and the summary says how many.
+
+**A summary stays true for a day** (owner, 2026-09-16: a lesson moved to 20:10 after 22:00 left
+«опоздал на 14 мин.» standing). Until the next summary goes out it is re-read every
+``REFRESH_EVERY``, and within a minute when one of that day's lessons is edited; when it reads
+differently the message is edited in place and — since Telegram tells nobody about an edit — a
+silent reply lists what changed (➖ / ➕ per section).
 """
 from __future__ import annotations
 
 from collections import Counter
+import logging
 from datetime import date, datetime, time, timedelta
 from html import escape
 from typing import Optional
 
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 
 from src.schemas.models import Event, LessonRecording, MeetStaffNotice, UserInDB
 from src.services import google_workspace, meet_presence, meet_recordings
+from src.services import group_bot_outbox as outbox
 from src.services import group_bot_render as render
 from src.services import meet_staff_notices as notices
 from src.services.operational_groups import event_has_operational_group_clause
 from src.services.telegram_invitations import _held_in_an_lms_meet_room
 
+logger = logging.getLogger(__name__)
+
 DIGEST_AT = time(22, 0)
+REFRESH_EVERY = timedelta(minutes=15)
+# Until the next day's summary takes over.
+LIVE_FOR = timedelta(hours=24)
 LINES_PER_SECTION = 12
 TEXT_LIMIT = 3900
 
@@ -163,4 +176,135 @@ def send_if_due(db, now: datetime, meet=None) -> Optional[str]:
         row.status = "skipped"
         db.commit()
         return "skipped"
-    return notices._deliver(db, notice.id, text, f"meet-digest:{day.isoformat()}")
+    status = notices._deliver(db, notice.id, text, f"meet-digest:{day.isoformat()}")
+    if status == "sent":
+        _remember(db, notice.id, text=text, rendered_at=now)
+    return status
+
+
+# --- keeping a sent summary true ---------------------------------------------------------------
+
+
+def _remember(db, notice_id: int, **changes) -> None:
+    row = db.get(MeetStaffNotice, notice_id)
+    details = dict(row.details or {})
+    for key, value in changes.items():
+        if value is None:
+            details.pop(key, None)
+        else:
+            details[key] = value.isoformat() if isinstance(value, datetime) else value
+    row.details = details
+    db.commit()
+
+
+def _summary_start(day: date) -> datetime:
+    return datetime.combine(day, DIGEST_AT) - render.ALMATY_OFFSET
+
+
+def _lessons_edited_since(db, day: date, since: datetime) -> bool:
+    start = datetime.combine(day, time(0)) - render.ALMATY_OFFSET
+    latest = (db.query(func.max(Event.updated_at))
+              .filter(Event.event_type == "class", Event.start_datetime >= start,
+                      Event.start_datetime < start + timedelta(days=1))
+              .scalar())
+    return latest is not None and latest.replace(tzinfo=None) > since
+
+
+def _read(text: str) -> tuple:
+    """A rendered summary → (its counts line, {section title: [bullet lines]})."""
+    head, *blocks = text.split("\n\n")
+    head_lines = head.split("\n")
+    sections = {}
+    for block in blocks:
+        lines = block.split("\n")
+        if len(lines) > 1 and lines[0].endswith("</b>"):
+            sections[lines[0]] = [line for line in lines[1:] if line.startswith("• ")]
+    return (head_lines[1] if len(head_lines) > 1 else ""), sections
+
+
+def changes_text(day: date, old: str, new: str) -> Optional[str]:
+    """What a reader of the old summary needs to know → the reply, or None when only notes moved."""
+    old_counts, old_sections = _read(old)
+    new_counts, new_sections = _read(new)
+    parts = []
+    if old_counts != new_counts:
+        parts += [f"Было: {old_counts}", f"Стало: {new_counts}"]
+    titles = list(new_sections) + [t for t in old_sections if t not in new_sections]
+    for title in titles:
+        before, after = old_sections.get(title, []), new_sections.get(title, [])
+        removed = [line for line in before if line not in after]
+        added = [line for line in after if line not in before]
+        if removed or added:
+            parts += ["", title, *(f"➖ {line[2:]}" for line in removed), *(f"➕ {line[2:]}" for line in added)]
+    if not parts:
+        return None
+    text = f"✏️ <b>Сводка за {day:%d.%m} обновлена</b>\n" + "\n".join(parts)
+    return text if len(text) <= TEXT_LIMIT else text[:TEXT_LIMIT].rsplit("\n", 1)[0] + "\n…"
+
+
+def _post_pending_reply(notice_id: int, db, day: date, message_id: int) -> None:
+    row = db.get(MeetStaffNotice, notice_id)
+    details = row.details or {}
+    reply, number = details.get("pending_reply"), details.get("pending_update")
+    if not reply:
+        return
+    group_id, topic_id = notices.target()
+    db.commit()
+    result = outbox.post(group_id, reply, f"meet-digest:{day.isoformat()}:update:{number}", silent=True,
+                         topic_id=topic_id, reply_to=message_id)
+    if result["status"] == "sent":
+        _remember(db, notice_id, pending_reply=None, pending_update=None, updates=number)
+    elif result["status"] == "skipped":
+        _remember(db, notice_id, pending_reply=None, pending_update=None)
+        logger.warning("summary %s: update reply refused: %s", day, result.get("error"))
+    else:
+        logger.warning("summary %s: update reply failed, retrying next tick: %s", day, result.get("error"))
+
+
+def refresh_sent(db, now: datetime, meet=None) -> int:
+    """Re-read the summaries still live; edit and reply where they changed. Returns how many changed."""
+    today = render.local(now).date()
+    recent = (db.query(MeetStaffNotice)
+              .filter(MeetStaffNotice.kind == "digest", MeetStaffNotice.status == "sent",
+                      MeetStaffNotice.telegram_message_id.isnot(None),
+                      MeetStaffNotice.day >= today - timedelta(days=1))
+              .order_by(MeetStaffNotice.day).all())
+    changed = 0
+    for notice in recent:
+        notice_id, day, message_id = notice.id, notice.day, notice.telegram_message_id
+        details = dict(notice.details or {})
+        if details.get("gone") or now >= _summary_start(day) + LIVE_FOR:
+            continue
+        _post_pending_reply(notice_id, db, day, message_id)
+        details = dict(db.get(MeetStaffNotice, notice_id).details or {})
+        if details.get("pending_reply"):
+            continue  # say what changed before changing it again
+        rendered_at = datetime.fromisoformat(details["rendered_at"]) if details.get("rendered_at") else None
+        if (rendered_at is not None and now - rendered_at < REFRESH_EVERY
+                and not _lessons_edited_since(db, day, rendered_at)):
+            continue
+
+        text = digest_text(db, day, now, meet) or (
+            f"📋 <b>Meet — итоги дня, {day:%d.%m}</b>\nУроков в Meet: 0")
+        old = details.get("text")
+        if old is None or old == text:
+            # No baseline yet (sent before summaries were kept true), or nothing to say.
+            _remember(db, notice_id, text=text, rendered_at=now)
+            continue
+        group_id, _ = notices.target()
+        edited = outbox.edit(group_id, message_id, f"{text}\n\n✏️ Обновлено {render.local(now):%d.%m в %H:%M}", None)
+        if edited["gone"]:
+            _remember(db, notice_id, gone=True)
+            continue
+        if not edited["ok"]:
+            _remember(db, notice_id, rendered_at=now)  # try again in REFRESH_EVERY
+            logger.warning("summary %s: edit failed: %s", day, edited.get("description"))
+            continue
+        reply = changes_text(day, old, text)
+        _remember(db, notice_id, text=text, rendered_at=now,
+                  pending_reply=reply, pending_update=(details.get("updates", 0) + 1) if reply else None)
+        if reply:
+            _post_pending_reply(notice_id, db, day, message_id)
+        changed += 1
+        logger.info("summary %s refreshed (%s)", day, "reply sent" if reply else "edit only")
+    return changed
