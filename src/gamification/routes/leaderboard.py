@@ -866,13 +866,15 @@ async def get_weekly_lessons_with_hw_status(
     
     # 7. Get Attendance — from Attendance (single source of truth)
     event_ids = [e.id for e in events if hasattr(e, 'id') and e.id]
-    attendance_map = {}  # (user_id, event_id) -> {"status": str, "activity_score": float|None}
+    attendance_map = {}  # (user_id, event_id) -> {"status", "activity_score", "excused", "excuse_note"}
     if event_ids:
         raw_map = AttendanceService.get_attendance_map_for_events(db, event_ids, student_ids)
         for (uid, eid), att in raw_map.items():
             attendance_map[(uid, eid)] = {
                 "status": attendance_status_to_ui(att["status"]),
                 "activity_score": att["activity_score"],
+                "excused": att["excused"],
+                "excuse_note": att["excuse_note"],
             }
 
     
@@ -1266,6 +1268,10 @@ async def get_weekly_lessons_with_hw_status(
                 "event_id": event.id,
                 "attendance_status": status,
                 "activity_score": att["activity_score"] if att else None,
+                # Уважительность — надстройка над «Не был», а не новый статус: клиент,
+                # который про эти поля не знает, продолжает рисовать обычный пропуск.
+                "excused": att["excused"] if att else False,
+                "excuse_note": att["excuse_note"] if att else None,
                 "homework_statuses": hw_statuses,
                 "homework_status": hw_status,
                 # False = lesson predates the student's join date (see above).

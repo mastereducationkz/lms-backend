@@ -416,3 +416,54 @@ def test_grid_bulk_writes_nothing_when_one_row_is_invalid(
 
     row = AttendanceService.get_by_event_and_user(db, event_id, first_user_id)
     assert row is None
+
+
+import asyncio
+
+from src.gamification.routes.leaderboard import get_weekly_lessons_with_hw_status
+
+
+def test_the_grid_response_carries_the_excuse(db, event_and_student, marking_teacher, teacher_group):
+    """Ячейка обязана приехать на клиент с причиной: иначе учитель, открыв сетку заново,
+    увидит просто «Не был» и потеряет то, что сам написал.
+
+    `get_group_leaderboard` (the other, curator-only leaderboard endpoint in this module)
+    returns a flat per-student row with no `lessons` map and doesn't accept a `teacher`
+    caller at all. The grid a teacher actually reopens — with `students[].lessons{}` cells
+    keyed by lesson number — is `get_weekly_lessons_with_hw_status`; see
+    tests/test_weekly_lessons_teacher_access.py for the same call shape. It's async, so it
+    is driven with asyncio.run like every other direct call to it in this suite.
+
+    Two rows the existing fixtures don't provide are added here: an `EventGroup` linking
+    the event to `teacher_group` (this endpoint finds events by joining EventGroup, not by
+    event.teacher_id), and a `GroupStudent` membership row (student_ids come from
+    GroupStudent; without one the function returns `students: []` before ever reaching the
+    per-lesson loop).
+    """
+    from src.courses.models import GroupStudent
+    from src.schemas.models import EventGroup
+
+    event_id, user_id = event_and_student
+    db.add(EventGroup(event_id=event_id, group_id=teacher_group.id))
+    db.add(GroupStudent(group_id=teacher_group.id, student_id=user_id))
+    db.flush()
+
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent",
+        excused=True, excuse_note="соревнования",
+    )
+    db.flush()
+
+    payload = asyncio.run(get_weekly_lessons_with_hw_status(
+        teacher_group.id, week_number=1, current_user=marking_teacher, db=db,
+    ))
+
+    cells = [
+        cell
+        for row in payload["students"]
+        for cell in row["lessons"].values()
+        if cell["event_id"] == event_id
+    ]
+    assert cells, "урок не попал в сетку — проверьте week_number фикстуры"
+    assert cells[0]["excused"] is True
+    assert cells[0]["excuse_note"] == "соревнования"
