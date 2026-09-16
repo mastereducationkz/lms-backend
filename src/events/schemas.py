@@ -134,9 +134,14 @@ class AttendanceRecord(BaseModel):
     student_id: int
     status: str
     activity_score: Optional[float] = None
-    #: Пропуск по уважительной причине. Дефолт false — старый клиент, который об этом поле
-    #: не знает, шлёт обычный пропуск, ровно как раньше.
-    excused: bool = False
+    #: Пропуск по уважительной причине. Тристабильно, и дефолт — ``None``, а не ``False``.
+    #:
+    #: ``None`` означает «клиент про уважительность ничего не сообщает» и оставляет
+    #: сохранённое значение нетронутым; ``False`` — явное снятие. Дефолт ``False`` здесь
+    #: стирал бы причину при каждом сохранении, которое поле не шлёт: панель замен
+    #: пересылает весь список учеников целиком, а мобильная очередь вслепую переотправляет
+    #: payload, записанный до фичи. Оба затёрли бы чужие уважительные.
+    excused: Optional[bool] = None
     #: Свободный текст; обязателен, когда стоит ``excused``. Роут отвечает 422, если пусто.
     excuse_note: Optional[str] = None
 
@@ -151,6 +156,12 @@ class EventStudentSchema(BaseModel):
     attendance_status: Optional[str] = "registered"
     activity_score: Optional[float] = None
     last_updated: Optional[datetime] = None
+    #: Та же надстройка над «Не был», что и в сетке. Без неё карточка урока — экран, на
+    #: котором уважительную и ставят, — перечитывала бы её как обычный пропуск: поле
+    #: объявлено в ``response_model``, поэтому непрописанное здесь не «просочится», а
+    #: пропадёт. Дефолты повторяют поведение до фичи.
+    excused: bool = False
+    excuse_note: Optional[str] = None
 
 
 class SubstitutionLessonSchema(BaseModel):

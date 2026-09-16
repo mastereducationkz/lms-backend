@@ -80,12 +80,15 @@ def marked_statuses_for_sql() -> list[str]:
 
 
 def validate_excused(
-    status: Optional[str], excused: bool, note: Optional[str]
+    status: Optional[str], excused: Optional[bool], note: Optional[str]
 ) -> None:
     """Проверить, что флаг уважительности не противоречит строке, на которой стоит.
 
     Бросает ``ValueError`` с машинным кодом; вызывающий роут переводит его в 422.
     Коды: ``excused_requires_absent``, ``excused_requires_note``.
+
+    ``excused`` принимает и ``None`` — «вызывающий про уважительность не сообщает».
+    Проверять в этом случае нечего: строка не меняется, значит и противоречить нечему.
     """
     if not excused:
         return
