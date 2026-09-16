@@ -449,7 +449,13 @@ def _attendance_flowables(report, styles) -> List[Any]:
     story.append(Paragraph(
         f"Занятий с отметкой: <b>{att['marked_total']}</b> · "
         f"Присутствовал(а): <b>{att['attended']} — {_pct(att['attendance_pct'])}</b> · "
-        f"Пропущено: <b>{att['absent']}</b> · Опозданий: <b>{att['late']}</b>",
+        f"Пропущено: <b>{att['absent']}</b>"
+        + (
+            f" (из них по уважительной: <b>{att['absent_excused']}</b>)"
+            if att.get("absent_excused")
+            else ""
+        )
+        + f" · Опозданий: <b>{att['late']}</b>",
         styles["body"]))
     for label, rows in (("Пропуски", att["absences"]), ("Опоздания", att["lates"])):
         if rows:

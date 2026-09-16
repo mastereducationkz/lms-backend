@@ -195,7 +195,7 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
         ).all()
     ]
     empty = {
-        "marked_total": 0, "attended": 0, "late": 0, "absent": 0,
+        "marked_total": 0, "attended": 0, "late": 0, "absent": 0, "absent_excused": 0,
         "attendance_pct": None, "absences": [], "lates": [],
     }
     if not group_ids:
@@ -235,19 +235,28 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
 
     def _rows(status: str) -> List[Dict[str, Any]]:
         return [
-            {"date": _iso(e.start_datetime), "title": e.title}
+            {
+                "date": _iso(e.start_datetime),
+                "title": e.title,
+                "excused": bool(a.excused),
+                "excuse_note": a.excuse_note,
+            }
             for e, a in marked if a.status == status
         ]
 
     present = sum(1 for _, a in marked if a.status == "present")
     late = sum(1 for _, a in marked if a.status == "late")
     absent = sum(1 for _, a in marked if a.status == "absent")
+    # Разрез, а не вычет: «absent» остаётся полным числом пропусков. Уважительный пропуск
+    # считается пропуском — это принятое решение, и отчёт не имеет права его пересматривать.
+    absent_excused = sum(1 for _, a in marked if a.status == "absent" and a.excused)
     total = len(marked)
     return {
         "marked_total": total,
         "attended": present + late,
         "late": late,
         "absent": absent,
+        "absent_excused": absent_excused,
         "attendance_pct": round((present + late) / total * 100, 2) if total else None,
         "absences": _rows("absent"),
         "lates": _rows("late"),

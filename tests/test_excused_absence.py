@@ -533,3 +533,27 @@ def test_the_attendance_matrix_carries_the_excuse(db, event_and_student, marking
     assert unmarked_cells, "урок не попал в матрицу"
     assert unmarked_cells[0]["excused"] is False
     assert unmarked_cells[0]["excuse_note"] is None
+
+
+def test_report_counts_excused_absences_separately(db, event_and_student, teacher_group):
+    """«absent» остаётся полным числом пропусков: отчёт добавляет разрез, а не меняет
+    существующую цифру — иначе у всех, кто её читает, молча изменится смысл колонки."""
+    from src.courses.models import GroupStudent
+    from src.reports.services import _attendance_section
+    from src.schemas.models import EventGroup
+
+    event_id, user_id = event_and_student
+    db.add(EventGroup(event_id=event_id, group_id=teacher_group.id))
+    db.add(GroupStudent(group_id=teacher_group.id, student_id=user_id))
+    db.flush()
+
+    AttendanceService.upsert_for_event(
+        db, event_id=event_id, user_id=user_id, status="absent",
+        excused=True, excuse_note="болел",
+    )
+    db.flush()
+    section = _attendance_section(db, user_id)
+    assert section["absent"] == 1
+    assert section["absent_excused"] == 1
+    assert section["absences"][0]["excused"] is True
+    assert section["absences"][0]["excuse_note"] == "болел"
