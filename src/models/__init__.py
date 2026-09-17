@@ -40,7 +40,7 @@ from src.checkpoints.models import (  # noqa: F401
 from src.events.models import (
     Event, EventGroup, EventCourse, EventParticipant,
     MissedAttendanceLog, LessonSchedule, Attendance,
-    LessonRecording, MissingRecordingLog,
+    LessonRecording, MissingRecordingLog, MeetStaffNotice,
     MeetConference, MeetParticipant, MeetParticipantSession, GoogleAccountLink,
     RecordingWatchLink, MeetFlagReview,
 )
@@ -87,7 +87,7 @@ __all__ = [
     "StudentCourseSummary", "CourseAnalyticsCache", "QuizAttempt",
     "Event", "EventGroup", "EventCourse", "EventParticipant",
     "MissedAttendanceLog", "LessonSchedule", "Attendance",
-    "LessonRecording", "MissingRecordingLog",
+    "LessonRecording", "MissingRecordingLog", "MeetStaffNotice",
     "MeetConference", "MeetParticipant", "MeetParticipantSession", "GoogleAccountLink",
     "RecordingWatchLink", "MeetFlagReview",
     "AppSetting", "MeetRoomTranscription", "MeetSpeech", "LessonTranscript",

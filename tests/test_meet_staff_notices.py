@@ -1,0 +1,585 @@
+"""Staff hear about a lesson going wrong while it runs, from the Support bot, in the curators' topic.
+
+Owner, 2026-09-16: 🔴 no recording (3 min), 🟠 teacher not in the room — saying outright whether it
+records (5 min), ⚪ nobody came (10 min), and a 22:00 summary. Google and Support are faked; the
+lesson, rosters, account links and notice rows are real.
+"""
+from datetime import datetime, time, timedelta
+
+import pytest
+
+from src.schemas.models import GoogleAccountLink, LessonRecording, MeetStaffNotice
+from src.services import (google_workspace, group_bot_render, meet_presence, meet_recordings,
+                          meet_staff_digest, meet_staff_notices, support_client)
+from tests.test_operational_groups import db, world  # noqa: F401 - fixtures
+
+TEACHER = "users/111"
+STUDENT = "users/222"
+CODE = "zhi-wyxo-icz"
+SPACE = "spaces/lesson"
+CALL = "conferenceRecords/c1"
+# 18:00–19:00 Almaty
+START = datetime(2026, 9, 16, 13, 0)
+
+
+def _z(value: datetime) -> str:
+    return value.isoformat() + "Z"
+
+
+class FakeMeet:
+    def __init__(self):
+        self.calls = {}       # conference -> {"space", "start", "live"}
+        self.people = {}      # conference -> [participant still in]
+        self.ever = {}        # conference -> [everyone who ever joined]
+        self.recs = {}        # conference -> [recording]
+        self._level = None
+
+    def conferenceRecords(self):
+        self._level = "conference"
+        return self
+
+    def participants(self):
+        self._level = "participants"
+        return self
+
+    def recordings(self):
+        self._level = "recordings"
+        return self
+
+    def list(self, pageSize=100, pageToken=None, filter=None, parent=None):
+        if self._level == "participants":
+            if filter is None:
+                return _Call({"participants": self.ever.get(parent, [])})
+            assert filter == "latest_end_time IS NULL"
+            return _Call({"participants": self.people.get(parent, [])})
+        if self._level == "recordings":
+            return _Call({"recordings": self.recs.get(parent, [])})
+        if filter == "end_time IS NULL":
+            return _Call({"conferenceRecords": [{"name": n, "space": c["space"]}
+                                                for n, c in self.calls.items() if c["live"]]})
+        assert filter == f'space.meeting_code="{CODE}"'
+        return _Call({"conferenceRecords": [{"name": n, "space": c["space"], "startTime": _z(c["start"]),
+                                             **({"endTime": _z(c["end"])} if c.get("end") else {})}
+                                            for n, c in self.calls.items()]})
+
+
+class _Call:
+    def __init__(self, body):
+        self.body = body
+
+    def execute(self):
+        return self.body
+
+
+@pytest.fixture
+def lesson(world, monkeypatch):
+    db = world["db"]
+    world["teacher"].name = "Жанатбеккызы Лайла"
+    world["teacher"].workspace_email = "laila@mastereducation.kz"
+    group = world["group"](name="IELTS August 1 2026 - Лайла")
+    world["enrol"](group)
+    event = world["lesson"](group, title="IELTS August 1 2026 - Лайла: Lesson 26",
+                            start_datetime=START, end_datetime=START + timedelta(hours=1),
+                            meeting_url=f"https://meet.google.com/{CODE}")
+    meet = FakeMeet()
+    posted = []
+
+    def call(method, path, *, actor_email, actor_name="", json_body=None, timeout=None, **_):
+        if path == "/telegram/messages/edit":
+            edits.append(json_body)
+            return {"ok": not edit_gone, "gone": bool(edit_gone)}
+        assert (method, path) == ("POST", "/telegram/messages")
+        posted.append(json_body)
+        if fail_next:
+            fail_next.pop()
+            from fastapi import HTTPException
+            raise HTTPException(status_code=503, detail="retry")
+        return {"status": "sent", "telegram_message_id": 500 + len(posted)}
+
+    fail_next, edits, edit_gone = [], [], []
+    monkeypatch.setattr(google_workspace, "meet_client", lambda: meet)
+    monkeypatch.setattr(meet_recordings, "space_meet_code", lambda space: CODE if space == SPACE else None)
+    monkeypatch.setattr(support_client, "call", call)
+    monkeypatch.setenv("ENABLE_MEET_STAFF_NOTICES", "true")
+    monkeypatch.setenv("MEET_NOTICES_SUPPORT_GROUP_ID", "210")
+    monkeypatch.setenv("MEET_NOTICES_TOPIC_ID", "13771")
+    meet_staff_notices._VISITED.clear()
+    meet_staff_notices._TEACHER_CAME.clear()
+
+    def in_room(*accounts, since=-5, live=True):
+        meet.calls[CALL] = {"space": SPACE, "start": START + timedelta(minutes=min(since, -5)), "live": live}
+        meet.people[CALL] = [{"signedinUser": {"user": a}, "earliestStartTime": _z(START + timedelta(minutes=since))}
+                             for a in accounts]
+        meet.ever[CALL] = list(meet.people[CALL])
+
+    def joins(account, at):
+        person = {"signedinUser": {"user": account}, "earliestStartTime": _z(START + timedelta(minutes=at))}
+        meet.people[CALL].append(person)
+        meet.ever.setdefault(CALL, []).append(person)
+
+    def recording_from(minute):
+        meet.recs[CALL] = [{"state": "STARTED", "startTime": _z(START + timedelta(minutes=minute))}]
+
+    def teacher_confirmed():
+        db.add(GoogleAccountLink(google_user=TEACHER, user_id=world["teacher"].id))
+        db.flush()
+
+    def run(minute):
+        return meet_staff_notices.run(db, now=START + timedelta(minutes=minute))
+
+    return {"db": db, "event": event, "meet": meet, "posted": posted, "fail_next": fail_next, "run": run,
+            "edits": edits, "edit_gone": edit_gone,
+            "in_room": in_room, "joins": joins, "recording_from": recording_from,
+            "teacher_confirmed": teacher_confirmed}
+
+
+def texts(lesson):
+    return [p["text"] for p in lesson["posted"]]
+
+
+def test_teacher_in_the_room_without_a_recording_gets_one_red_notice_in_the_curators_topic(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT, TEACHER)
+
+    assert lesson["run"](2) == {}
+    lesson["run"](4)
+    lesson["run"](5)
+
+    assert len(lesson["posted"]) == 1
+    body = lesson["posted"][0]
+    assert body["telegram_group_id"] == 210 and body["message_thread_id"] == 13771
+    assert body["idempotency_key"].startswith("meet-notice:")
+    assert "Урок идёт без записи" in body["text"]
+    assert "IELTS August 1 2026 - Лайла: Lesson 26" in body["text"] and "Жанатбеккызы Лайла" in body["text"]
+    assert "18:00–19:00" in body["text"]
+    assert "приложение Meet на телефоне или планшете" in body["text"]
+    assert f"https://meet.google.com/{CODE}" in body["text"]
+
+
+def test_no_recording_is_red_at_three_minutes_even_when_the_teachers_work_account_is_missing(lesson):
+    # A teacher who cannot get into Workspace yet teaches from a personal account; staff join to record.
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT)
+
+    lesson["run"](4)
+    assert len(lesson["posted"]) == 1
+    red = lesson["posted"][0]["text"]
+    assert "Урок идёт без записи" in red and "Рабочего аккаунта учителя в комнате нет" in red
+
+    lesson["run"](6)
+    lesson["run"](8)
+    assert len(lesson["posted"]) == 2  # the teacher question is its own message
+    orange = lesson["posted"][1]["text"]
+    assert "Учитель не зашёл в урок" in orange and "Урок не записывается" in orange
+    assert "зашёл с другого (личного) аккаунта" in orange
+
+
+def test_staff_joining_to_record_resolves_red_while_the_teacher_is_still_missing(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT)
+    lesson["run"](4)
+    lesson["joins"]("users/staff", at=5)
+    lesson["recording_from"](5)
+    lesson["run"](6)
+
+    assert "Запись началась в 18:05" in lesson["posted"][1]["text"]
+    assert lesson["posted"][1]["reply_to_message_id"] == 501
+    orange = lesson["posted"][2]["text"]
+    assert "Учитель не зашёл в урок" in orange and "✅ Запись идёт." in orange
+
+
+def test_teacher_arriving_on_the_ipad_app_resolves_orange_and_red_stays_open(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT)
+    lesson["run"](6)  # both due in one tick: red, then orange
+    assert [p["text"].split("\n")[0] for p in lesson["posted"]] == ["🔴 <b>Урок идёт без записи</b>",
+                                                                     "🟠 <b>Учитель не зашёл в урок</b>"]
+    orange_id = 502
+
+    lesson["joins"](TEACHER, at=8)
+    lesson["run"](8.5)
+    assert len(lesson["posted"]) == 2  # not a minute in the room yet
+    lesson["run"](9)
+
+    reply = lesson["posted"][2]
+    assert reply["reply_to_message_id"] == orange_id and reply["message_thread_id"] == 13771
+    assert "Учитель зашёл в 18:08" in reply["text"] and "Записи всё ещё нет" in reply["text"]
+
+    lesson["run"](10)
+    assert len(lesson["posted"]) == 3  # red is already out, and still unresolved
+
+
+def test_a_recording_that_starts_after_the_red_notice_gets_a_reply(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT, TEACHER)
+    lesson["run"](4)
+    lesson["recording_from"](6)
+    lesson["run"](7)
+    lesson["run"](8)
+
+    assert len(lesson["posted"]) == 2
+    assert lesson["posted"][1]["reply_to_message_id"] == 501
+    assert "Запись началась в 18:06 (6 мин. от начала урока)" in lesson["posted"][1]["text"]
+
+
+def test_unconfirmed_teacher_accounts_mean_red_with_a_hint_and_never_orange(lesson):
+    lesson["in_room"](STUDENT, TEACHER)
+    for minute in (4, 6, 8):
+        lesson["run"](minute)
+    assert len(lesson["posted"]) == 1
+    assert "не подтверждены" in lesson["posted"][0]["text"]
+
+
+def test_a_recording_lesson_is_quiet(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT, TEACHER)
+    lesson["recording_from"](0)
+    for minute in (4, 6, 12):
+        lesson["run"](minute)
+    assert lesson["posted"] == []
+
+
+def test_an_empty_room_is_orange_at_five_minutes_and_white_at_ten(lesson):
+    """2026-09-17 05:05: nobody in «Indi Aruzhan SAT» and the topic said nothing. The teacher not being
+    there is the news at 5 min, students or not (owner); ⚪ still follows at 10."""
+    lesson["teacher_confirmed"]()
+    lesson["run"](4)
+    assert lesson["posted"] == []
+    lesson["run"](5)
+    assert len(lesson["posted"]) == 1
+    orange = lesson["posted"][0]["text"]
+    assert orange.startswith("🟠 <b>Учитель не зашёл в урок</b>")
+    assert "Прошло 5 мин. В комнате никого нет — ни учителя, ни учеников." in orange
+    assert "Урок не записывается" in orange
+    lesson["run"](9)
+    assert len(lesson["posted"]) == 1
+    lesson["run"](10)
+    lesson["run"](12)
+    assert len(lesson["posted"]) == 2 and "В уроке никого нет" in lesson["posted"][1]["text"]
+
+
+def test_an_empty_room_is_orange_even_before_the_teachers_accounts_are_confirmed(lesson):
+    lesson["run"](6)
+    assert "В комнате никого нет" in lesson["posted"][0]["text"]
+
+
+def test_a_call_nobody_joined_is_not_a_visit(lesson):
+    """The 05:00 lesson's call opened at 04:55, 12 s after its invitation was posted, and nobody was
+    ever in it — it held ⚪ back and 🟠 never asked."""
+    lesson["meet"].calls[CALL] = {"space": SPACE, "start": START - timedelta(minutes=5), "live": True}
+    lesson["run"](6)
+    lesson["run"](11)
+    assert [p["text"].split("\n")[0] for p in lesson["posted"]] == ["🟠 <b>Учитель не зашёл в урок</b>",
+                                                                     "⚪ <b>В уроке никого нет</b>"]
+
+
+def test_a_teacher_who_taught_and_left_is_not_called_absent(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](TEACHER, STUDENT, live=False)
+    lesson["meet"].people.clear()  # everybody has left
+    lesson["run"](6)
+    lesson["run"](11)
+    assert lesson["posted"] == []
+
+
+def test_orange_for_an_empty_room_gets_a_reply_when_the_teacher_arrives(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["run"](6)
+    lesson["in_room"](TEACHER, since=7)
+    lesson["recording_from"](7)  # the teacher's work account starts it: no 🔴 on top
+    lesson["run"](8.5)
+    assert len(lesson["posted"]) == 2
+    reply = lesson["posted"][1]
+    assert reply["reply_to_message_id"] == 501 and "Учитель зашёл в 18:07" in reply["text"]
+
+
+def test_a_room_people_visited_and_left_is_not_empty(lesson):
+    lesson["in_room"](STUDENT, since=-3, live=False)  # an ended call from just before the lesson
+    lesson["meet"].people.clear()
+    lesson["run"](11)
+    assert lesson["posted"] == []
+
+
+def test_a_call_opened_long_before_the_lesson_and_left_during_it_is_not_an_empty_room(lesson):
+    # 16.09, Abzal's 20:30: students opened the room at 19:52 and that one call ran the lesson.
+    lesson["meet"].calls["conferenceRecords/early"] = {
+        "space": SPACE, "start": START - timedelta(minutes=38), "end": START + timedelta(minutes=5), "live": False}
+    lesson["meet"].ever["conferenceRecords/early"] = [{"signedinUser": {"user": STUDENT}}]
+    lesson["run"](11)
+    assert lesson["posted"] == []
+
+
+def test_a_call_that_ended_well_before_the_lesson_does_not_count_as_a_visit(lesson):
+    lesson["meet"].calls["conferenceRecords/morning"] = {
+        "space": SPACE, "start": START - timedelta(hours=5), "end": START - timedelta(hours=4), "live": False}
+    lesson["run"](11)
+    assert any("В уроке никого нет" in p["text"] for p in lesson["posted"])
+
+
+def test_a_failed_send_is_retried_under_the_same_key(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](STUDENT, TEACHER)
+    lesson["fail_next"].append(True)
+    lesson["run"](4)
+    lesson["run"](5)
+
+    assert len(lesson["posted"]) == 2
+    assert lesson["posted"][0]["idempotency_key"] == lesson["posted"][1]["idempotency_key"]
+    notice = lesson["db"].query(MeetStaffNotice).filter_by(event_id=lesson["event"].id).one()
+    assert (notice.kind, notice.status, notice.attempts) == ("no_recording", "sent", 2)
+
+
+def test_after_the_lesson_nothing_new_is_raised(lesson):
+    lesson["in_room"](STUDENT, TEACHER)
+    lesson["run"](65)
+    assert lesson["posted"] == []
+
+
+def test_switched_off_it_does_not_ask_google(lesson, monkeypatch):
+    monkeypatch.setattr(google_workspace, "meet_client", lambda: pytest.fail("must not call Google"))
+    monkeypatch.setenv("ENABLE_MEET_STAFF_NOTICES", "false")
+    assert lesson["run"](11) == {}
+    monkeypatch.setenv("ENABLE_MEET_STAFF_NOTICES", "true")
+    monkeypatch.delenv("MEET_NOTICES_SUPPORT_GROUP_ID")
+    assert lesson["run"](11) == {}
+
+
+# --- the 22:00 summary -------------------------------------------------------------------------
+
+
+def _almaty(clock: time) -> datetime:
+    return datetime.combine(group_bot_render.local(START).date(), clock) - group_bot_render.ALMATY_OFFSET
+
+
+def test_the_summary_goes_out_once_at_22_with_what_went_wrong(lesson, world, monkeypatch):
+    db = lesson["db"]
+    group2 = world["group"](name="SAT July 3 - Лайла")
+    world["enrol"](group2)
+    recorded = world["lesson"](group2, title="SAT July 3 - Лайла: Lesson 9", start_datetime=START + timedelta(hours=1),
+                               end_datetime=START + timedelta(hours=2), meeting_url="https://meet.google.com/aaa-bbbb-ccc")
+    db.add(LessonRecording(event_id=recorded.id, status="ready"))
+    lesson["in_room"](STUDENT, TEACHER, live=False)  # lesson 26: a call, no recording
+    db.add(MeetStaffNotice(kind="no_recording", event_id=lesson["event"].id, status="sent", attempts=1,
+                           created_at=START + timedelta(minutes=4), resolved_at=START + timedelta(minutes=9)))
+    db.flush()
+
+    def records(_db, events, now):
+        return [{"event_id": e.id, "state": "ready",
+                 "teacher": {"name": "Жанатбеккызы Лайла",
+                             "flags": [{"code": "teacher_late", "minutes": 7}] if e.id == recorded.id else []}}
+                for e in events]
+
+    monkeypatch.setattr(meet_presence, "records", records)
+
+    assert meet_staff_digest.send_if_due(db, _almaty(time(21, 59))) is None
+    assert meet_staff_digest.send_if_due(db, _almaty(time(22, 1))) == "sent"
+    assert meet_staff_digest.send_if_due(db, _almaty(time(22, 2))) is None
+
+    assert len(lesson["posted"]) == 1
+    body = lesson["posted"][0]
+    assert body["message_thread_id"] == 13771 and body["idempotency_key"].startswith("meet-digest:")
+    text = body["text"]
+    assert "Meet — итоги дня" in text
+    assert "Уроков в Meet: 2 · с записью 1 · без записи 1" in text
+    assert "❌ <b>Без записи</b>\n• 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла" in text
+    assert "⏰ <b>Учитель опоздал</b>\n• 19:00 SAT July 3 - Лайла: Lesson 9 — Жанатбеккызы Лайла, на 7 мин." in text
+    assert "Сигналы за день: 🔴 1 (решено 1)" in text
+
+
+def test_the_summary_counts_a_recorded_call_that_opened_long_before_the_lesson(lesson, monkeypatch):
+    lesson["meet"].calls[CALL] = {"space": SPACE, "start": START - timedelta(minutes=38),
+                                  "end": START + timedelta(minutes=67), "live": False}
+    lesson["recording_from"](-3)
+    monkeypatch.setattr(meet_presence, "records", lambda _db, events, now: [])
+
+    assert meet_staff_digest.send_if_due(lesson["db"], _almaty(time(22, 1))) == "sent"
+    text = lesson["posted"][0]["text"]
+    assert "Уроков в Meet: 1 · с записью 1 · без записи 0" in text
+    assert "Никто не заходил" not in text
+
+
+def test_the_summary_calls_a_room_whose_only_call_nobody_joined_empty(lesson, monkeypatch):
+    lesson["meet"].calls[CALL] = {"space": SPACE, "start": START - timedelta(minutes=5),
+                                  "end": START + timedelta(minutes=60), "live": False}
+    monkeypatch.setattr(meet_presence, "records", lambda _db, events, now: [])
+    assert meet_staff_digest.send_if_due(lesson["db"], _almaty(time(22, 1))) == "sent"
+    text = lesson["posted"][0]["text"]
+    assert "без записи 0 · пустых 1" in text and "⚪ <b>Никто не заходил</b>" in text
+
+
+# --- a sent summary stays true ------------------------------------------------------------------
+
+
+@pytest.fixture
+def summary(lesson, monkeypatch):
+    """A 22:01 summary whose one late teacher is as late as the lesson's start time says."""
+    lesson["in_room"](STUDENT, TEACHER, live=False)
+    lesson["recording_from"](0)
+    def records(_db, events, now):
+        return [{"event_id": e.id, "state": "ready",
+                 "teacher": {"name": "Жанатбеккызы Лайла",
+                             "flags": [{"code": "teacher_late",
+                                        "minutes": 14 - int((e.start_datetime - START).total_seconds() // 60)}]}}
+                for e in events]
+
+    monkeypatch.setattr(meet_presence, "records", records)
+    assert meet_staff_digest.send_if_due(lesson["db"], _almaty(time(22, 1))) == "sent"
+    return lesson
+
+
+def _move_lesson(summary, minutes: int, edited_at: datetime):
+    event = summary["event"]
+    event.start_datetime = START + timedelta(minutes=minutes)
+    event.end_datetime = event.start_datetime + timedelta(hours=1)
+    summary["db"].flush()
+    event.updated_at = edited_at  # after flush: onupdate would stamp the real clock
+    summary["db"].flush()
+
+
+def test_a_lesson_edited_after_the_summary_edits_it_and_replies_with_what_changed(summary):
+    digest = summary["posted"][0]
+    assert "18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 14 мин." in digest["text"]
+
+    _move_lesson(summary, 10, edited_at=_almaty(time(22, 4)))
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 5))) == 1
+
+    edit = summary["edits"][0]
+    assert edit["message_id"] == 501 and edit["telegram_group_id"] == 210
+    assert "18:10 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 4 мин." in edit["text"]
+    assert edit["text"].endswith("✏️ Обновлено 16.09 в 22:05")
+    reply = summary["posted"][1]
+    assert reply["reply_to_message_id"] == 501 and reply["message_thread_id"] == 13771 and reply["silent"]
+    assert reply["idempotency_key"] == "meet-digest:2026-09-16:update:1"
+    assert reply["text"] == ("✏️ <b>Сводка за 16.09 обновлена</b>\n\n⏰ <b>Учитель опоздал</b>\n"
+                             "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 14 мин.\n"
+                             "➕ 18:10 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла, на 4 мин.")
+
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 6))) == 0
+    _move_lesson(summary, 5, edited_at=_almaty(time(22, 7)))
+    meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 8)))
+    assert summary["posted"][2]["idempotency_key"] == "meet-digest:2026-09-16:update:2"
+    assert len(summary["edits"]) == 2
+
+
+def test_an_unchanged_summary_is_reread_but_not_touched(summary):
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 10))) == 0  # not due yet
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 0  # due, same text
+    assert summary["edits"] == [] and len(summary["posted"]) == 1
+
+
+def test_notes_alone_changing_edit_without_a_reply(summary, monkeypatch):
+    original = meet_staff_digest.digest_text
+
+    def with_a_note(db, day, now, meet=None):
+        return original(db, day, now, meet) + "\n\n⏳ Опоздания ещё не посчитаны для 1 недавно закончившихся уроков."
+
+    monkeypatch.setattr(meet_staff_digest, "digest_text", with_a_note)
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 1
+    assert len(summary["edits"]) == 1 and len(summary["posted"]) == 1
+
+
+def test_a_summary_is_kept_true_for_a_day_then_left_alone(summary):
+    _move_lesson(summary, 10, edited_at=_almaty(time(23, 0)) + timedelta(days=1))
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 2)) + timedelta(days=1)) == 0
+    assert summary["edits"] == []
+
+
+def test_a_deleted_summary_message_is_not_edited_again(summary):
+    summary["edit_gone"].append(True)
+    _move_lesson(summary, 10, edited_at=_almaty(time(22, 4)))
+    meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 5)))
+    _move_lesson(summary, 12, edited_at=_almaty(time(22, 6)))
+    meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 30)))
+    assert len(summary["edits"]) == 1 and len(summary["posted"]) == 1
+
+
+def test_a_summary_sent_before_it_kept_a_copy_takes_todays_reading_as_its_baseline(summary):
+    notice = summary["db"].query(MeetStaffNotice).filter_by(kind="digest").one()
+    notice.details = None
+    summary["db"].flush()
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 0
+    assert summary["edits"] == []
+    _move_lesson(summary, 10, edited_at=_almaty(time(22, 21)))
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 22))) == 1
+
+
+# --- which lessons the day holds, and why one joined or left (owner, 2026-09-17) ---------------
+
+
+def _group_of(summary):
+    from src.schemas.models import EventGroup, Group
+
+    return (summary["db"].query(Group).join(EventGroup, EventGroup.group_id == Group.id)
+            .filter(EventGroup.event_id == summary["event"].id).one())
+
+
+def _update_reply(summary):
+    return next(p["text"] for p in summary["posted"][1:] if p.get("reply_to_message_id"))
+
+
+def test_a_lesson_that_ran_stays_in_its_day_when_its_group_finishes_later(summary):
+    """16.09: a group was marked finished after its last lesson, and that recorded lesson left the
+    summary (60 → 59) with no word on which or why. A lesson that really ran stays."""
+    db = summary["db"]
+    db.add(LessonRecording(event_id=summary["event"].id, status="ready"))
+    _group_of(summary).is_over = True
+    db.flush()
+    assert meet_staff_digest.refresh_sent(db, _almaty(time(22, 20))) == 0
+    assert summary["edits"] == [] and len(summary["posted"]) == 1
+
+
+def test_a_lesson_that_never_ran_leaves_with_its_groups_reason(summary):
+    _group_of(summary).is_over = True  # no call saved, no recording: a stale lesson of a finished group
+    summary["db"].flush()
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 1
+    reply = _update_reply(summary)
+    assert "Было: Уроков в Meet: 1 · с записью 1 · без записи 0\nСтало: Уроков в Meet: 0" in reply
+    assert ("📚 <b>Уроки дня</b>\n"
+            "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: группа завершена") in reply
+
+
+def test_a_cancelled_lesson_is_named_with_why(summary):
+    event = summary["event"]
+    event.is_active = False
+    summary["db"].flush()
+    event.updated_at = _almaty(time(22, 4))
+    summary["db"].flush()
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 5))) == 1
+    assert "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: урок отменён" in _update_reply(summary)
+
+
+def test_a_lesson_moved_to_another_day_says_where_it_went(summary):
+    _move_lesson(summary, 24 * 60, edited_at=_almaty(time(22, 4)))
+    # Moved off the day, it no longer counts as «one of the day's lessons edited»: the 15-minute re-read finds it.
+    assert meet_staff_digest.refresh_sent(summary["db"], _almaty(time(22, 20))) == 1
+    assert "➖ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: перенесён на 17.09 в 18:00" in \
+        _update_reply(summary)
+
+
+def test_a_summary_from_before_it_remembered_its_lessons_explains_a_lesson_kept_because_it_ran(summary):
+    """The 16.09 summary itself: it was kept under the old rule, so a finished group's lesson that ran
+    comes back once — and the reply says why."""
+    db = summary["db"]
+    db.add(LessonRecording(event_id=summary["event"].id, status="ready"))
+    _group_of(summary).is_over = True
+    notice = db.query(MeetStaffNotice).filter_by(kind="digest").one()
+    notice.details = {"text": "📋 <b>Meet — итоги дня, 16.09</b>\nУроков в Meet: 0",
+                      "rendered_at": _almaty(time(22, 1)).isoformat()}
+    db.flush()
+    assert meet_staff_digest.refresh_sent(db, _almaty(time(22, 20))) == 1
+    reply = _update_reply(summary)
+    assert ("📚 <b>Уроки дня</b>\n➕ 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла: "
+            "урок прошёл — остаётся в сводке, хотя группа завершена") in reply
+    stored = db.query(MeetStaffNotice).filter_by(kind="digest").one().details["lessons"]
+    assert stored == {str(summary["event"].id): "• 18:00 IELTS August 1 2026 - Лайла: Lesson 26 — Жанатбеккызы Лайла"}
+
+
+def test_a_day_without_meet_lessons_sends_no_summary(world, monkeypatch):
+    posted = []
+    monkeypatch.setattr(support_client, "call", lambda *a, **k: posted.append(k) or {})
+    monkeypatch.setenv("ENABLE_MEET_STAFF_NOTICES", "true")
+    monkeypatch.setenv("MEET_NOTICES_SUPPORT_GROUP_ID", "210")
+    now = datetime(2030, 1, 5, 17, 30)  # 22:30 Almaty, nothing scheduled
+    assert meet_staff_digest.send_if_due(world["db"], now) == "skipped"
+    assert meet_staff_digest.send_if_due(world["db"], now) is None
+    assert posted == []

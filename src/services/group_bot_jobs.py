@@ -6,6 +6,7 @@ job is isolated — one failing never stops the others. Every job has its own of
 
 * ``ENABLE_TELEGRAM_AUTO_HELLO`` (+ app setting ``group_bot.auto_hello_enabled``) — :mod:`group_bot_hello`
 * ``ENABLE_TELEGRAM_PINNED_TIMETABLE`` — :mod:`group_bot_pinned`
+* ``ENABLE_TELEGRAM_PINNED_ON_TOP`` (with the pinned timetable) — :mod:`group_bot_pinned_top`
 * ``ENABLE_TELEGRAM_SCHEDULE_CHANGE_NOTICES`` — :mod:`group_bot_schedule_watch`
 * ``ENABLE_TELEGRAM_DIGEST`` (+ ``group_bot.digest_enabled`` / ``digest_off_groups``) — :mod:`group_bot_digest`
 """
@@ -17,16 +18,18 @@ from typing import Optional
 
 from src.config import SessionLocal
 from src.services import group_bot_digest, group_bot_hello, group_bot_outbox as outbox
-from src.services import group_bot_pinned, group_bot_schedule_watch
+from src.services import group_bot_pinned, group_bot_pinned_top, group_bot_schedule_watch
 
 logger = logging.getLogger(__name__)
 
-# The hello first: the pinned timetable waits for it.
+# The hello first: the pinned timetable waits for it. Keeping the timetable on top goes last — it can
+# wait a minute, while the digest and a last-chance reminder are due at their time.
 JOBS = (
     ("hello", group_bot_hello),
     ("pinned_timetable", group_bot_pinned),
     ("schedule_change", group_bot_schedule_watch),
     ("digest", group_bot_digest),
+    ("pinned_on_top", group_bot_pinned_top),
 )
 
 

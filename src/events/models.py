@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, func, text
+from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, JSON, func, text
 from sqlalchemy import false as sa_false
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -219,6 +219,37 @@ class MissingRecordingLog(Base):
         UniqueConstraint("event_id", name="uq_missing_recording_event"),
         Index("ix_missing_recording_teacher", "teacher_id"),
         Index("ix_missing_recording_resolved", "resolved_at"),
+    )
+
+
+class MeetStaffNotice(Base):
+    """One message to the staff "Meet notifications" topic (src/services/meet_staff_notices.py).
+
+    A lesson notice — ``no_recording``, ``teacher_absent``, ``empty_room`` — is one row per lesson
+    and kind: the "already told" guard, and the handle for the reply once it is resolved. The
+    evening summary is ``digest``, one row per Almaty day. The row is claimed before Support is
+    called; Support's idempotency key makes a retried send answer with the message it already sent.
+    """
+
+    __tablename__ = "meet_staff_notices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String, nullable=False)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=True)
+    day = Column(Date, nullable=True)  # the digest's Almaty day
+    status = Column(String, nullable=False, default="pending")  # pending | sent | failed | skipped
+    attempts = Column(Integer, nullable=False, default=0)
+    telegram_message_id = Column(Integer, nullable=True)
+    error = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    resolved_at = Column(DateTime, nullable=True)
+    reply_status = Column(String, nullable=True)  # the resolution reply, same vocabulary
+    reply_attempts = Column(Integer, nullable=False, default=0)
+    details = Column(JSON, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("kind", "event_id", name="uq_meet_staff_notice_lesson"),
+        UniqueConstraint("kind", "day", name="uq_meet_staff_notice_day"),
     )
 
 

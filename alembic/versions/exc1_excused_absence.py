@@ -1,7 +1,7 @@
 """attendances: уважительный пропуск — флаг, причина, кто и когда
 
 Revision ID: exc1_excused_absence
-Revises: gc1_group_calendars_feed_tokens
+Revises: rw2_meet_staff_notices
 Create Date: 2026-09-16
 
 Написано руками, а не автогенерацией: autogenerate на этом проекте стабильно вытаскивает
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 
 revision = "exc1_excused_absence"
-down_revision = "gc1_group_calendars_feed_tokens"
+down_revision = "rw2_meet_staff_notices"
 branch_labels = None
 depends_on = None
 
