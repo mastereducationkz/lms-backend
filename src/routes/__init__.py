@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from src.discipline.routes import discipline_router
 
 
 def register_routes(app: FastAPI):
@@ -11,6 +10,9 @@ def register_routes(app: FastAPI):
         sat_schedules_router, weekly_top_students_router,
         recordings_admin_router,
     )
+    # Imported here, like every other router: a module-level import of a router that itself
+    # imports src.routes.auth makes a cycle the moment anything imports this package first.
+    from src.discipline.routes import discipline_router
     from src.courses.routes import courses_router
     from src.assignments.routes import assignments_router, assignment_zero_router
     from src.progress.routes import progress_router, admin_progress_router

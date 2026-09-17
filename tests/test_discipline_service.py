@@ -103,9 +103,32 @@ def meet_stub(monkeypatch):
 def test_lessons_before_the_rule_started_are_not_in_the_register(db, lesson_factory):
     lesson_factory(start=datetime(2026, 9, 15, 13, 0))  # the day before the rule
     inside = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
-    ids = [e.id for e in service.lessons_in(db, SEPTEMBER)]
+    ids = [e.id for e in service.lessons_in(db, SEPTEMBER, NOW)]
     assert inside.id in ids
     assert len(ids) == 1
+
+
+def test_a_lesson_that_has_not_finished_is_not_in_the_register_yet(db, lesson_factory, meet_stub, teacher):
+    """The open period runs to the end of the month: its later days have not happened.
+
+    Without this, every lesson still to come counted as one the LMS «could not watch» — on
+    18.09 that was 573 of 674 — and the grid painted the rest of the month as unmeasurable.
+    """
+    finished = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    meet_stub(finished, first_join=datetime(2026, 9, 17, 13, 0), last_leave=datetime(2026, 9, 17, 14, 0))
+    lesson_factory(start=datetime(2026, 9, 25, 13, 0))   # still to come
+    now = datetime(2026, 9, 18, 6, 0)
+    assert [e.id for e in service.lessons_in(db, SEPTEMBER, now)] == [finished.id]
+
+    register = service.register(db, SEPTEMBER, now=now)
+    assert register["totals"]["lessons"] == 1
+    assert register["totals"]["unmeasurable"] == 0
+
+
+def test_a_lesson_running_right_now_waits_for_its_end(db, lesson_factory, teacher):
+    lesson_factory(start=datetime(2026, 9, 18, 5, 0), minutes=60)
+    now = datetime(2026, 9, 18, 5, 30)  # half way through
+    assert service.lessons_in(db, SEPTEMBER, now) == []
 
 
 def test_a_late_teacher_owes_300_a_minute_for_the_day(db, lesson_factory, meet_stub, teacher):
