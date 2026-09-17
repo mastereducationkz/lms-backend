@@ -44,6 +44,19 @@ def almaty_day(moment: datetime) -> date:
     return (moment + ALMATY).date()
 
 
+def _now() -> datetime:
+    """Wrapped so a test can hold the clock still without freezing the whole process."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def now() -> datetime:
+    return _now()
+
+
+def closed_periods(db: Session) -> list[DisciplinePeriod]:
+    return db.query(DisciplinePeriod).filter(DisciplinePeriod.closed_at.isnot(None)).all()
+
+
 def _utc_bounds(period: Period) -> tuple[datetime, datetime]:
     """The period's Almaty days as the naive UTC range the events table stores."""
     first = max(period.start, RULE_START)

@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from src.discipline.routes import discipline_router
 
 
 def register_routes(app: FastAPI):
@@ -69,6 +70,7 @@ def register_routes(app: FastAPI):
     app.include_router(calendar_feeds_router, prefix="/calendar", tags=["Calendar subscriptions"])
     # Its own prefix for the same reason: who was in each lesson's Meet room.
     app.include_router(meet_attendance_router, prefix="/meet-attendance", tags=["Meet attendance"])
+    app.include_router(discipline_router, prefix="/teacher-discipline", tags=["Teacher discipline"])
     # Talk time reads the same lessons, so it lives beside them.
     app.include_router(meet_talk_router, prefix="/meet-attendance", tags=["Meet attendance"])
     # A login-free, three-hour link to one lesson's recording: the CRM asks for it over the
