@@ -469,6 +469,29 @@ def test_teachers_and_curators_list_their_own_lessons_and_nobody_elses(room):
     assert _list(db, _user(db, "teacher")) == [], "another teacher's lessons stay theirs"
 
 
+def test_a_lesson_under_way_is_listed_before_any_call_is_saved(room):
+    """2026-09-17: «Indi Maria SAT 2026: Lesson 8» ran 15:00–16:00 with two people in the room and was
+    nowhere on the page — calls are saved only after they end, and the list wanted a saved call."""
+    db, world = room["db"], room["world"]
+    room["teacher"].workspace_email = "gulzada@mastereducation.kz"
+    minutes = 1 / (24 * 60)
+    running = world["lesson"](room["group"], days_ahead=-10 * minutes, meeting_url="https://meet.google.com/run-ning-now")
+    handed_over = world["lesson"](room["group"], days_ahead=-70 * minutes, meeting_url="https://meet.google.com/col-lect-ing")
+    db.add(MeetConference(event_id=handed_over.id, conference_record=f"conferenceRecords/collect-{next(_names)}",
+                          started_at=handed_over.start_datetime,
+                          ended_at=handed_over.end_datetime + timedelta(minutes=3)))  # not saved yet
+    own_link = world["lesson"](room["group"], days_ahead=-10 * minutes)  # a teacher's own Meet link
+    no_call = world["lesson"](room["group"], days_ahead=-180 * minutes, meeting_url="https://meet.google.com/gon-eeee-now")
+    db.flush()
+
+    items = {i["event_id"]: i for i in _list(db, _user(db, "admin"))}
+    assert (items[running.id]["state"], items[running.id]["waiting"]["stage"]) == ("waiting", "lesson_running")
+    assert items[handed_over.id]["waiting"]["stage"] == "collecting"
+    assert own_link.id not in items, "no LMS room: nothing will ever come"
+    assert no_call.id not in items, "over hours ago with no call: not a Meet record"
+    assert items[room["lesson"].id]["state"] == "ready", "lessons with a saved call are listed as before"
+
+
 # ── the class list, with or without Meet data (watch pages, 2026-09-11) ──────────────────
 
 def test_without_a_meet_record_the_class_list_and_marks_are_still_there(room):

@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, exists
+from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 
 from src.config import get_db
@@ -26,6 +26,8 @@ from src.schemas.models import (
     UserInDB,
 )
 from src.services import meet_presence, meet_talk, recording_progress, recordings_status, talk_settings
+from src.services.operational_groups import event_has_operational_group_clause
+from src.services.telegram_invitations import _held_in_an_lms_meet_room
 from src.utils.utc_json import utc_z
 
 router = APIRouter()
@@ -276,11 +278,22 @@ def list_lesson_records(
 
     has_record = exists().where(and_(MeetConference.event_id == Event.id,
                                      MeetConference.synced_at.isnot(None))).correlate(Event)
+    # A lesson on right now, or whose call is still being handed over, has no saved call yet: it is
+    # listed while its record waits (owner, 2026-09-17 — «Indi Maria SAT 2026: Lesson 8» ran 15:00–16:00
+    # with two people in the room and was nowhere on the page, banner included, until 20 min after).
+    under_way = and_(
+        Event.event_type == "class",
+        Event.is_active.is_(True),
+        Event.start_datetime <= now,
+        Event.end_datetime >= now - meet_presence.GIVE_UP_WAITING_AFTER,
+        _held_in_an_lms_meet_room(),
+        event_has_operational_group_clause(),
+    )
     query = db.query(Event).filter(
         meet_presence.visible_lessons_clause(current_user),
         Event.start_datetime >= date_from,
         Event.start_datetime < date_to,
-        has_record,
+        or_(has_record, under_way),
     )
     if teacher_id is not None:
         query = query.filter(Event.teacher_id == teacher_id)
@@ -296,6 +309,11 @@ def list_lesson_records(
         groups.setdefault(event_id, []).append({"id": gid, "name": name})
 
     records, batch = meet_presence.records_with_batch(db, events, now)
+    # Without a saved call a lesson stays only while it waits: once no call is coming it is not a
+    # Meet record at all (a cancelled lesson, another link) and leaves the list again.
+    recorded = {eid for eid, calls in batch.conferences.items() if any(c.synced_at for c in calls)}
+    kept = [(e, r) for e, r in zip(events, records) if e.id in recorded or r["state"] == "waiting"]
+    events, records = [e for e, _ in kept], [r for _, r in kept]
     talk_on = talk_settings.enabled(db)
     talk = meet_talk.summaries(db, events, records, batch, now) if talk_on else {}
     recordings = recording_progress.summaries(db, events, now)
