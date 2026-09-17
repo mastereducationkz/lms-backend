@@ -4,10 +4,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_, and_
 from typing import List, Optional
 from datetime import datetime, timezone
+import asyncio
 import logging
 import os
 
-from src.config import get_db
+from src.config import SessionLocal, get_db
 from src.schemas.models import (
     Message, UserInDB, Course, Enrollment,
     MessageSchema, SendMessageSchema
@@ -184,30 +185,51 @@ async def emit_unseen_graded_update(user_id: int):
     """Emit unseen graded count update to user's room"""
     await sio.emit('unseen_graded:update', to=f"{USER_ROOM_PREFIX}{user_id}")
 
+def _group_conversation_ids(user_id: int) -> list[int]:
+    """Ids of the group chats this user belongs to — the rooms to join, nothing more."""
+    from src.messages.group_models import GroupConversation, GroupConversationMember
+    db = SessionLocal()
+    try:
+        rows = (db.query(GroupConversationMember.conversation_id)
+                .join(GroupConversation, GroupConversation.id == GroupConversationMember.conversation_id)
+                .filter(GroupConversationMember.user_id == user_id)
+                .all())
+        return [conversation_id for (conversation_id,) in rows]
+    finally:
+        db.close()
+
+
+def _identify_connection(environ, auth) -> tuple[int | None, list[int]]:
+    """The blocking half of `connect`: the token check (may call Zitadel's userinfo), the user
+    lookup and the group-chat rooms. Runs in a worker thread — see `connect`."""
+    user_id = _get_user_id_from_environ(environ, auth)
+    if not user_id:
+        return None, []
+    try:
+        return user_id, _group_conversation_ids(user_id)
+    except Exception as e:
+        logger.error(f"group auto-join failed for {user_id}: {e}")
+        return user_id, []
+
+
 # Socket.IO Events
 @sio.event
 async def connect(sid, environ, auth):
-    # Use the proper function to get user_id from token
-    user_id = _get_user_id_from_environ(environ, auth)
+    # Socket.IO shares the event loop with every HTTP request of this worker, so nothing here may
+    # block it. On 2026-09-17 this handler ran its token check and queries on the loop; once the
+    # pool was busy each connect froze the worker, clients reconnected by the hundreds a minute
+    # and kept the API down for 15 minutes. asyncio's own executor (not the HTTP threadpool) also
+    # bounds how many connects hit the database at once during such a storm.
+    user_id, conversation_ids = await asyncio.to_thread(_identify_connection, environ, auth)
     if not user_id:
         logger.debug(f"Connection rejected for sid {sid}: Invalid token")
         await sio.disconnect(sid)
         return
-    
+
     await sio.save_session(sid, { 'user_id': user_id })
     await sio.enter_room(sid, f"{USER_ROOM_PREFIX}{user_id}")
-
-    # Auto-join group-chat rooms for this user
-    try:
-        _gdb = next(get_db())
-        try:
-            from src.messages.group_service import list_conversations
-            for c in list_conversations(_gdb, user_id):
-                await sio.enter_room(sid, f"{GROUP_ROOM_PREFIX}{c['id']}")
-        finally:
-            _gdb.close()
-    except Exception as e:
-        logger.error(f"group auto-join failed for {user_id}: {e}")
+    for conversation_id in conversation_ids:
+        await sio.enter_room(sid, f"{GROUP_ROOM_PREFIX}{conversation_id}")
 
 @sio.event
 async def disconnect(sid):
@@ -728,25 +750,29 @@ async def handle_contacts_get(sid, data=None):
     finally:
         db.close()
 
-@sio.on('unread:count')
-async def handle_unread_count(sid):
-    session = await sio.get_session(sid)
-    db: Session = next(get_db())
-    user_id = _resolve_user_id(session, db)
-    if not user_id:
-        return {"unread_count": 0}
+def _unread_count(session) -> dict:
+    db = SessionLocal()
     try:
+        user_id = _resolve_user_id(session, db)
+        if not user_id:
+            return {"unread_count": 0}
         unread_count = db.query(Message).filter(
             Message.to_user_id == user_id,
             Message.is_read == False
         ).count()
-        
+
         return {"unread_count": unread_count}
     except Exception as e:
         logger.error(f"Error getting unread count: {e}")
         return {"unread_count": 0}
     finally:
         db.close()
+
+@sio.on('unread:count')
+async def handle_unread_count(sid):
+    # Every page asks for this; the query runs off the event loop like `connect`.
+    session = await sio.get_session(sid)
+    return await asyncio.to_thread(_unread_count, session)
 
 @sio.on('group:threads:get')
 async def handle_group_threads_get(sid):
