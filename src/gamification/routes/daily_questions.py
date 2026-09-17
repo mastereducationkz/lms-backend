@@ -99,7 +99,12 @@ async def get_daily_question_recommendations(
         raise HTTPException(status_code=403, detail="Only students can access daily questions")
 
     logger.info(f"Fetching recommendations for {current_user.email}")
-    
+
+    # The user lookup left this request's transaction open, holding one of pgbouncer's few server
+    # connections; nothing below reads the database, and the external API can take 2 × 30 s.
+    # Closing keeps current_user's loaded fields readable.
+    db.close()
+
     # Retry logic with increased timeout
     max_retries = 2
     timeout = 30.0  # Increased from 15 to 30 seconds

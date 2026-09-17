@@ -207,8 +207,14 @@ async def logout(response: Response, token: str = Depends(oauth2_scheme), db: Se
 
     return {"detail": "Logged out successfully"}
 
-# Dependency for getting current user
-async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
+# Dependency for getting current user.
+# Plain `def`, never `async def`: nearly every route depends on this, and FastAPI runs an async
+# dependency ON the event loop. Its token check can call Zitadel's userinfo over HTTP and its user
+# lookup waits for a pgbouncer slot (up to query_wait_timeout), so as a coroutine one slow moment
+# froze a whole worker — its other requests' transactions sat idle, the pool ran dry, Socket.IO
+# clients reconnected in a storm, and the API was down 18:17–18:32 Almaty on 2026-09-17.
+# As a plain function it runs in the threadpool and blocks only its own request.
+def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserInDB:
     """Dependency to get current authenticated user"""
     payload = verify_bearer_token(token)
     if payload is None:
@@ -223,14 +229,14 @@ async def get_current_user_dependency(token: str = Depends(oauth2_scheme), db: S
     return user
 
 # Admin-only dependency  
-async def require_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
+def require_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
     """Dependency to require admin role"""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
 # Teacher or admin dependency
-async def require_teacher_or_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
+def require_teacher_or_admin(current_user: UserInDB = Depends(get_current_user_dependency)) -> UserInDB:
     """Dependency to require teacher or admin role"""
     if current_user.role not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Teacher or admin access required")
