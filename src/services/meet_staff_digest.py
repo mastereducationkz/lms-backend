@@ -153,6 +153,9 @@ def call_state(meet, lesson: dict) -> str:
     for call in calls:
         if meet.conferenceRecords().recordings().list(parent=call["name"]).execute().get("recordings"):
             return "recorded"
+    # A call nobody joined — the link opened by a chat's preview — is still an empty room (2026-09-17).
+    if not notices.lesson_visitors(meet, lesson):
+        return "no_call"
     return "no_recording"
 
 
