@@ -21,12 +21,7 @@ MON, WED, FRI, SAT, SUN = 0, 2, 4, 5, 6
 
 @pytest.fixture
 def db():
-    """A session whose commit and rollback only ever touch SAVEPOINTs of one outer transaction.
-
-    Not the restart-a-savepoint listener the neighbouring suites use: after a commit, that
-    session's next statement opens a plain transaction, and the preview's ``db.rollback()``
-    would then roll back the outer one and take the whole world with it.
-    """
+    from sqlalchemy import event
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
     from src.config import engine
@@ -36,10 +31,18 @@ def db():
     except OperationalError:
         pytest.skip("No database available")
     trans = connection.begin()
-    session = SASession(bind=connection, join_transaction_mode="create_savepoint")
+    session = SASession(bind=connection)
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart(sess, transaction):
+        if transaction.nested and not transaction._parent.nested:
+            sess.begin_nested()
+
     try:
         yield session
     finally:
+        event.remove(session, "after_transaction_end", _restart)
         session.close()
         trans.rollback()
         connection.close()
@@ -94,7 +97,6 @@ def world(db, monkeypatch):
     db.add(LessonRequest(request_type="cancel", status="approved", event_id=cancelled.id,
                          group_id=group.id, requester_id=teacher.id,
                          original_datetime=cancelled.start_datetime))
-    # The preview rolls its session back, so the world must be committed (to the test savepoint).
     db.commit()
 
     now = datetime.combine(monday, time.min, KZ).astimezone(UTC)
@@ -159,7 +161,7 @@ def _body(world, **overrides):
 
 
 def _preview(world, config, previous=None, now=None):
-    from src.services.schedule_reconciliation import preview_group_schedule
+    from src.services.schedule_preview import preview_group_schedule
 
     return preview_group_schedule(
         world["db"], world["group"].id, config,
@@ -252,7 +254,49 @@ def test_a_hand_shortened_lesson_keeps_its_length_in_the_preview_as_in_the_save(
     assert (row["change"], row["minutes"]) == ("keep", 60)
 
 
-def test_the_preview_writes_nothing(world):
+def test_preview_group_schedule_neither_flushes_nor_commits_nor_leaves_a_change(world):
+    """The route no longer rolls back: a flush or commit inside the preview would put its moves
+    into the request's transaction, and a change left pending would ride on the next flush."""
+    from sqlalchemy import event
+
+    db, group = world["db"], world["group"]
+
+    def snapshot():
+        return [(e.id, e.start_datetime, e.end_datetime, e.is_active, e.title)
+                for e in _class_events(db, group)]
+
+    before = snapshot()
+    shorter = {**world["old"], "lessons_count": 6}                       # switches lessons off
+    rauan = {**world["old"], "lessons_count": 20, "schedule_items": [    # moves, resizes, creates
+        {"day_of_week": MON, "time_of_day": "18:00", "duration_minutes": 120},
+        {"day_of_week": FRI, "time_of_day": "18:00", "duration_minutes": 60},
+        {"day_of_week": SAT, "time_of_day": "19:00", "duration_minutes": 90},
+        {"day_of_week": SUN, "time_of_day": "19:00", "duration_minutes": 90},
+    ]}
+    writes: list[str] = []
+    listeners = {
+        "before_flush": lambda *_args: writes.append("flush"),
+        "after_commit": lambda *_args: writes.append("commit"),
+    }
+    for name, listener in listeners.items():
+        event.listen(db, name, listener)
+    try:
+        previews = [_preview(world, shorter), _preview(world, rauan)]
+    finally:
+        for name, listener in listeners.items():
+            event.remove(db, name, listener)
+
+    assert previews[0]["deactivated"] and {"move", "resize", "create"} <= {
+        lesson["change"] for lesson in previews[1]["lessons"]
+    }
+    assert writes == []
+    assert not (db.new or db.dirty or db.deleted)
+    db.expire_all()
+    assert snapshot() == before
+    assert db.get(Group, group.id).schedule_config == world["old"]
+
+
+def test_the_preview_route_writes_nothing(world):
     db, group, api = world["db"], world["group"], _client(world, world["admin"])
 
     def snapshot():

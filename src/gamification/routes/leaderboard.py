@@ -2302,21 +2302,18 @@ def preview_schedule(
     Same body, role check and config as ``POST /curator/schedule/generate`` — twin of the CRM's
     ``POST /groups/{id}/schedule/preview``.
     """
-    from src.services.schedule_reconciliation import preview_group_schedule
+    from src.services.schedule_preview import preview_group_schedule
 
     group, old_cfg, new_cfg = _schedule_edit(data, current_user, db)
-    try:
-        return preview_group_schedule(
-            db,
-            group.id,
-            new_cfg,
-            previous_config=old_cfg,
-            fallback_start=data.start_date,
-            now=_schedule_now(),
-        )
-    finally:
-        # Nothing above writes; the rollback guarantees a preview never can.
-        db.rollback()
+    # Reads only and never commits; `get_db` closes the session, which discards anything else.
+    return preview_group_schedule(
+        db,
+        group.id,
+        new_cfg,
+        previous_config=old_cfg,
+        fallback_start=data.start_date,
+        now=_schedule_now(),
+    )
 
 
 @router.post("/curator/schedule/generate")

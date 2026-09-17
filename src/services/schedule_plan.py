@@ -14,7 +14,8 @@ twelve imaginary past slots are not the fourteen lessons actually taught.
 
 This is the LMS mirror of the CRM's ``crm-master/backend/src/groups/schedule_plan.py``; it
 lives in ``lms-backend/src/services/schedule_plan.py``. The two must agree. The CRM helpers it
-needs (``src.groups.helpers``) are copied below as private functions with identical behaviour.
+needs (``src.groups.helpers``) are copied below with identical behaviour; ``parse_start_date``
+is public, as in the CRM, because the schedule preview reads it too.
 """
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ MAX_SLOT_MINUTES = 300
 # ------------------------------------------------------------------ CRM `groups/helpers.py`
 
 
-def _parse_start_date(schedule_config: Any, created_at: Optional[datetime]) -> Optional[date]:
+def parse_start_date(schedule_config: Any, created_at: Optional[datetime]) -> Optional[date]:
     if isinstance(schedule_config, dict):
         raw = schedule_config.get("start_date")
         if raw:
@@ -115,7 +116,7 @@ def _expand_schedule_occurrences(
     if not items:
         return []
 
-    start = _parse_start_date(schedule_config, None) or fallback_start
+    start = parse_start_date(schedule_config, None) or fallback_start
     if not start:
         return []
 
@@ -259,7 +260,7 @@ def future_schedule_slots(
     if remaining <= 0:
         return []
 
-    start = _parse_start_date(config, None) or fallback_start
+    start = parse_start_date(config, None) or fallback_start
     today = now_utc.astimezone(KZ_TZ).date()
     anchor = max(start, today) if start else today
     excluded = _excluded_slot_keys(config)
