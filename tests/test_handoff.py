@@ -184,7 +184,14 @@ def test_mint_400_bad_return_to_and_platform(make_client):
     assert client.post("/handoff/mint", json={"platform": "toefl", "return_to": "/"}).status_code == 400
 
 
-def test_mint_rate_limited_per_user(make_client):
+@pytest.mark.parametrize("seconds_past_the_minute", [0.0, 59.9])
+def test_mint_rate_limited_per_user(make_client, monkeypatch, seconds_past_the_minute):
+    # The limit is a fixed per-minute window (`now // 60`), so a burst read off the wall clock
+    # straddled a minute boundary now and then, started a fresh window mid-burst, and the 31st
+    # request came back 200. The clock the limiter reads is frozen instead — at the very end of
+    # a minute too, the instant that used to break it.
+    frozen = (int(time.time()) // 60) * 60 + seconds_past_the_minute
+    monkeypatch.setattr(handoff, "time", SimpleNamespace(time=lambda: frozen))
     client = make_client(_user(uid=99))
     for _ in range(30):
         assert client.post("/handoff/mint", json={"platform": "ielts", "return_to": "/"}).status_code == 200

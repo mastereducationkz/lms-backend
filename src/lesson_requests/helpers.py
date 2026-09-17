@@ -426,16 +426,21 @@ def _active_class_events(db: Session, group_id: int) -> list[Event]:
 
 def _regular_slots(
     group: Group, active_events: Sequence[Event], cancelled_event: Event
-) -> list[tuple[int, time]]:
-    """The group's weekly slots as ``(weekday, time)`` in Almaty, Monday = 0.
+) -> list[tuple[int, time, Optional[int]]]:
+    """The group's weekly slots as ``(weekday, time, minutes)`` in Almaty, Monday = 0.
 
-    From ``schedule_config.schedule_items`` when the group has a generated schedule. A group
-    whose lessons were placed by hand has none, so the slots are read off its active lessons
-    instead; a group with no other lessons at all inherits the cancelled lesson's own slot.
+    From ``schedule_config.schedule_items`` when the group has a generated schedule, each with
+    its length as the schedule rules read it (see :func:`weekly_slot_minutes`). A group whose
+    lessons were placed by hand has none, so the slots are read off its active lessons instead
+    — with no length (``None``), since a lesson's own length says nothing about its slot; a
+    group with no other lessons at all inherits the cancelled lesson's own slot.
     """
-    slots: set[tuple[int, time]] = set()
+    from src.services.schedule_plan import DEFAULT_SLOT_MINUTES, weekly_slot_minutes
+
+    slots: set[tuple[int, time, Optional[int]]] = set()
 
     config = group.schedule_config if isinstance(group.schedule_config, dict) else {}
+    minutes_by_slot = weekly_slot_minutes(config)
     for item in config.get("schedule_items") or []:
         if not isinstance(item, dict):
             continue
@@ -445,17 +450,18 @@ def _regular_slots(
         except (TypeError, ValueError):
             continue
         if 0 <= weekday <= 6:
-            slots.add((weekday, at))
+            minutes = minutes_by_slot.get((weekday, at.strftime("%H:%M")), DEFAULT_SLOT_MINUTES)
+            slots.add((weekday, at, minutes))
 
     if not slots:
         for source in (active_events, [cancelled_event]):
             for event in source:
                 local = _naive_utc(event.start_datetime) + KZ_OFFSET
-                slots.add((local.weekday(), local.time().replace(second=0, microsecond=0)))
+                slots.add((local.weekday(), local.time().replace(second=0, microsecond=0), None))
             if slots:
                 break
 
-    return sorted(slots)
+    return sorted(slots, key=lambda slot: (slot[0], slot[1]))
 
 
 def _decrement_planned_lessons(group: Group) -> None:
@@ -489,6 +495,11 @@ def append_replacement_lesson(
     otherwise be the earliest candidate, silently undoing the cancellation). A slot the
     group already has an active event on is skipped.
 
+    The replacement is as long as the cancelled lesson, so the course keeps its planned hours.
+    It prefers the earliest free slot of that same length (a cancelled 90-minute Saturday is
+    made up on a 90-minute Saturday, not squeezed into Monday's hour) and falls back to the
+    earliest free slot of any length when none is free in the window.
+
     The lesson is the group's regular teacher's: a substitute pinned to the cancelled
     occurrence does not follow it. ``schedule_config.lessons_count`` is left alone — the
     plan is intact, one lesson simply moved to the end. Titled ``"{group}: Lesson"`` here;
@@ -516,20 +527,29 @@ def append_replacement_lesson(
         .all()
     }
 
+    duration = _naive_utc(cancelled_event.end_datetime) - _naive_utc(cancelled_event.start_datetime)
+    if duration <= timedelta(0):
+        duration = timedelta(minutes=60)
+    cancelled_minutes = int(duration.total_seconds() // 60)
+
     start_local_date = (floor + KZ_OFFSET).date()
-    candidate: Optional[datetime] = None
-    for day_offset in range(_REPLACEMENT_SEARCH_WEEKS * 7 + 1):
-        local_date = start_local_date + timedelta(days=day_offset)
-        for weekday, at in slots:
-            if weekday != local_date.weekday():
-                continue
-            instant = datetime.combine(local_date, at) - KZ_OFFSET
-            if instant <= floor or instant in occupied:
-                continue
-            candidate = instant
-            break
-        if candidate is not None:
-            break
+
+    def earliest_free(candidates: Sequence[tuple[int, time, Optional[int]]]) -> Optional[datetime]:
+        for day_offset in range(_REPLACEMENT_SEARCH_WEEKS * 7 + 1):
+            local_date = start_local_date + timedelta(days=day_offset)
+            for weekday, at, _minutes in candidates:
+                if weekday != local_date.weekday():
+                    continue
+                instant = datetime.combine(local_date, at) - KZ_OFFSET
+                if instant <= floor or instant in occupied:
+                    continue
+                return instant
+        return None
+
+    same_length = [slot for slot in slots if slot[2] == cancelled_minutes]
+    candidate = earliest_free(same_length) if same_length else None
+    if candidate is None:
+        candidate = earliest_free(slots)
 
     if candidate is None:
         raise HTTPException(
@@ -540,10 +560,6 @@ def append_replacement_lesson(
                 "Проверьте расписание группы или выберите «только отменить»."
             ),
         )
-
-    duration = _naive_utc(cancelled_event.end_datetime) - _naive_utc(cancelled_event.start_datetime)
-    if duration <= timedelta(0):
-        duration = timedelta(minutes=60)
 
     replacement = Event(
         title=f"{group.name}: Lesson",
