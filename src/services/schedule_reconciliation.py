@@ -5,7 +5,9 @@ The rules themselves — how many lessons a counted course still needs and which
 goes where — live in :mod:`src.services.schedule_plan` (the LMS mirror of the CRM's
 ``src/groups/schedule_plan.py``). This module reads the group's lessons, hands them to those
 rules and writes the outcome, as the CRM's ``src/groups/schedule_reconciliation.py`` does, so a
-schedule saved in either system produces the same lessons.
+schedule saved in either system produces the same lessons. The save's preview
+(:mod:`src.services.schedule_preview`) reads through the same functions, so the two cannot
+disagree.
 
 - A lesson already on a desired slot keeps it; the rest move in date order (moving in place
   keeps ``event.id``, so attendance and history stay attached).

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, or_
-from typing import Any, List, Optional
-from datetime import datetime, date, timedelta
+import math
+from typing import Any, List, Literal, Optional
+from datetime import datetime, date, timedelta, timezone
 
 from src.config import get_db
 from src.schemas.models import (
@@ -2294,46 +2295,25 @@ def _stored_item_minutes(item: Any) -> int:
     return next(iter(weekly_slot_minutes({"schedule_items": [item]}).values()), DEFAULT_SLOT_MINUTES)
 
 
-@router.post("/curator/schedule/generate")
-def generate_schedule(
-    data: ScheduleGenerationSchema,
-    current_user: UserInDB = Depends(get_current_user_dependency),
-    db: Session = Depends(get_db)
-):
+def _schedule_now() -> datetime:
+    """The instant a schedule save and its preview split lessons taught from lessons to come.
+
+    One clock for both routes, so the preview is computed against the same «now» as the save
+    (and a test can pin it to compare the two).
     """
-    Generate lesson schedules for a group.
-    Creates individual Event entries for each lesson (no more recurring events or LessonSchedule).
-    Events are completely independent of course content.
+    return datetime.now(timezone.utc)
+
+
+def _build_schedule_config(data: ScheduleGenerationSchema, old_cfg: dict) -> dict:
+    """The ``schedule_config`` a generate of ``data`` stores — built once, for the save and its
+    preview, so the preview is exactly what saving will do.
+
+    The body model has already refused a bad day, time, length or count and padded «9:00» to
+    «09:00»; here each day's length is resolved (the request's, else the stored slot's, else an
+    hour), the course is counted, and CRM-excluded slots survive only an unchanged pattern.
     """
-    if current_user.role not in ["curator", "admin", "head_curator", "teacher"]:
-       raise HTTPException(status_code=403, detail="Access denied")
-    
-    group = db.query(Group).filter(Group.id == data.group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-
-    # Legacy LessonSchedules: deactivate (no attendance on these in current flow)
-    existing_schedules = db.query(LessonSchedule).filter(
-        LessonSchedule.group_id == data.group_id,
-        LessonSchedule.is_active == True
-    ).all()
-
-    for old_sched in existing_schedules:
-        old_sched.is_active = False
-        old_assignments = db.query(GroupAssignment).filter(
-            GroupAssignment.lesson_schedule_id == old_sched.id,
-            GroupAssignment.is_active == True
-        ).all()
-        for oa in old_assignments:
-            oa.is_active = False
-
-    # Calculate number of weeks needed
-    import math
     lessons_count = data.lessons_count if data.lessons_count else (len(data.schedule_items) * data.weeks_count)
-    frequency = len(data.schedule_items)
-    week_limit = math.ceil(lessons_count / frequency) + 2
-
-    old_cfg = group.schedule_config if isinstance(group.schedule_config, dict) else {}
+    week_limit = math.ceil(lessons_count / len(data.schedule_items)) + 2
     stored_minutes = weekly_slot_minutes(old_cfg)
     new_cfg = {
         "start_date": data.start_date.isoformat(),
@@ -2352,6 +2332,105 @@ def generate_schedule(
     # something while the days, times and lengths are the ones they were excluded from.
     if old_cfg.get("excluded_slot_keys") and weekly_slot_minutes(new_cfg) == stored_minutes:
         new_cfg["excluded_slot_keys"] = old_cfg["excluded_slot_keys"]
+    return new_cfg
+
+
+def _schedule_edit(
+    data: ScheduleGenerationSchema, current_user: UserInDB, db: Session
+) -> tuple[Group, dict, dict]:
+    """The role check, the group, its stored config and the config a save of ``data`` stores."""
+    if current_user.role not in ["curator", "admin", "head_curator", "teacher"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    group = db.query(Group).filter(Group.id == data.group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    old_cfg = group.schedule_config if isinstance(group.schedule_config, dict) else {}
+    return group, old_cfg, _build_schedule_config(data, old_cfg)
+
+
+class SchedulePreviewLesson(BaseModel):
+    start: str
+    end: str
+    minutes: int
+    event_id: Optional[int] = None
+    change: Literal["keep", "move", "resize", "create"]
+    previous_start: Optional[str] = None
+    previous_end: Optional[str] = None
+
+
+class SchedulePreviewDeactivated(BaseModel):
+    event_id: int
+    start: str
+    end: str
+
+
+class SchedulePreviewResponse(BaseModel):
+    started_lessons: int
+    started_minutes: int
+    planned_lessons: int
+    planned_minutes: int
+    total_lessons: int
+    total_minutes: int
+    first_start: Optional[str] = None
+    last_end: Optional[str] = None
+    lessons: List[SchedulePreviewLesson]
+    deactivated: List[SchedulePreviewDeactivated]
+    warnings: List[str]
+
+
+@router.post("/curator/schedule/preview", response_model=SchedulePreviewResponse)
+def preview_schedule(
+    data: ScheduleGenerationSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """What «Generate» would do with this body, without writing anything: lessons taught, the
+    lessons kept, moved, resized, created and switched off, the course totals and warnings.
+
+    Same body, role check and config as ``POST /curator/schedule/generate`` — twin of the CRM's
+    ``POST /groups/{id}/schedule/preview``.
+    """
+    from src.services.schedule_preview import preview_group_schedule
+
+    group, old_cfg, new_cfg = _schedule_edit(data, current_user, db)
+    # Reads only and never commits; `get_db` closes the session, which discards anything else.
+    return preview_group_schedule(
+        db,
+        group.id,
+        new_cfg,
+        previous_config=old_cfg,
+        fallback_start=data.start_date,
+        now=_schedule_now(),
+    )
+
+
+@router.post("/curator/schedule/generate")
+def generate_schedule(
+    data: ScheduleGenerationSchema,
+    current_user: UserInDB = Depends(get_current_user_dependency),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate lesson schedules for a group.
+    Creates individual Event entries for each lesson (no more recurring events or LessonSchedule).
+    Events are completely independent of course content.
+    """
+    group, old_cfg, new_cfg = _schedule_edit(data, current_user, db)
+
+    # Legacy LessonSchedules: deactivate (no attendance on these in current flow)
+    existing_schedules = db.query(LessonSchedule).filter(
+        LessonSchedule.group_id == data.group_id,
+        LessonSchedule.is_active == True
+    ).all()
+
+    for old_sched in existing_schedules:
+        old_sched.is_active = False
+        old_assignments = db.query(GroupAssignment).filter(
+            GroupAssignment.lesson_schedule_id == old_sched.id,
+            GroupAssignment.is_active == True
+        ).all()
+        for oa in old_assignments:
+            oa.is_active = False
 
     # The CRM's save: the course is counted from the lessons already begun (not replayed from
     # start_date), approved cancellations stay cancelled, and a lesson already on a kept slot
@@ -2367,6 +2446,7 @@ def generate_schedule(
         teacher_id=group.teacher_id,
         created_by=current_user.id,
         fallback_start=data.start_date,
+        now=_schedule_now(),
     )
     lessons_created = result["updated"] + result["created"]
 
