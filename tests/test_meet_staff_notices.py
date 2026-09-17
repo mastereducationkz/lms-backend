@@ -30,6 +30,7 @@ class FakeMeet:
     def __init__(self):
         self.calls = {}       # conference -> {"space", "start", "live"}
         self.people = {}      # conference -> [participant still in]
+        self.ever = {}        # conference -> [everyone who ever joined]
         self.recs = {}        # conference -> [recording]
         self._level = None
 
@@ -47,6 +48,8 @@ class FakeMeet:
 
     def list(self, pageSize=100, pageToken=None, filter=None, parent=None):
         if self._level == "participants":
+            if filter is None:
+                return _Call({"participants": self.ever.get(parent, [])})
             assert filter == "latest_end_time IS NULL"
             return _Call({"participants": self.people.get(parent, [])})
         if self._level == "recordings":
@@ -101,15 +104,18 @@ def lesson(world, monkeypatch):
     monkeypatch.setenv("MEET_NOTICES_SUPPORT_GROUP_ID", "210")
     monkeypatch.setenv("MEET_NOTICES_TOPIC_ID", "13771")
     meet_staff_notices._VISITED.clear()
+    meet_staff_notices._TEACHER_CAME.clear()
 
     def in_room(*accounts, since=-5, live=True):
         meet.calls[CALL] = {"space": SPACE, "start": START + timedelta(minutes=min(since, -5)), "live": live}
         meet.people[CALL] = [{"signedinUser": {"user": a}, "earliestStartTime": _z(START + timedelta(minutes=since))}
                              for a in accounts]
+        meet.ever[CALL] = list(meet.people[CALL])
 
     def joins(account, at):
-        meet.people[CALL].append({"signedinUser": {"user": account},
-                                  "earliestStartTime": _z(START + timedelta(minutes=at))})
+        person = {"signedinUser": {"user": account}, "earliestStartTime": _z(START + timedelta(minutes=at))}
+        meet.people[CALL].append(person)
+        meet.ever.setdefault(CALL, []).append(person)
 
     def recording_from(minute):
         meet.recs[CALL] = [{"state": "STARTED", "startTime": _z(START + timedelta(minutes=minute))}]
@@ -233,12 +239,58 @@ def test_a_recording_lesson_is_quiet(lesson):
     assert lesson["posted"] == []
 
 
-def test_nobody_in_the_room_at_ten_minutes_is_white_but_people_who_came_and_left_are_not(lesson):
-    lesson["run"](9)
+def test_an_empty_room_is_orange_at_five_minutes_and_white_at_ten(lesson):
+    """2026-09-17 05:05: nobody in «Indi Aruzhan SAT» and the topic said nothing. The teacher not being
+    there is the news at 5 min, students or not (owner); ⚪ still follows at 10."""
+    lesson["teacher_confirmed"]()
+    lesson["run"](4)
     assert lesson["posted"] == []
-    lesson["run"](11)
+    lesson["run"](5)
+    assert len(lesson["posted"]) == 1
+    orange = lesson["posted"][0]["text"]
+    assert orange.startswith("🟠 <b>Учитель не зашёл в урок</b>")
+    assert "Прошло 5 мин. В комнате никого нет — ни учителя, ни учеников." in orange
+    assert "Урок не записывается" in orange
+    lesson["run"](9)
+    assert len(lesson["posted"]) == 1
+    lesson["run"](10)
     lesson["run"](12)
-    assert len(lesson["posted"]) == 1 and "В уроке никого нет" in lesson["posted"][0]["text"]
+    assert len(lesson["posted"]) == 2 and "В уроке никого нет" in lesson["posted"][1]["text"]
+
+
+def test_an_empty_room_is_orange_even_before_the_teachers_accounts_are_confirmed(lesson):
+    lesson["run"](6)
+    assert "В комнате никого нет" in lesson["posted"][0]["text"]
+
+
+def test_a_call_nobody_joined_is_not_a_visit(lesson):
+    """The 05:00 lesson's call opened at 04:55, 12 s after its invitation was posted, and nobody was
+    ever in it — it held ⚪ back and 🟠 never asked."""
+    lesson["meet"].calls[CALL] = {"space": SPACE, "start": START - timedelta(minutes=5), "live": True}
+    lesson["run"](6)
+    lesson["run"](11)
+    assert [p["text"].split("\n")[0] for p in lesson["posted"]] == ["🟠 <b>Учитель не зашёл в урок</b>",
+                                                                     "⚪ <b>В уроке никого нет</b>"]
+
+
+def test_a_teacher_who_taught_and_left_is_not_called_absent(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["in_room"](TEACHER, STUDENT, live=False)
+    lesson["meet"].people.clear()  # everybody has left
+    lesson["run"](6)
+    lesson["run"](11)
+    assert lesson["posted"] == []
+
+
+def test_orange_for_an_empty_room_gets_a_reply_when_the_teacher_arrives(lesson):
+    lesson["teacher_confirmed"]()
+    lesson["run"](6)
+    lesson["in_room"](TEACHER, since=7)
+    lesson["recording_from"](7)  # the teacher's work account starts it: no 🔴 on top
+    lesson["run"](8.5)
+    assert len(lesson["posted"]) == 2
+    reply = lesson["posted"][1]
+    assert reply["reply_to_message_id"] == 501 and "Учитель зашёл в 18:07" in reply["text"]
 
 
 def test_a_room_people_visited_and_left_is_not_empty(lesson):
@@ -252,6 +304,7 @@ def test_a_call_opened_long_before_the_lesson_and_left_during_it_is_not_an_empty
     # 16.09, Abzal's 20:30: students opened the room at 19:52 and that one call ran the lesson.
     lesson["meet"].calls["conferenceRecords/early"] = {
         "space": SPACE, "start": START - timedelta(minutes=38), "end": START + timedelta(minutes=5), "live": False}
+    lesson["meet"].ever["conferenceRecords/early"] = [{"signedinUser": {"user": STUDENT}}]
     lesson["run"](11)
     assert lesson["posted"] == []
 
@@ -260,7 +313,7 @@ def test_a_call_that_ended_well_before_the_lesson_does_not_count_as_a_visit(less
     lesson["meet"].calls["conferenceRecords/morning"] = {
         "space": SPACE, "start": START - timedelta(hours=5), "end": START - timedelta(hours=4), "live": False}
     lesson["run"](11)
-    assert "В уроке никого нет" in lesson["posted"][0]["text"]
+    assert any("В уроке никого нет" in p["text"] for p in lesson["posted"])
 
 
 def test_a_failed_send_is_retried_under_the_same_key(lesson):
@@ -343,6 +396,15 @@ def test_the_summary_counts_a_recorded_call_that_opened_long_before_the_lesson(l
     text = lesson["posted"][0]["text"]
     assert "Уроков в Meet: 1 · с записью 1 · без записи 0" in text
     assert "Никто не заходил" not in text
+
+
+def test_the_summary_calls_a_room_whose_only_call_nobody_joined_empty(lesson, monkeypatch):
+    lesson["meet"].calls[CALL] = {"space": SPACE, "start": START - timedelta(minutes=5),
+                                  "end": START + timedelta(minutes=60), "live": False}
+    monkeypatch.setattr(meet_presence, "records", lambda _db, events, now: [])
+    assert meet_staff_digest.send_if_due(lesson["db"], _almaty(time(22, 1))) == "sent"
+    text = lesson["posted"][0]["text"]
+    assert "без записи 0 · пустых 1" in text and "⚪ <b>Никто не заходил</b>" in text
 
 
 # --- a sent summary stays true ------------------------------------------------------------------

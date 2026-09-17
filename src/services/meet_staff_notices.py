@@ -13,7 +13,12 @@ closer, for each lesson running in one of our Meet rooms:
 - 🟠 ``teacher_absent`` — 5 min in, people in the room and none of the teacher's confirmed Google
   accounts among them: late, or joined on another account. Its own message, saying outright whether
   the lesson is recording. Replied to once the teacher has been in the room a minute.
-- ⚪ ``empty_room`` — 10 min in, nobody has come to the room at all: cancelled, or another link.
+  **Also for an empty room** (owner, 2026-09-17: at 05:05 nobody was in «Indi Aruzhan SAT» and the topic
+  was silent) — unless the teacher already taught and left; with unconfirmed teacher accounts, only
+  while nobody has joined at all.
+- ⚪ ``empty_room`` — 10 min in, nobody has come to the room at all: cancelled, or another link. It may
+  follow 🟠. A call nobody ever joined is not a visit: the 05:00 lesson's call opened at 04:55, 12 s after
+  its invitation was posted (a link preview), with zero participants, and held ⚪ back for the hour.
 
 The evening summary lives in :mod:`src.services.meet_staff_digest`. A notice is one
 :class:`MeetStaffNotice` per lesson and kind, claimed before Support is called and retried under
@@ -54,6 +59,8 @@ LESSON_KINDS = ("no_recording", "teacher_absent", "empty_room")
 
 # Lessons whose room somebody has already visited: never "empty", so not asked about again.
 _VISITED: set = set()
+# Lessons whose teacher has already been in the room (a confirmed account in one of its calls).
+_TEACHER_CAME: set = set()
 
 
 def target() -> Optional[tuple]:
@@ -86,11 +93,15 @@ def lesson_lines(lesson: dict) -> str:
 
 
 def teacher_absent_text(lesson: dict, *, now: datetime, people: int, recording: bool) -> str:
+    if people == 0:
+        who = "В комнате никого нет — ни учителя, ни учеников."
+    else:
+        who = (f"В комнате {people} чел., рабочего аккаунта учителя среди них нет — опаздывает или зашёл "
+               "с другого (личного) аккаунта.")
     return (
         "🟠 <b>Учитель не зашёл в урок</b>\n"
         f"{lesson_lines(lesson)}\n"
-        f"Прошло {_minutes(now - lesson['start'])} мин. В комнате {people} чел., рабочего аккаунта "
-        "учителя среди них нет — опаздывает или зашёл с другого (личного) аккаунта.\n"
+        f"Прошло {_minutes(now - lesson['start'])} мин. {who}\n"
         + ("✅ Запись идёт.\n" if recording else "❌ <b>Урок не записывается.</b>\n")
         + f"\n👉 {escape(lesson['url'])}"
     )
@@ -250,11 +261,30 @@ def lesson_calls(meet, lesson: dict) -> list:
             and (_utc(c.get("endTime")) or datetime.max) >= lesson["start"] - EARLY_VISIT]
 
 
+def lesson_visitors(meet, lesson: dict) -> list:
+    """Everyone who ever joined one of the lesson's calls. A call nobody joined has none: opening
+    the link (a chat's link preview) starts a conference in Meet without anyone in it."""
+    people = []
+    for call in lesson_calls(meet, lesson):
+        people += _pages(meet.conferenceRecords().participants().list, "participants", parent=call["name"])
+    return people
+
+
 def _anyone_came(meet, lesson: dict) -> bool:
     if lesson["id"] in _VISITED:
         return True
-    came = bool(lesson_calls(meet, lesson))
+    came = bool(lesson_visitors(meet, lesson))
     if came:
+        _VISITED.add(lesson["id"])
+    return came
+
+
+def _teacher_came(meet, lesson: dict, teacher_accounts: set) -> bool:
+    if lesson["id"] in _TEACHER_CAME:
+        return True
+    came = any((p.get("signedinUser") or {}).get("user") in teacher_accounts for p in lesson_visitors(meet, lesson))
+    if came:
+        _TEACHER_CAME.add(lesson["id"])
         _VISITED.add(lesson["id"])
     return came
 
@@ -300,9 +330,17 @@ def check_lesson(db, meet, lesson: dict, conference: Optional[dict], notices: di
             _raise(db, "teacher_absent", lesson, now,
                    teacher_absent_text(lesson, now=now, people=len(still_in), recording=recording_since is not None),
                    summary)
-    elif (not still_in and "empty_room" not in notices and elapsed >= EMPTY_ROOM_AFTER
-          and not any(k in notices for k in LESSON_KINDS) and not _anyone_came(meet, lesson)):
-        _raise(db, "empty_room", lesson, now, empty_room_text(lesson, now=now), summary)
+    elif not still_in:
+        # Nobody in the room. The teacher not being there is the news at 5 min, students or not
+        # (owner, 2026-09-17) — unless the teacher already taught and left; with no confirmed teacher
+        # account to look for, only while nobody has joined at all.
+        if absent is None and elapsed >= TEACHER_ABSENT_AFTER and not (
+                _teacher_came(meet, lesson, teacher_accounts) if teacher_accounts else _anyone_came(meet, lesson)):
+            _raise(db, "teacher_absent", lesson, now,
+                   teacher_absent_text(lesson, now=now, people=0, recording=recording_since is not None), summary)
+        if ("empty_room" not in notices and "no_recording" not in notices and elapsed >= EMPTY_ROOM_AFTER
+                and not _anyone_came(meet, lesson)):
+            _raise(db, "empty_room", lesson, now, empty_room_text(lesson, now=now), summary)
 
 
 def run(db, now: Optional[datetime] = None) -> dict:
