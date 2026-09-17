@@ -31,6 +31,7 @@ from src.exams.models import BluebookResult, ExamResult
 from src.gamification.models import DailyQuestionCompletion
 from src.auth.models import PointHistory
 from src.assignments.models import AssignmentLinkedLesson
+from src.services.attendance_status import is_excused, normalize_status
 
 
 def _iso(value) -> Optional[str]:
@@ -195,7 +196,7 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
         ).all()
     ]
     empty = {
-        "marked_total": 0, "attended": 0, "late": 0, "absent": 0,
+        "marked_total": 0, "attended": 0, "late": 0, "absent": 0, "absent_excused": 0,
         "attendance_pct": None, "absences": [], "lates": [],
     }
     if not group_ids:
@@ -233,23 +234,51 @@ def _attendance_section(db: Session, student_id: int) -> Dict[str, Any]:
         marked.append((e, a))
     marked.sort(key=lambda pair: pair[0].start_datetime or datetime.min)
 
-    def _rows(status: str) -> List[Dict[str, Any]]:
-        return [
-            {"date": _iso(e.start_datetime), "title": e.title}
-            for e, a in marked if a.status == status
-        ]
+    def _rows(status: str, with_excuse: bool = False) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for e, a in marked:
+            # Absence rows are selected through the shared vocabulary so a row stored under
+            # an absent synonym (``missed``/``no``/``0``) is not silently dropped just
+            # because its literal spelling differs from the canonical "absent". Lateness
+            # rows keep the raw literal — ``late`` is intentionally not normalised (see
+            # below) and this helper is never asked to classify "present".
+            if status == "absent":
+                if normalize_status(a.status) != "absent":
+                    continue
+            elif a.status != status:
+                continue
+            row = {"date": _iso(e.start_datetime), "title": e.title}
+            # Уважительность живёт только на пропуске. На опоздании эти два ключа были бы
+            # всегда False/None — поле, которое ничего не означает, но которое читатель
+            # отчёта рано или поздно попробует прочитать.
+            if with_excuse:
+                row["excused"] = bool(a.excused)
+                row["excuse_note"] = a.excuse_note
+            rows.append(row)
+        return rows
 
     present = sum(1 for _, a in marked if a.status == "present")
     late = sum(1 for _, a in marked if a.status == "late")
-    absent = sum(1 for _, a in marked if a.status == "absent")
+    # Classified through the shared vocabulary, not the raw literal: a row stored under an
+    # absent synonym (``missed``/``no``/``0``, e.g. from a CRM import) must still count here,
+    # otherwise it can end up with ``absent=0`` while ``absent_excused`` (below, also routed
+    # through the vocabulary) counts it as 1 — a self-contradicting report line. ``present``
+    # and ``late`` above are deliberately NOT normalised the same way: normalize_status()
+    # classifies "late" as "present" because the student attended, but this report keeps
+    # ``late`` as its own displayed figure and must not collapse it into ``present``.
+    absent = sum(1 for _, a in marked if normalize_status(a.status) == "absent")
+    # Разрез, а не вычет: «absent» остаётся полным числом пропусков. Уважительный пропуск
+    # считается пропуском — это принятое решение, и отчёт не имеет права его пересматривать.
+    absent_excused = sum(1 for _, a in marked if is_excused(a.status, a.excused))
     total = len(marked)
     return {
         "marked_total": total,
         "attended": present + late,
         "late": late,
         "absent": absent,
+        "absent_excused": absent_excused,
         "attendance_pct": round((present + late) / total * 100, 2) if total else None,
-        "absences": _rows("absent"),
+        "absences": _rows("absent", with_excuse=True),
         "lates": _rows("late"),
     }
 

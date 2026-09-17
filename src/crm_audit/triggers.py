@@ -284,7 +284,17 @@ DECLARE
     v_groups   json;
 BEGIN
     BEGIN
-        IF (TG_OP = 'UPDATE') AND NOT (NEW.status IS DISTINCT FROM OLD.status) THEN
+        -- Уважительность — вторая половина отметки, а не косметика: снятие урока с
+        -- баланса зависит от неё ровно так же, как от статуса. Переход absent → absent
+        -- + excused не меняет ни одной буквы в status, поэтому без этой ветки CRM никогда
+        -- бы не узнала, что уже списанный урок пора вернуть. Правка одной только причины
+        -- (текста excuse_note) при уже стоящем флаге — тот же случай: status и excused не
+        -- меняются, а CRM обязана увидеть исправленную причину, а не хранить старую.
+        IF (TG_OP = 'UPDATE') AND NOT (
+            NEW.status IS DISTINCT FROM OLD.status
+            OR NEW.excused IS DISTINCT FROM OLD.excused
+            OR NEW.excuse_note IS DISTINCT FROM OLD.excuse_note
+        ) THEN
             RETURN NULL;
         END IF;
 
@@ -307,8 +317,16 @@ BEGIN
                 'group_ids', v_groups,
                 'actor', json_build_object('kind', '{ACTOR_KIND}'),
                 'before', CASE WHEN TG_OP = 'UPDATE'
-                               THEN json_build_object('status', OLD.status) ELSE NULL END,
-                'after', json_build_object('status', NEW.status)
+                               THEN json_build_object(
+                                   'status', OLD.status,
+                                   'excused', OLD.excused,
+                                   'excuse_note', OLD.excuse_note
+                               ) ELSE NULL END,
+                'after', json_build_object(
+                    'status', NEW.status,
+                    'excused', NEW.excused,
+                    'excuse_note', NEW.excuse_note
+                )
             ),
             'pending', 0, now()
         );

@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, Integer, Float, DateTime, Date, Boolean, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, JSON, func, text
+from sqlalchemy import false as sa_false
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -432,13 +433,27 @@ class Attendance(Base):
     score = Column(Integer, default=0)
     activity_score = Column(Float, nullable=True)
     notes = Column(Text, nullable=True)
+    #: Пропуск по уважительной причине. НЕ статус — надстройка над ``status = 'absent'``.
+    #: См. ``src.services.attendance_status`` о том, почему не новое значение статуса.
+    #: ``server_default`` false — это и есть решение по истории: всё, что было отмечено до
+    #: появления колонки, остаётся неуважительным, бэкфилла нет.
+    excused = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    #: Свободный текст. Обязателен, когда ``excused`` стоит — справочника причин нет
+    #: намеренно: учителю быстрее написать словом, чем искать пункт в списке.
+    excuse_note = Column(Text, nullable=True)
+    #: Кто и когда признал пропуск уважительным. Отмечать может учитель, а эффект на деньги
+    #: решает CRM, поэтому «кто» обязан сохраниться рядом с фактом.
+    excused_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    excused_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     event = relationship("Event")
     lesson_schedule = relationship("LessonSchedule", back_populates="attendances",
                                    foreign_keys=[lesson_schedule_id])
-    user = relationship("UserInDB")
+    # foreign_keys pinned: excused_by_user_id is a second FK to users.id on this table,
+    # which otherwise leaves SQLAlchemy unable to infer which column this relationship means.
+    user = relationship("UserInDB", foreign_keys=[user_id])
 
     __table_args__ = (
         UniqueConstraint('event_id', 'user_id', name='uq_attendance_event_user'),
@@ -446,5 +461,13 @@ class Attendance(Base):
             '(event_id IS NOT NULL AND lesson_schedule_id IS NULL) OR '
             '(event_id IS NULL AND lesson_schedule_id IS NOT NULL)',
             name='ck_attendance_event_or_schedule'
+        ),
+        # Половина инварианта, которую БД способна проверить сама. Вторая половина —
+        # «статус обязан означать пропуск» — живёт в ``validate_excused``: множество
+        # absent-синонимов принадлежит словарю приложения, и вморозить его список в
+        # constraint значит завести четырнадцатую копию, которая разойдётся с остальными.
+        CheckConstraint(
+            "NOT excused OR (excuse_note IS NOT NULL AND length(trim(excuse_note)) > 0)",
+            name="ck_attendance_excused_has_note",
         ),
     )

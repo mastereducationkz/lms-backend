@@ -65,3 +65,45 @@ def marked_statuses_for_sql() -> list[str]:
     Callers must compare against ``func.lower(...)`` since these are all lower-case.
     """
     return sorted(MARKED_STATUSES)
+
+
+#: Уважительность пропуска. НЕ значение ``status`` и намеренно не член ни одного из
+#: множеств выше.
+#:
+#: Новое значение статуса выпало бы из ``MARKED_STATUSES``, а вместе с ним — из ответа на
+#: вопрос «отмечен ли урок». Урок перестал бы списываться с баланса и исчез бы из отчётов,
+#: причём молча: около пятнадцати мест сравнивают статус литералами
+#: (``Attendance.status.in_(["present", "late", "absent"])`` в админ-дашборде,
+#: ``a.status == "absent"`` в отчётах, ``marked_count()`` в CRM). Поэтому уважительность —
+#: отдельная колонка ``attendances.excused`` поверх обычного ``absent``, а этот модуль
+#: описывает только правило её допустимости.
+
+
+def validate_excused(
+    status: Optional[str], excused: Optional[bool], note: Optional[str]
+) -> None:
+    """Проверить, что флаг уважительности не противоречит строке, на которой стоит.
+
+    Бросает ``ValueError`` с машинным кодом; вызывающий роут переводит его в 422.
+    Коды: ``excused_requires_absent``, ``excused_requires_note``.
+
+    ``excused`` принимает и ``None`` — «вызывающий про уважительность не сообщает».
+    Проверять в этом случае нечего: строка не меняется, значит и противоречить нечему.
+    """
+    if not excused:
+        return
+    if normalize_status(status) != "absent":
+        raise ValueError("excused_requires_absent")
+    if not (note or "").strip():
+        raise ValueError("excused_requires_note")
+
+
+def is_excused(raw_status: Optional[str], excused: Optional[bool]) -> bool:
+    """True только когда флаг стоит И статус действительно означает пропуск.
+
+    Обе половины вместе: строка с ``excused = true`` и статусом ``present`` — это
+    рассинхрон, и читатель обязан считать её обычным присутствием, а не уважительным
+    пропуском. Инвариант не даёт такой строке появиться через API, но данные переживают
+    код, который их писал.
+    """
+    return bool(excused) and normalize_status(raw_status) == "absent"

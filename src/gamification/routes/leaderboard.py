@@ -22,6 +22,7 @@ from src.services.attendance_service import (
     attendance_status_to_ui,
     ep_status_to_attendance_status,
 )
+from src.services.attendance_status import is_excused, validate_excused
 
 
 def head_teacher_can_access_group(db: Session, head_teacher_user_id: int, group_id: int) -> bool:
@@ -866,13 +867,21 @@ async def get_weekly_lessons_with_hw_status(
     
     # 7. Get Attendance — from Attendance (single source of truth)
     event_ids = [e.id for e in events if hasattr(e, 'id') and e.id]
-    attendance_map = {}  # (user_id, event_id) -> {"status": str, "activity_score": float|None}
+    attendance_map = {}  # (user_id, event_id) -> {"status", "activity_score", "excused", "excuse_note"}
     if event_ids:
         raw_map = AttendanceService.get_attendance_map_for_events(db, event_ids, student_ids)
         for (uid, eid), att in raw_map.items():
+            # ``is_excused`` классифицирует *хранимый* статус, а не подпись для интерфейса:
+            # "missed" в словаре статусов не значит ничего, и уважительность на нём
+            # схлопнулась бы в False у каждой строки. Поэтому флаг считается здесь, от
+            # ``att["status"]``, до перевода в UI-значение. Заметка следует за тем же
+            # флагом, иначе клиент видит причину рядом с зелёной клеткой.
+            excused = is_excused(att["status"], att["excused"])
             attendance_map[(uid, eid)] = {
                 "status": attendance_status_to_ui(att["status"]),
                 "activity_score": att["activity_score"],
+                "excused": excused,
+                "excuse_note": att["excuse_note"] if excused else None,
             }
 
     
@@ -1266,6 +1275,10 @@ async def get_weekly_lessons_with_hw_status(
                 "event_id": event.id,
                 "attendance_status": status,
                 "activity_score": att["activity_score"] if att else None,
+                # Уважительность — надстройка над «Не был», а не новый статус: клиент,
+                # который про эти поля не знает, продолжает рисовать обычный пропуск.
+                "excused": att["excused"] if att else False,
+                "excuse_note": att["excuse_note"] if att else None,
                 "homework_statuses": hw_statuses,
                 "homework_status": hw_status,
                 # False = lesson predates the student's join date (see above).
@@ -1441,10 +1454,19 @@ def get_group_full_attendance_matrix(
             att_data = attendance_map.get((student.id, event.id))
             status = attendance_status_to_ui(att_data["status"] if att_data else None)
             activity_score = att_data["activity_score"] if att_data else None
+            # Уважительность — надстройка над «Не был», а не новый статус: клиент,
+            # который про эти поля не знает, продолжает рисовать обычный пропуск.
+            # Флаг проводится через ``is_excused`` от хранимого статуса: в эту таблицу
+            # пишет и CRM, чей ``upsert_attendance`` переставляет absent → present, не
+            # трогая колонку, а CHECK в БД сторожит только «есть причина». Заметка
+            # следует за тем же флагом, иначе клиент видит причину рядом с зелёной клеткой.
+            excused = is_excused(att_data["status"], att_data["excused"]) if att_data else False
             lesson_data[str(idx + 1)] = {
                 "event_id": event.id,
                 "attendance_status": status,
-                "activity_score": activity_score
+                "activity_score": activity_score,
+                "excused": excused,
+                "excuse_note": att_data["excuse_note"] if att_data and excused else None,
             }
             
         student_rows.append({
@@ -1807,6 +1829,15 @@ class AttendanceInputSchema(BaseModel):
     status: str = "present"
     event_id: Optional[int] = None
     activity_score: Optional[float] = None  # Activity score out of 10
+    #: Пропуск по уважительной причине + свободный текст причины.
+    #:
+    #: ``excused`` тристабилен, и дефолт — ``None``, а не ``False``: «клиент про
+    #: уважительность ничего не сообщает» и «клиент её снимает» обязаны различаться.
+    #: При дефолте ``False`` сетка, которая сохраняет колонку целиком, снимала бы
+    #: уважительную с каждой строки, где её поставил кто-то другой, а мобильная очередь
+    #: делала бы то же самое, вслепую переотправляя payload, записанный до фичи.
+    excused: Optional[bool] = None
+    excuse_note: Optional[str] = None
 
 class BulkAttendanceInputSchema(BaseModel):
     updates: List[AttendanceInputSchema]
@@ -1853,6 +1884,29 @@ def update_attendance_bulk(
     for item in data.updates:
         _reject_individual_cancellation(item.status)
 
+    # Same reasoning, same shape: the grid saves a column at a time, so validating an
+    # excuse only as its row is written can leave earlier rows already handed to
+    # AttendanceService.upsert_for_event (and thus sitting in the session) before a later
+    # row's excuse fails. Validate every event-based row's excuse fields in their own
+    # pass, before the write loop below touches anything. Legacy schedule-based rows
+    # (no event_id) never carried excuse fields, so they're skipped here exactly as the
+    # write loop below skips them.
+    for item in data.updates:
+        if not item.event_id:
+            continue
+        att_status = ep_status_to_attendance_status(item.status)
+        try:
+            validate_excused(att_status, item.excused, item.excuse_note)
+        except ValueError as err:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Уважительный пропуск требует причину"
+                    if str(err) == "excused_requires_note"
+                    else "Уважительной может быть только отметка о пропуске"
+                ),
+            )
+
     from src.services.event_service import EventService
 
     updated_count = 0
@@ -1879,18 +1933,29 @@ def update_attendance_bulk(
                 continue
             score = 1 if item.status in ("attended", "late") else 0
             att_status = ep_status_to_attendance_status(item.status)
+            # Excuse validation for this row already ran in the pre-pass over the whole
+            # batch above, before this write loop started — nothing left to check here.
+            #
             # Reported, never silently dropped: this loop already `continue`s past rows it
             # cannot write, and a grid that says «сохранено» while quietly discarding half a
             # column is how people stop trusting the screen.
-            future_reason = AttendanceService.event_is_unmarkable_because_future(
-                db, real_event_id
-            )
-            if future_reason:
-                skipped_future.append(
-                    {"event_id": real_event_id, "student_id": item.student_id,
-                     "reason": future_reason}
+            #
+            # This branch is unreachable at this call site: `_reject_individual_cancellation`,
+            # run over the whole batch above, already 400s any item whose status maps to
+            # "cancelled" before this loop ever runs, so `att_status == "cancelled"` cannot
+            # occur here. The guard is kept only for shape-parity with the events.py
+            # endpoint — insurance if that earlier rejection is ever relaxed, not live
+            # behavior today.
+            if att_status != "cancelled":
+                future_reason = AttendanceService.event_is_unmarkable_because_future(
+                    db, real_event_id
                 )
-                continue
+                if future_reason:
+                    skipped_future.append(
+                        {"event_id": real_event_id, "student_id": item.student_id,
+                         "reason": future_reason}
+                    )
+                    continue
             AttendanceService.upsert_for_event(
                 db=db,
                 event_id=real_event_id,
@@ -1898,6 +1963,9 @@ def update_attendance_bulk(
                 status=att_status,
                 score=score,
                 activity_score=item.activity_score,
+                excused=item.excused,
+                excuse_note=item.excuse_note,
+                excused_by_user_id=current_user.id if item.excused else None,
             )
             updated_count += 1
             continue
@@ -2064,6 +2132,23 @@ def update_attendance(
         else:
             att_status = "present" if data.score > 0 else "absent"
             att_score = data.score
+        # Один и тот же ``AttendanceInputSchema`` обслуживает и этот роут, и пакетный,
+        # поэтому уважительность объявлена в его контракте. Роут, который поле принимает,
+        # отвечает 200 и ничего не пишет, — худший из возможных: клиент считает причину
+        # сохранённой. Проверка и запись здесь те же, что в ``update_attendance_bulk``, и
+        # тексты 422 обязаны совпадать байт в байт.
+        try:
+            validate_excused(att_status, data.excused, data.excuse_note)
+        except ValueError as err:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Уважительный пропуск требует причину"
+                    if str(err) == "excused_requires_note"
+                    else "Уважительной может быть только отметка о пропуске"
+                ),
+            )
+
         # A lesson that has not happened cannot have a register — see
         # AttendanceService.event_is_unmarkable_because_future.
         future_reason = AttendanceService.event_is_unmarkable_because_future(
@@ -2078,6 +2163,9 @@ def update_attendance(
             status=att_status,
             score=att_score,
             activity_score=data.activity_score,
+            excused=data.excused,
+            excuse_note=data.excuse_note,
+            excused_by_user_id=current_user.id if data.excused else None,
         )
         db.commit()
         return {"status": "success", "mode": "event", "event_id": real_event_id}
