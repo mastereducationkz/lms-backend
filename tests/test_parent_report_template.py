@@ -96,6 +96,29 @@ def test_no_test_but_talk_data_gives_t2():
     assert "тест" in reason.lower()
 
 
+def test_platform_outage_never_claims_there_was_no_test():
+    # test_unavailable — это «мы не знаем», а не «теста не было». Утверждать второе
+    # родителю нельзя, поэтому каскад обязан пройти мимо t2.
+    key, reason = pick_template(facts(
+        test=None,
+        test_unavailable=True,
+        talk={"lessons": 3, "lessons_spoke": 2, "avg_seconds": 75,
+              "questions": 4, "answers": 2},
+    ))
+    assert key == "t1"
+    assert "тест" not in reason.lower()
+
+
+def test_problems_still_win_during_a_platform_outage():
+    key, _ = pick_template(facts(
+        test=None,
+        test_unavailable=True,
+        attendance={"lessons": 3, "present": 2, "late": 0,
+                    "absences": [{"date": "2026-09-16", "excused": False}]},
+    ))
+    assert key == "t5"
+
+
 def test_no_test_and_no_talk_falls_to_t1():
     key, _ = pick_template(facts(test=None, talk=None))
     assert key == "t1"
