@@ -286,3 +286,60 @@ def test_the_programmes_of_a_period_do_not_shrink_when_one_is_chosen(db, lesson_
     only_sat = service.register(db, SEPTEMBER, program="SAT", now=NOW)
     assert only_sat["programs"] == ["IELTS", "SAT"]          # the choice does not shrink the choices
     assert [row["program"] for row in only_sat["teachers"]] == ["SAT"]
+
+
+def test_a_substitute_on_a_managed_course_is_in_the_register(db, lesson_factory, meet_stub, head_teacher):
+    """Scope follows the lesson, not who owns the group.
+
+    Asking «which groups does this teacher own» lost every substitute: on production Қайратқызы
+    Дина taught six NUET lessons of somebody else's group and no head teacher could see her, only
+    admins (2026-09-18). A head teacher sees the lessons of the courses they manage, whoever taught.
+    """
+    from src.schemas.models import EventGroup, Group
+    lesson = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    group_id = db.query(EventGroup).filter_by(event_id=lesson.id).one().group_id
+    _manages(db, head_teacher, db.get(Group, group_id))
+
+    substitute = _person(db, "teacher", "Подменяющий преподаватель")
+    lesson.teacher_id = substitute.id            # taught by somebody who owns no group
+    db.flush()
+    meet_stub(lesson, first_join=datetime(2026, 9, 17, 13, 4), last_leave=datetime(2026, 9, 17, 14, 0))
+
+    register = service.register(db, SEPTEMBER, viewer=head_teacher, now=NOW)
+    assert [row["teacher_id"] for row in register["teachers"]] == [substitute.id]
+    assert register["totals"]["fine"] == 1200
+
+
+def test_a_head_teacher_does_not_see_another_courses_lesson(db, lesson_factory, meet_stub, head_teacher, teacher):
+    lesson = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    meet_stub(lesson, first_join=datetime(2026, 9, 17, 13, 3), last_leave=datetime(2026, 9, 17, 14, 0))
+    assert service.register(db, SEPTEMBER, viewer=head_teacher, now=NOW)["teachers"] == []
+
+
+def test_a_teacher_sees_their_own_lessons_whoever_owns_the_group(db, lesson_factory, meet_stub, teacher):
+    mine = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    other = _person(db, "teacher", "Другой")
+    theirs = lesson_factory(start=datetime(2026, 9, 17, 15, 0), of_teacher=other)
+    for lesson in (mine, theirs):
+        meet_stub(lesson, first_join=lesson.start_datetime + timedelta(minutes=3),
+                  last_leave=lesson.end_datetime)
+    register = service.register(db, SEPTEMBER, viewer=teacher, now=NOW)
+    assert [row["teacher_id"] for row in register["teachers"]] == [teacher.id]
+
+
+def test_an_admin_sees_every_lesson(db, lesson_factory, meet_stub, teacher):
+    admin = _person(db, "admin", "Админ")
+    lesson = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    meet_stub(lesson, first_join=datetime(2026, 9, 17, 13, 3), last_leave=datetime(2026, 9, 17, 14, 0))
+    assert len(service.register(db, SEPTEMBER, viewer=admin, now=NOW)["teachers"]) == 1
+
+
+def test_a_head_teacher_may_touch_only_their_courses_lessons(db, lesson_factory, head_teacher):
+    from src.schemas.models import EventGroup, Group
+    mine = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    theirs = lesson_factory(start=datetime(2026, 9, 17, 15, 0))
+    group_id = db.query(EventGroup).filter_by(event_id=mine.id).one().group_id
+    _manages(db, head_teacher, db.get(Group, group_id))
+
+    assert service.may_touch_lesson(db, head_teacher, mine.id) is True
+    assert service.may_touch_lesson(db, head_teacher, theirs.id) is False
