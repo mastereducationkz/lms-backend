@@ -34,6 +34,10 @@ class GenerateBody(BaseModel):
 class SaveBody(BaseModel):
     week: date
     body: str
+    # Заметка приходит вместе с текстом: она стоит в той же карточке, под той же кнопкой,
+    # и куратор вправе ожидать, что «Сохранить» сохраняет обе. Клиент присылает её всегда —
+    # пустую как null, — поэтому присваивание безусловное.
+    note: Optional[str] = None
 
 
 def _require_group_access(group_id: int, user: UserInDB, db: Session) -> Group:
@@ -215,5 +219,6 @@ def save_edit(
     if row is None:
         raise HTTPException(status_code=404, detail="Report not generated yet")
     row.body = payload.body
+    row.curator_note = payload.note
     db.commit()
     return _serialize(row)

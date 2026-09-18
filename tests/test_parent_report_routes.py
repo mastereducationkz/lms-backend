@@ -184,6 +184,16 @@ def test_curator_edit_round_trips_through_put(client, curator_and_group):
     assert again.json()["report"]["body"] == "Мой текст"
 
 
+def test_put_saves_the_curator_note_alongside_the_body(client, curator_and_group):
+    _, _, student, _ = curator_and_group
+    client.post(f"/reports/parent/students/{student.id}", json={"week": "2026-09-16"})
+    client.put(f"/reports/parent/students/{student.id}",
+               json={"week": "2026-09-16", "body": "Мой текст", "note": "Болел в среду"})
+    again = client.get(f"/reports/parent/students/{student.id}",
+                       params={"week": "2026-09-16"})
+    assert again.json()["report"]["curator_note"] == "Болел в среду"
+
+
 def test_put_before_anything_was_generated_is_404(client, curator_and_group):
     _, _, student, _ = curator_and_group
     response = client.put(f"/reports/parent/students/{student.id}",
