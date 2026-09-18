@@ -343,3 +343,25 @@ def test_a_head_teacher_may_touch_only_their_courses_lessons(db, lesson_factory,
 
     assert service.may_touch_lesson(db, head_teacher, mine.id) is True
     assert service.may_touch_lesson(db, head_teacher, theirs.id) is False
+
+
+def test_the_grid_says_how_many_late_minutes_were_made_up(db, lesson_factory, meet_stub, teacher):
+    """A head teacher must see «отработано» on the grid, not only inside the day panel.
+
+    The fine still stands — only a person may waive it — but three minutes a teacher gave
+    back at the end of the lesson read differently from three minutes nobody returned, and
+    that difference is what the head teacher is deciding on.
+    """
+    made_up = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    meet_stub(made_up, first_join=datetime(2026, 9, 17, 13, 3),
+              last_leave=datetime(2026, 9, 17, 14, 3))
+    plain = lesson_factory(start=datetime(2026, 9, 18, 13, 0))
+    meet_stub(plain, first_join=datetime(2026, 9, 18, 13, 2),
+              last_leave=datetime(2026, 9, 18, 14, 0))
+
+    row = _row_of(service.register(db, SEPTEMBER, now=NOW), teacher.id)
+    assert row["days"]["2026-09-17"]["made_up_minutes"] == 3
+    assert row["days"]["2026-09-17"]["late_minutes"] == 3      # the fine is unchanged
+    assert row["days"]["2026-09-17"]["fine"] == 600
+    assert row["days"]["2026-09-18"]["made_up_minutes"] == 0
+    assert row["totals"]["made_up_minutes"] == 3
