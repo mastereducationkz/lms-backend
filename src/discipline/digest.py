@@ -26,6 +26,7 @@ import html
 import logging
 import os
 from collections import defaultdict
+from itertools import groupby
 from datetime import date, datetime, time, timedelta
 from typing import Optional
 
@@ -124,13 +125,14 @@ def fines_of(db: Session, day: date, now: datetime) -> list[dict]:
                 continue
             rows.append({
                 "teacher_id": lesson["teacher_id"],
+                "event_id": lesson["event"].id,
                 "group": lesson["group"] or "—",
                 "starts_at": lesson["event"].start_datetime,
                 "reason": _reason(finding),
                 "amount": amount,
                 "unpriced": unpriced,
             })
-    rows.sort(key=lambda row: (row["starts_at"], row["group"]))
+    rows.sort(key=lambda row: (row["starts_at"], row["group"], row["event_id"]))
     return rows
 
 
@@ -193,13 +195,19 @@ def digest_text(db: Session, day: date, now: datetime) -> Optional[str]:
         lines.append("")
         lines.append(f"<b>{who(teacher_id)}</b>")
         owed = 0
-        for row in rows:
-            when = almaty(row["starts_at"]).strftime("%H:%M")
-            lines.append(f"  • {html.escape(row['group'])} · {when}")
-            price = "сумма не назначена" if row["unpriced"] else _money(row["amount"])
-            lines.append(f"    {html.escape(row['reason'])} — {price}")
-            owed += row["amount"]
-            unpriced += int(row["unpriced"])
+        # A lesson that started late AND ended early is still one lesson. Repeating its group
+        # and time under each finding read, at a glance, as two separate lessons — the opposite
+        # of what a head teacher is being asked to judge.
+        for _, findings in groupby(rows, key=lambda row: row["event_id"]):
+            findings = list(findings)
+            head = findings[0]
+            when = almaty(head["starts_at"]).strftime("%H:%M")
+            lines.append(f"  • {html.escape(head['group'])} · {when}")
+            for row in findings:
+                price = "сумма не назначена" if row["unpriced"] else _money(row["amount"])
+                lines.append(f"    {html.escape(row['reason'])} — {price}")
+                owed += row["amount"]
+                unpriced += int(row["unpriced"])
         total += owed
         if owed:
             lines.append(f"  Итого: {_money(owed)}")

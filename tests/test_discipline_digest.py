@@ -272,3 +272,32 @@ def test_the_period_is_named_as_closed_once_it_is(db, world, posted):
     _late(world, 3)
     service.close_period(db, period_containing(DAY), world["head"], now=MORNING)
     assert "период 16–30 September 2026 закрыт" in digest.digest_text(db, DAY, MORNING)
+
+
+def test_one_lesson_with_two_findings_is_one_bullet(db, world):
+    """A lesson that started late and ended early is still one lesson.
+
+    Printing its group and time twice reads, at a glance, as two separate lessons — the
+    opposite of what a head teacher is being asked to judge.
+    """
+    start = datetime(2026, 9, 17, 8, 0)
+    world["lesson"](start=start, first_join=start + timedelta(minutes=7),
+                    last_leave=start + timedelta(minutes=58))
+    text = digest.digest_text(db, DAY, MORNING)
+
+    assert text.count("NUET Sep 2 · 13:00") == 1
+    assert "Опоздание 7 мин — 1 400 ₸" in text
+    assert "Ушёл раньше на 2 мин — 400 ₸" in text
+    assert "Итого: 1 800 ₸" in text
+
+
+def test_two_real_lessons_still_get_a_bullet_each(db, world):
+    world["lesson"](start=datetime(2026, 9, 17, 8, 0),
+                    first_join=datetime(2026, 9, 17, 8, 3),
+                    last_leave=datetime(2026, 9, 17, 9, 0))
+    world["lesson"](start=datetime(2026, 9, 17, 10, 0),
+                    first_join=datetime(2026, 9, 17, 10, 2),
+                    last_leave=datetime(2026, 9, 17, 11, 0))
+    text = digest.digest_text(db, DAY, MORNING)
+    assert text.count("NUET Sep 2 · 13:00") == 1
+    assert text.count("NUET Sep 2 · 15:00") == 1
