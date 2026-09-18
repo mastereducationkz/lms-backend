@@ -106,9 +106,20 @@ class FakeClient:
 
 @pytest.mark.asyncio
 async def test_generate_prose_requests_only_the_templates_slots():
+    # t2 выбирается каскадом только когда данные о речи есть, поэтому и здесь они есть.
     client = FakeClient({"progress": "Рост есть.", "recommendation": "Читать статью в день."})
-    await generate_prose(facts(), "t2", client=client)
+    await generate_prose(facts(talk={"lessons": 3, "lessons_spoke": 2, "avg_seconds": 75,
+                                     "questions": 4, "answers": 2}), "t2", client=client)
     assert set(client.last_slots) == {"activity", "progress", "recommendation"}
+
+
+@pytest.mark.asyncio
+async def test_activity_slot_skipped_without_talk_data():
+    # Куратор может выбрать t2 руками у ученика без Talk Time. Писать «активность на
+    # уроках» модели тогда не из чего — слот не запрашиваем вовсе.
+    client = FakeClient({})
+    await generate_prose(facts(talk=None), "t2", client=client)
+    assert "activity" not in client.last_slots
 
 
 @pytest.mark.asyncio

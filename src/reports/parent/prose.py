@@ -109,6 +109,10 @@ def requested_slots(facts: Dict[str, Any], template_key: str) -> Tuple[str, ...]
     # нём так же неправильно, как выдумывать тему при его отсутствии.
     if not facts.get("weakness") and not facts.get("teacher_feedback"):
         skip.add("weakness")
+    # Куратор может выбрать t2 руками у ученика без Talk Time. Описывать «активность на
+    # уроках» модели тогда не из чего, а слот без данных — приглашение выдумать.
+    if not facts.get("talk"):
+        skip.add("activity")
     if not facts.get("test"):
         skip.add("progress")
     return tuple(s for s in slots if s not in skip)
