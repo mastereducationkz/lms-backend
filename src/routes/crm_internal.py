@@ -319,3 +319,119 @@ async def crm_get_available_teachers(
         if t.id not in busy_teacher_ids
     ]
     return {"available_teachers": available}
+
+
+# ── the discipline register, for the CRM's payroll ────────────────────────────────────────────
+#
+# The rule lives in the LMS and only there: the CRM asks for a figure, it never recomputes one.
+# An open half-month is served too — accountants watch it build up — and says so, so nobody pays
+# on a number that can still move; a closed one answers from the totals frozen when it was closed.
+
+def _discipline_period_or_400(key: str):
+    from src.discipline.rules import RULE_START, period_containing
+    from datetime import date as _date
+
+    try:
+        start = _date.fromisoformat(key)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"«{key}» is not a date")
+    period = period_containing(start)
+    if period is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The register starts on {RULE_START.strftime('%d.%m.%Y')}, when the rule took effect.")
+    return period
+
+
+@router.get("/discipline/period", dependencies=[Depends(_require_crm_internal_key)])
+def crm_discipline_period(
+    period: str = Query(..., description="the half-month's first day, e.g. 2026-09-16"),
+    db: Session = Depends(get_db),
+):
+    """Every teacher who owes something in the half-month — the payroll statement's column."""
+    from src.discipline import service
+    from src.discipline.rules import FINE_PER_MINUTE
+
+    chosen = _discipline_period_or_400(period)
+    register = service.register(db, chosen, now=service.now())
+    return {
+        "period": {k: register["period"][k] for k in ("key", "label", "start", "end", "closed")},
+        "rate_per_minute": FINE_PER_MINUTE,
+        "teachers": [
+            {
+                "teacher_id": row["teacher_id"],
+                "name": row["name"],
+                "program": row["program"],
+                "late_minutes": row["totals"]["late_minutes"],
+                "early_minutes": row["totals"]["early_minutes"],
+                "misses": row["totals"]["misses"],
+                "fine": row["totals"]["fine"],
+                "unpriced": row["totals"]["unpriced"],
+            }
+            for row in register["teachers"]
+        ],
+        "totals": register["totals"],
+    }
+
+
+@router.get("/discipline/teacher/{teacher_id}", dependencies=[Depends(_require_crm_internal_key)])
+def crm_discipline_teacher(
+    teacher_id: int,
+    period: str = Query(..., description="the half-month's first day, e.g. 2026-09-16"),
+    db: Session = Depends(get_db),
+):
+    """One teacher's half-month: the total, and the lessons behind it for the line an accountant opens."""
+    from src.discipline import service
+    from src.discipline.rules import FINE_PER_MINUTE
+
+    chosen = _discipline_period_or_400(period)
+    register = service.register(db, chosen, teacher_ids=[teacher_id], now=service.now())
+    row = next((r for r in register["teachers"] if r["teacher_id"] == teacher_id), None)
+    totals = row["totals"] if row else {"late_minutes": 0, "early_minutes": 0, "misses": 0,
+                                        "fine": 0, "unpriced": 0, "lessons": 0, "unmeasurable": 0}
+
+    lessons = []
+    for day in sorted((row or {}).get("days") or {}):
+        detail = service.day_detail(db, teacher_id, _date_of(day), now=service.now())
+        for lesson in detail["lessons"]:
+            for finding in lesson["findings"]:
+                decision = finding.get("decision") or {}
+                amount = decision.get("amount") if decision else finding.get("fine")
+                lessons.append({
+                    "event_id": lesson["event_id"],
+                    "date": day,
+                    "starts_at": lesson["starts_at"],
+                    "group": lesson["group"],
+                    "kind": finding["kind"],
+                    "minutes": finding["minutes"],
+                    "amount": amount or 0,
+                    "proposed": finding.get("fine"),
+                    "made_up": finding.get("made_up", False),
+                    "waived": bool(decision) and not decision.get("amount"),
+                    "reason": _discipline_reason_label(decision.get("reason_code")) if decision else None,
+                    "note": decision.get("note") if decision else None,
+                    "decided_by": decision.get("by") if decision else None,
+                })
+
+    return {
+        "teacher_id": teacher_id,
+        "period": {k: register["period"][k] for k in ("key", "label", "start", "end", "closed")},
+        "closed": register["period"]["closed"],
+        "rate_per_minute": FINE_PER_MINUTE,
+        "late_minutes": totals["late_minutes"],
+        "early_minutes": totals["early_minutes"],
+        "misses": totals["misses"],
+        "unpriced": totals["unpriced"],
+        "fine": totals["fine"],
+        "lessons": lessons,
+    }
+
+
+def _date_of(iso_day: str):
+    from datetime import date as _date
+    return _date.fromisoformat(iso_day)
+
+
+def _discipline_reason_label(code: Optional[str]) -> Optional[str]:
+    from src.discipline.service import REASONS
+    return dict(REASONS).get(code) if code else None
