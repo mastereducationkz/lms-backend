@@ -10,7 +10,7 @@ import logging
 
 from src.config import get_db
 from src.schemas.models import (
-    UserInDB, Group, LessonSchedule, Event,
+    UserInDB, Group, LessonSchedule, Event, EventGroup,
     LessonRequest, LessonRequestSchema, CreateLessonRequestSchema, ResolveLessonRequestSchema,
     TeacherRequestStatsSchema,
     Course, CourseGroupAccess,
@@ -36,6 +36,10 @@ from src.lesson_requests.helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How far back a lesson counts as «has taught this course». About a term: covering one lesson
+#: last season is not a standing qualification, but a regular stand-in is always in the list.
+TAUGHT_RECENTLY = timedelta(days=180)
 router = APIRouter()
 
 
@@ -393,14 +397,18 @@ async def reject_lesson_request(
 # =============================================================================
 
 @router.get("/teachers/available")
-async def get_available_teachers(
+def get_available_teachers(
     datetime_str: str = Query(..., description="ISO datetime for the lesson slot"),
     group_id: Optional[int] = None,
     event_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_user_dependency),
 ):
-    """Find teachers available at a given time who have NOT opted out of substitutions."""
+    """Find teachers available at a given time who have NOT opted out of substitutions.
+
+    Plain `def`: every line below queries the database, and an `async` handler runs those on the
+    event loop, blocking every other request of its worker (see src/routes/auth.py, 17.09).
+    """
     if current_user.role not in ("teacher", "admin"):
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -453,6 +461,25 @@ async def get_available_teachers(
                     Group.id.in_(relevant_group_ids)
                 ).all()
                 for t in group_teachers:
+                    allowed_teacher_ids.add(t[0])
+
+                # …and whoever has actually taught this course lately. Owning a group and
+                # teaching are different things — `groups.teacher_id` is ownership, while
+                # `events.teacher_id` is who stood in front of the class (see
+                # tests/test_substitution_ownership.py). A teacher who only ever covers for
+                # others owns nothing, so asking about ownership alone hid them: on production
+                # one had taught 57 NUET lessons in a month and could never be offered a NUET
+                # substitution (reported 2026-09-18).
+                taught_teachers = db.query(Event.teacher_id).join(
+                    EventGroup, EventGroup.event_id == Event.id
+                ).filter(
+                    EventGroup.group_id.in_(relevant_group_ids),
+                    Event.event_type == "class",
+                    Event.is_active == True,  # noqa: E712
+                    Event.teacher_id.isnot(None),
+                    Event.start_datetime >= target_start - TAUGHT_RECENTLY,
+                ).distinct().all()
+                for t in taught_teachers:
                     allowed_teacher_ids.add(t[0])
 
             course_teachers = db.query(Course.teacher_id).filter(
