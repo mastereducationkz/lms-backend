@@ -35,6 +35,7 @@ def register_routes(app: FastAPI):
     from src.routes.support_api import router as support_api_router
     from src.routes.group_bot_links import router as group_bot_links_router
     from src.reports.routes import router as reports_router
+    from src.reports.parent.routes import router as parent_reports_router
     from src.integrations.routes import router as integrations_router
     from src.integrations.handoff_routes import handoff_router, wellknown_router
     from src.integrations.assignment_routes import platform_assignments_router
@@ -104,6 +105,7 @@ def register_routes(app: FastAPI):
     # Public, signed: the group bot's 🔗 Урок button redirects to the lesson that matters now.
     app.include_router(group_bot_links_router, prefix="/tg", tags=["Telegram group bot"])
     app.include_router(reports_router, prefix="/reports", tags=["Reports"])
+    app.include_router(parent_reports_router, prefix="/reports/parent", tags=["Reports"])
     app.include_router(integrations_router, prefix="/integrations", tags=["Platform Integrations"])
     app.include_router(platform_assignments_router, prefix="/integrations", tags=["Platform Integrations"])
     app.include_router(targets_router, prefix="/targets", tags=["Student Targets"])
