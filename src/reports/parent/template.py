@@ -75,7 +75,7 @@ def _score(side: Optional[Dict[str, Any]]) -> Optional[str]:
     return f"{side['correct']}/{side['total']}"
 
 
-def _test_lines(test: Optional[Dict[str, Any]]) -> list:
+def _test_lines(test: Optional[Dict[str, Any]]) -> list[str]:
     """Строки с результатами. Никакая из них не проходит через LLM."""
     if not test:
         return []

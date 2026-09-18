@@ -121,7 +121,12 @@ def test_curator_name_is_signed_when_known():
     assert "Айгерим" in out
 
 
-def test_warning_line_when_platform_was_unavailable():
-    out = render(facts(test=None, test_unavailable=True), "t1",
-                 {"progress": "x", "recommendation": "y", "forecast": "z"})
-    assert "Verbal" not in out
+def test_render_ignores_the_outage_flag_entirely():
+    # Предупреждение о сбое платформы — работа UI, а не сообщения родителю: в тексте
+    # ему места нет. Значит render обязан выдать при сбое ровно то же, что и без него,
+    # и уж точно ничего про тест не заявлять.
+    prose = {"progress": "x", "recommendation": "y", "forecast": "z"}
+    quiet = render(facts(test=None), "t1", prose)
+    outage = render(facts(test=None, test_unavailable=True), "t1", prose)
+    assert outage == quiet
+    assert "Verbal" not in outage
