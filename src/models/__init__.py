@@ -38,6 +38,7 @@ from src.progress.models import (
 from src.checkpoints.models import (  # noqa: F401
     CheckpointDefinition, CheckpointRequiredUnit, StudentCheckpoint,
 )
+from src.reports.parent.models import ParentReport  # noqa: F401
 from src.events.models import (
     Event, EventGroup, EventCourse, EventParticipant,
     MissedAttendanceLog, LessonSchedule, Attendance,
@@ -105,4 +106,5 @@ __all__ = [
     "TrialAccess",
     "CrmAuditOutbox",
     "CheckpointDefinition", "CheckpointRequiredUnit", "StudentCheckpoint",
+    "ParentReport",
 ]
