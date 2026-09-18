@@ -3245,12 +3245,48 @@ def get_teacher_salary_breakdown(
             "",
         ])
 
+    # What the discipline register withholds for the same days. Read from the register and
+    # never recomputed here — the CRM reads the same figures over HTTP, and two
+    # implementations of one rule is how a teacher and an accountant end up disagreeing.
+    from src.discipline import payroll as discipline_payroll
+
+    fines = discipline_payroll.fines_for(db, current_user.id, start_d, end_d)
+    net_amount = total_amount - fines.total
+
     total_expr = "+".join(str(g["amount_tenge"]) for g in groups) if groups else "0"
     telegram_username = "@gauhar107"
     telegram_username_link = "https://t.me/gauhar107"
 
     if groups:
         lines.append(f"Итого: {total_expr}={total_amount} тг")
+
+    # The deduction is its own line under the total, never folded into it. A teacher who sees
+    # only a smaller number has to ask somebody what happened, and this page exists so that
+    # they do not have to — the same reason every omitted lesson is named below.
+    if fines.any:
+        reasons = []
+        if fines.late_minutes:
+            made_up = f", из них {fines.made_up_minutes} отработано" if fines.made_up_minutes else ""
+            reasons.append(f"опоздания {fines.late_minutes} мин{made_up}")
+        if fines.early_minutes:
+            reasons.append(f"ранний уход {fines.early_minutes} мин")
+        if fines.misses:
+            reasons.append(f"не проведено уроков: {fines.misses}")
+        lines.extend([
+            "",
+            f"Удержано по дисциплине: −{fines.total} тг"
+            + (f" ({', '.join(reasons)})" if reasons else ""),
+            f"К выплате: {net_amount} тг",
+        ])
+        if fines.unpriced:
+            lines.append(
+                f"Ещё {fines.unpriced} нарушение(я) ждёт решения завуча — сумма по ним пока не назначена."
+            )
+        if not fines.final:
+            lines.append(
+                "Полумесяц ещё не закрыт: сумма удержаний может измениться."
+            )
+        lines.append("Ставка штрафа — 200 тг за каждую полную минуту.")
 
     # Why *this* rate. The group rate comes from the teacher's level and how many groups they
     # run in total — not from how many happen to appear on this payslip, which is what made
@@ -3313,6 +3349,18 @@ def get_teacher_salary_breakdown(
         "groups": groups,
         "total_lessons": total_lessons,
         "total_amount_tenge": total_amount,
+        # The discipline register's deduction, kept beside the pay rather than inside it:
+        # `total_amount_tenge` is what the lessons were worth and does not move because of a
+        # fine a head teacher may waive tomorrow. `net_amount_tenge` is what is paid.
+        "fines_tenge": fines.total,
+        "fines_late_minutes": fines.late_minutes,
+        "fines_early_minutes": fines.early_minutes,
+        "fines_made_up_minutes": fines.made_up_minutes,
+        "fines_misses": fines.misses,
+        "fines_unpriced": fines.unpriced,
+        # False while the half-month is open — the figure can still move.
+        "fines_final": fines.final,
+        "net_amount_tenge": net_amount,
         # Payable / awaiting-register kept as separate totals so no screen has to derive one
         # from the other and get it wrong.
         "pending_groups": pending_groups,

@@ -63,3 +63,26 @@ def test_the_names_that_caused_the_crash_are_not_used():
 
     assert "total_amount" not in keys, "the dashboard reads total_amount_tenge"
     assert "message" not in keys, "the dashboard reads message_text"
+
+
+def test_the_response_carries_the_discipline_deduction_beside_the_pay():
+    """«Начислено» and «к выплате» are different numbers and the payslip must carry both.
+
+    Netting them into one figure is how a teacher ends up asking somebody why the amount
+    dropped — the question this whole page exists to answer in advance.
+    """
+    (keys,) = _returned_key_sets(dashboard.get_teacher_salary_breakdown)
+
+    for required in (
+        "fines_tenge",
+        "fines_late_minutes",
+        "fines_early_minutes",
+        "fines_made_up_minutes",
+        "fines_misses",
+        "fines_unpriced",
+        "fines_final",
+        "net_amount_tenge",
+    ):
+        assert required in keys, f"the response lost {required!r}"
+    # The pay itself is still there and is still its own number.
+    assert "total_amount_tenge" in keys
