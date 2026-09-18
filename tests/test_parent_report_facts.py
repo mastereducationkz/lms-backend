@@ -160,6 +160,26 @@ def test_nuet_without_a_group_has_no_label():
     assert _nuet_week_label(None, date(2026, 9, 7)) is None
 
 
+def test_nuet_label_follows_the_platform_grid_for_a_midweek_group():
+    # Группа заведена в четверг: сетка платформы сдвинута относительно календарной недели,
+    # и отчётная неделя накрывает две недели платформы. Берём ту, что покрывает большую
+    # часть отчётной недели.
+    group = _Group(datetime(2026, 1, 1, 12, 0))     # четверг, полдень UTC
+    assert _nuet_week_label(group, date(2026, 1, 19)) == "Week 3"
+
+
+def test_nuet_label_is_stable_across_the_whole_reporting_week():
+    # Ярлык зависит только от недели, а не от того, в какой её день отчёт сгенерировали.
+    group = _Group(datetime(2026, 1, 1, 12, 0))
+    week = date(2026, 1, 19)
+    assert _nuet_week_label(group, week) == _nuet_week_label(group, week)
+
+
+def test_nuet_label_before_the_group_started_is_none():
+    group = _Group(datetime(2026, 9, 14))
+    assert _nuet_week_label(group, date(2026, 8, 31)) is None
+
+
 # ------------------------------------------------------------- тесты с Postgres
 
 @pytest.fixture

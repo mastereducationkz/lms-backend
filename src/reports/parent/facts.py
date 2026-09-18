@@ -5,12 +5,12 @@
 ``template``, проза в ``prose``.
 """
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from src.reports.external import fetch_weekly_tests
+from src.reports.external import _group_programs, fetch_weekly_tests
 from src.reports.parent.week import week_bounds, week_utc_range
 from src.schemas.models import (
     Assignment,
@@ -131,8 +131,6 @@ def _attendance(db: Session, student_id: int, group_ids: List[int],
         if not row or not is_marked(row.status):
             continue
         status = normalize_status(row.status)
-        if status == "removed":
-            continue
         lessons += 1
         if status == "present":
             present += 1
@@ -203,27 +201,24 @@ def _quizzes(db: Session, student_id: int, start: datetime, end: datetime) -> Li
     ]
 
 
-def _nuet_group(groups: List[Group]) -> Optional[Group]:
-    """NUET-группа ученика, по тому же правилу, что и ``external._group_programs``."""
-    for group in groups:
-        program = (getattr(group, "program_type", None) or "").lower()
-        name = (group.name or "").lower()
-        if program == "nuet" or "nuet" in name:
-            return group
-    return None
-
-
 def _nuet_week_label(group: Optional[Group], week_start: date) -> Optional[str]:
     """Какой «Week N» платформы соответствует отчётной неделе.
 
     NUET-наборы адресуются номером недели курса: ``_fetch_nuet`` не возвращает
-    ``completed_at`` вовсе. Без этого пересчёта пришлось бы брать последнюю запись
-    истории — то есть на отчёте за прошлую неделю показать родителю свежие цифры под
-    старой датой, молча и уверенно.
+    ``completed_at`` вовсе. Без пересчёта пришлось бы брать последнюю запись истории —
+    то есть на отчёте за прошлую неделю показать родителю свежие цифры под старой датой.
 
-    Формула повторяет ``src/reports/external._fetch_nuet``. Точка отсчёта — воскресенье
-    отчётной недели: платформа считает от «сейчас», а «сейчас» внутри недели попадает
-    в тот же интервал.
+    **Точного соответствия не существует.** Платформа режет курс на семидневки от
+    момента создания группы (``_fetch_nuet``: ``(now - started).days // 7``), а отчётная
+    неделя — это понедельник-воскресенье по Алматы. Сетки совпадают только если группу
+    завели в понедельник в полночь; в остальных случаях отчётная неделя накрывает две
+    недели платформы. Поэтому берём ту, на которую приходится большая часть отчётной
+    недели, — отсчёт от её середины. Отсчитывать от края (понедельника или воскресенья)
+    значило бы систематически промахиваться на неделю у групп, стартовавших в середине.
+
+    Середина считается в наивном UTC через ``week_utc_range``: ``started`` тоже наивный
+    UTC, а смешивать его с алматинской календарной датой — это те же пять часов сдвига,
+    ради которых ``week_utc_range`` вообще написан.
     """
     if group is None:
         return None
@@ -232,9 +227,10 @@ def _nuet_week_label(group: Optional[Group], week_start: date) -> Optional[str]:
         return None
     if started.tzinfo is not None:
         started = started.replace(tzinfo=None)
-    reference = datetime.combine(week_start, datetime.min.time()) + timedelta(days=6)
+    start_utc, end_utc = week_utc_range(week_start)
+    midpoint = start_utc + (end_utc - start_utc) / 2
     offset = getattr(group, "weekly_set_week_offset", 0) or 0
-    number = ((reference - started).days // 7) + 1 - offset
+    number = ((midpoint - started).days // 7) + 1 - offset
     return f"Week {number}" if number >= 1 else None
 
 
@@ -335,7 +331,10 @@ async def build_week_facts(
     )
 
     weekly = await fetch_weekly_tests(db, student)
-    nuet_label = _nuet_week_label(_nuet_group(group_rows), week_start)
+    # Классификацию программы берём у ``external._group_programs``, а не повторяем:
+    # ярлык недели обязан считаться по той же группе, по которой платформу и опрашивали.
+    nuet_groups = _group_programs(db, student_id).get("nuet") or []
+    nuet_label = _nuet_week_label(nuet_groups[0] if nuet_groups else None, week_start)
     test, history, teacher_feedback = _select_test(weekly, week_start, week_end, nuet_label)
 
     quizzes = _quizzes(db, student_id, start, end)
