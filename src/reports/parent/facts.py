@@ -5,7 +5,7 @@
 ``template``, проза в ``prose``.
 """
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -25,7 +25,7 @@ from src.schemas.models import (
 )
 from src.progress.models import QuizAttempt
 from src.services import meet_talk_stats
-from src.services.attendance_status import is_excused, normalize_status
+from src.services.attendance_status import is_excused, is_marked, normalize_status
 
 logger = logging.getLogger("parent_reports.facts")
 
@@ -123,7 +123,12 @@ def _attendance(db: Session, student_id: int, group_ids: List[int],
     absences: List[Dict[str, Any]] = []
     for event in sorted(events, key=lambda e: e.start_datetime or datetime.min):
         row = rows.get(event.id)
-        if not row or not row.status:
+        # ``is_marked``, а не «статус непустой»: ``registered`` пишется в сетку, когда
+        # ячейку сохранили, не отметив ученика, и ``normalize_status`` даёт по нему
+        # ``unknown``. Без этой проверки такой урок попадал в счётчик занятий, но ни в
+        # присутствия, ни в пропуски — отчёт сам себе противоречил: «занятий 1», при
+        # этом присутствий 0 и пропусков нет.
+        if not row or not is_marked(row.status):
             continue
         status = normalize_status(row.status)
         if status == "removed":
@@ -198,7 +203,43 @@ def _quizzes(db: Session, student_id: int, start: datetime, end: datetime) -> Li
     ]
 
 
-def _select_test(weekly: Dict[str, Any], week_start: date, week_end: date
+def _nuet_group(groups: List[Group]) -> Optional[Group]:
+    """NUET-группа ученика, по тому же правилу, что и ``external._group_programs``."""
+    for group in groups:
+        program = (getattr(group, "program_type", None) or "").lower()
+        name = (group.name or "").lower()
+        if program == "nuet" or "nuet" in name:
+            return group
+    return None
+
+
+def _nuet_week_label(group: Optional[Group], week_start: date) -> Optional[str]:
+    """Какой «Week N» платформы соответствует отчётной неделе.
+
+    NUET-наборы адресуются номером недели курса: ``_fetch_nuet`` не возвращает
+    ``completed_at`` вовсе. Без этого пересчёта пришлось бы брать последнюю запись
+    истории — то есть на отчёте за прошлую неделю показать родителю свежие цифры под
+    старой датой, молча и уверенно.
+
+    Формула повторяет ``src/reports/external._fetch_nuet``. Точка отсчёта — воскресенье
+    отчётной недели: платформа считает от «сейчас», а «сейчас» внутри недели попадает
+    в тот же интервал.
+    """
+    if group is None:
+        return None
+    started = getattr(group, "created_at", None)
+    if started is None:
+        return None
+    if started.tzinfo is not None:
+        started = started.replace(tzinfo=None)
+    reference = datetime.combine(week_start, datetime.min.time()) + timedelta(days=6)
+    offset = getattr(group, "weekly_set_week_offset", 0) or 0
+    number = ((reference - started).days // 7) + 1 - offset
+    return f"Week {number}" if number >= 1 else None
+
+
+def _select_test(weekly: Dict[str, Any], week_start: date, week_end: date,
+                 nuet_label: Optional[str] = None
                  ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
     """Тест недели, полная история и фидбэк преподавателя.
 
@@ -226,21 +267,25 @@ def _select_test(weekly: Dict[str, Any], week_start: date, week_end: date
             }
             for w in weeks
         ]
+        index = None
         if any(h["date"] for h in history):
-            current = next(
-                (h for h in reversed(history)
-                 if h["date"] and week_start.isoformat() <= h["date"] <= week_end.isoformat()),
-                None,
-            )
-        else:
-            # NUET адресуется номером недели курса, а не датой: ``_fetch_nuet`` вообще не
-            # возвращает ``completed_at``. Он обходит недели от первой до текущей, поэтому
-            # последняя запись истории и есть тест текущей недели. Сравнивать по датам тут
-            # нечего, и попытка это делать отбросила бы у NUET-групп каждый тест.
-            current = history[-1] if history else None
-        if current is None:
-            return None, history, None
-        index = history.index(current)
+            for i in range(len(history) - 1, -1, -1):
+                day = history[i]["date"]
+                if day and week_start.isoformat() <= day <= week_end.isoformat():
+                    index = i
+                    break
+        elif nuet_label:
+            # Сопоставляем по номеру недели курса, а не берём последнюю запись: последняя
+            # запись — это «сейчас», а отчёт могут перегенерировать за любую прошлую неделю.
+            for i, item in enumerate(history):
+                if item["label"] == nuet_label:
+                    index = i
+                    break
+        if index is None:
+            # Теста за эту неделю нет. Историю отдаём пустой, чтобы ``no_growth_streak``
+            # не посчитался по записям, которых на отчётной неделе ещё не существовало.
+            return None, [], None
+        current = history[index]
         prev = history[index - 1] if index > 0 else None
         delta = None
         if prev:
@@ -290,7 +335,8 @@ async def build_week_facts(
     )
 
     weekly = await fetch_weekly_tests(db, student)
-    test, history, teacher_feedback = _select_test(weekly, week_start, week_end)
+    nuet_label = _nuet_week_label(_nuet_group(group_rows), week_start)
+    test, history, teacher_feedback = _select_test(weekly, week_start, week_end, nuet_label)
 
     quizzes = _quizzes(db, student_id, start, end)
     strength, weakness = pick_candidates(quizzes, test)

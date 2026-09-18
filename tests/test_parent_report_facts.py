@@ -11,6 +11,8 @@ from src.reports.parent.facts import (
     build_week_facts,
     pick_candidates,
     no_growth_streak,
+    _select_test,
+    _nuet_week_label,
 )
 
 
@@ -86,6 +88,76 @@ def test_quiz_outranks_section_gap():
         test={"verbal": {"correct": 10, "total": 27}, "math": {"correct": 20, "total": 22}},
     )
     assert weakness["source"] == "quiz"
+
+
+class _Group:
+    """Достаточно группы, чтобы посчитать номер недели курса."""
+
+    def __init__(self, created_at, name="NUET-1", program_type="nuet", offset=0):
+        self.created_at = created_at
+        self.name = name
+        self.program_type = program_type
+        self.weekly_set_week_offset = offset
+
+
+def _sat_week(day, verbal, math):
+    return {"week_label": day, "completed_at": f"{day}T10:00:00Z",
+            "verbal": {"correct": verbal, "total": 27},
+            "math": {"correct": math, "total": 22}}
+
+
+def _nuet_week(label, verbal, math):
+    return {"week_label": label,
+            "verbal": {"correct": verbal, "total": 27},
+            "math": {"correct": math, "total": 22}}
+
+
+def test_sat_test_is_matched_by_date_and_prev_is_the_one_before():
+    weekly = {"sat": [_sat_week("2026-09-07", 12, 14), _sat_week("2026-09-16", 17, 15)]}
+    test, history, _ = _select_test(weekly, date(2026, 9, 14), date(2026, 9, 20))
+    assert test["verbal"]["correct"] == 17
+    assert test["prev"]["verbal"]["correct"] == 12
+    assert test["delta"]["verbal"] == 5
+
+
+def test_sat_week_without_a_test_yields_nothing_and_an_empty_history():
+    weekly = {"sat": [_sat_week("2026-09-07", 12, 14)]}
+    test, history, _ = _select_test(weekly, date(2026, 9, 14), date(2026, 9, 20))
+    assert test is None
+    assert history == []
+
+
+def test_nuet_picks_the_week_that_was_asked_for_not_the_latest():
+    # Именно тот случай, ради которого фикс: отчёт за прошлую неделю обязан показать
+    # прошлую неделю, а не последнюю запись, которую вернула платформа.
+    group = _Group(datetime(2026, 8, 31))          # Week 1 = 31.08..06.09
+    weekly = {"nuet": [_nuet_week("Week 1", 10, 11), _nuet_week("Week 2", 13, 12),
+                       _nuet_week("Week 3", 18, 16)]}
+    label = _nuet_week_label(group, date(2026, 9, 7))   # это Week 2
+    assert label == "Week 2"
+    test, _, _ = _select_test(weekly, date(2026, 9, 7), date(2026, 9, 13), label)
+    assert test["label"] == "Week 2"
+    assert test["verbal"]["correct"] == 13
+    assert test["prev"]["label"] == "Week 1"
+
+
+def test_nuet_week_the_student_skipped_yields_no_test():
+    group = _Group(datetime(2026, 8, 31))
+    weekly = {"nuet": [_nuet_week("Week 1", 10, 11), _nuet_week("Week 3", 18, 16)]}
+    label = _nuet_week_label(group, date(2026, 9, 7))   # Week 2, которой нет в истории
+    test, history, _ = _select_test(weekly, date(2026, 9, 7), date(2026, 9, 13), label)
+    assert test is None
+    assert history == []
+
+
+def test_nuet_week_offset_shifts_the_numbering():
+    # Группа стартовала в середине недели: offset=1 сдвигает нумерацию на неделю назад.
+    group = _Group(datetime(2026, 8, 31), offset=1)
+    assert _nuet_week_label(group, date(2026, 9, 7)) == "Week 1"
+
+
+def test_nuet_without_a_group_has_no_label():
+    assert _nuet_week_label(None, date(2026, 9, 7)) is None
 
 
 # ------------------------------------------------------------- тесты с Postgres
@@ -178,6 +250,20 @@ async def test_missed_synonym_counts_as_an_absence(db, student_in_group, no_exte
 
     facts = await build_week_facts(db, student.id, date(2026, 9, 14))
     assert facts["attendance"]["absences"] == [{"date": "2026-09-16", "excused": False}]
+
+
+@pytest.mark.asyncio
+async def test_registered_but_unmarked_lesson_is_not_counted(db, student_in_group, no_external):
+    from src.schemas.models import Attendance
+    student, group = student_in_group
+    event = _class_event(db, group.id, datetime(2026, 9, 16, 5, 0), created_by=student.id)
+    db.add(Attendance(user_id=student.id, event_id=event.id, status="registered"))
+    db.flush()
+
+    facts = await build_week_facts(db, student.id, date(2026, 9, 14))
+    # Урок, на котором никого не отметили, — не проведённое занятие. Иначе отчёт скажет
+    # «занятий 1» и при этом ни присутствий, ни пропусков.
+    assert facts["attendance"]["lessons"] == 0
 
 
 @pytest.mark.asyncio
