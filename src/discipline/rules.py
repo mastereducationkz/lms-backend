@@ -1,7 +1,7 @@
 """What the register counts, and what it costs.
 
 The owner's rule, in force since 16.09.2026: every whole minute a teacher is late, or cuts a lesson
-short, costs 300 ₸; a lesson never taught is a miss that a head teacher prices by hand. Minutes are
+short, costs 200 ₸; a lesson never taught is a miss that a head teacher prices by hand. Minutes are
 rounded down, in the teacher's favour, exactly as the students' rule rounds.
 
 Nothing here reads a clock or a database, so the whole rule is testable in one file — and changing
@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 RULE_START = date(2026, 9, 16)
 
 #: ₸ for every whole minute late, or cut short.
-FINE_PER_MINUTE = 300
+FINE_PER_MINUTE = 200
 
 _MONTHS = ("January", "February", "March", "April", "May", "June", "July",
            "August", "September", "October", "November", "December")

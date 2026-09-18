@@ -104,7 +104,7 @@ def test_a_head_teacher_reads_every_teacher(client, world):
     body = client(world["head"]).get("/teacher-discipline/register?period=2026-09-16").json()
     assert [row["teacher_id"] for row in body["teachers"]] == [world["teacher"].id]
     assert body["period"]["label"] == "16–30 September 2026"
-    assert body["totals"]["fine"] == 900
+    assert body["totals"]["fine"] == 600
 
 
 def test_a_teacher_reads_only_themselves(client, world):

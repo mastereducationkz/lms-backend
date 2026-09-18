@@ -131,13 +131,13 @@ def test_a_lesson_running_right_now_waits_for_its_end(db, lesson_factory, teache
     assert service.lessons_in(db, SEPTEMBER, now) == []
 
 
-def test_a_late_teacher_owes_300_a_minute_for_the_day(db, lesson_factory, meet_stub, teacher):
+def test_a_late_teacher_owes_200_a_minute_for_the_day(db, lesson_factory, meet_stub, teacher):
     lesson = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
     meet_stub(lesson, first_join=datetime(2026, 9, 17, 13, 3), last_leave=datetime(2026, 9, 17, 14, 0))
     row = _row_of(service.register(db, SEPTEMBER, now=NOW), teacher.id)
     assert row["days"]["2026-09-17"]["late_minutes"] == 3
-    assert row["days"]["2026-09-17"]["fine"] == 900
-    assert row["totals"]["fine"] == 900
+    assert row["days"]["2026-09-17"]["fine"] == 600
+    assert row["totals"]["fine"] == 600
     assert row["program"] == "SAT"
 
 
@@ -204,11 +204,11 @@ def test_closing_a_period_freezes_its_totals(db, lesson_factory, meet_stub, teac
     lesson = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
     meet_stub(lesson, first_join=datetime(2026, 9, 17, 13, 2), last_leave=datetime(2026, 9, 17, 14, 0))
     closed = service.close_period(db, SEPTEMBER, head_teacher, now=NOW)
-    assert closed.totals["fine"] == 600
+    assert closed.totals["fine"] == 400
 
     meet_stub(lesson, first_join=datetime(2026, 9, 17, 13, 9), last_leave=datetime(2026, 9, 17, 14, 0))
     register = service.register(db, SEPTEMBER, now=NOW)
-    assert register["totals"]["fine"] == 600  # a paid period does not move
+    assert register["totals"]["fine"] == 400  # a paid period does not move
     assert register["period"]["closed"] is True
 
 
@@ -227,7 +227,7 @@ def test_one_teacher_sees_only_their_own_row(db, lesson_factory, meet_stub, teac
     meet_stub(theirs, first_join=datetime(2026, 9, 17, 13, 5), last_leave=datetime(2026, 9, 17, 14, 0))
     register = service.register(db, SEPTEMBER, teacher_ids=[teacher.id], now=NOW)
     assert [row["teacher_id"] for row in register["teachers"]] == [teacher.id]
-    assert register["totals"]["fine"] == 900
+    assert register["totals"]["fine"] == 600      # 3 minutes of hers; his 5 are somebody else's row
 
 
 def _row_of(register: dict, teacher_id: int) -> dict:
@@ -307,7 +307,7 @@ def test_a_substitute_on_a_managed_course_is_in_the_register(db, lesson_factory,
 
     register = service.register(db, SEPTEMBER, viewer=head_teacher, now=NOW)
     assert [row["teacher_id"] for row in register["teachers"]] == [substitute.id]
-    assert register["totals"]["fine"] == 1200
+    assert register["totals"]["fine"] == 800
 
 
 def test_a_head_teacher_does_not_see_another_courses_lesson(db, lesson_factory, meet_stub, head_teacher, teacher):
