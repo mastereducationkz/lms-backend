@@ -35,8 +35,8 @@ class SaveBody(BaseModel):
     week: date
     body: str
     # Заметка приходит вместе с текстом: она стоит в той же карточке, под той же кнопкой,
-    # и куратор вправе ожидать, что «Сохранить» сохраняет обе. Клиент присылает её всегда —
-    # пустую как null, — поэтому присваивание безусловное.
+    # и куратор вправе ожидать, что «Сохранить» сохраняет обе. Но клиент не обязан
+    # присылать её всегда: отсутствие поля не стирает уже сохранённую заметку (см. save_edit).
     note: Optional[str] = None
 
 
@@ -219,6 +219,11 @@ def save_edit(
     if row is None:
         raise HTTPException(status_code=404, detail="Report not generated yet")
     row.body = payload.body
-    row.curator_note = payload.note
+    # Отличаем «заметку не присылали» от «заметку очистили». Клиент, собранный до того,
+    # как PUT научился принимать note, поля не пришлёт вовсе — и не должен стереть чужую
+    # заметку только потому, что молчит о ней. В этом проекте закэшированные старые бандлы
+    # PWA — не гипотеза.
+    if "note" in payload.model_fields_set:
+        row.curator_note = payload.note
     db.commit()
     return _serialize(row)

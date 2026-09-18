@@ -226,3 +226,29 @@ def test_report_is_still_saved_when_prose_generation_fails(client, curator_and_g
     payload = response.json()
     assert payload["prose_degraded"] is True
     assert payload["report"]["body"]
+
+
+def test_put_without_a_note_field_leaves_the_existing_note_alone(client, curator_and_group):
+    # Старый закэшированный бандл не знает про note и не пришлёт его. Это не повод
+    # стереть заметку, которую куратор уже сохранил.
+    _, _, student, _ = curator_and_group
+    client.post(f"/reports/parent/students/{student.id}", json={"week": "2026-09-16"})
+    client.put(f"/reports/parent/students/{student.id}",
+               json={"week": "2026-09-16", "body": "Текст", "note": "Болел в среду"})
+    client.put(f"/reports/parent/students/{student.id}",
+               json={"week": "2026-09-16", "body": "Другой текст"})
+    again = client.get(f"/reports/parent/students/{student.id}",
+                       params={"week": "2026-09-16"})
+    assert again.json()["report"]["curator_note"] == "Болел в среду"
+
+
+def test_put_with_an_explicit_null_note_clears_it(client, curator_and_group):
+    _, _, student, _ = curator_and_group
+    client.post(f"/reports/parent/students/{student.id}", json={"week": "2026-09-16"})
+    client.put(f"/reports/parent/students/{student.id}",
+               json={"week": "2026-09-16", "body": "Текст", "note": "Болел в среду"})
+    client.put(f"/reports/parent/students/{student.id}",
+               json={"week": "2026-09-16", "body": "Текст", "note": None})
+    again = client.get(f"/reports/parent/students/{student.id}",
+                       params={"week": "2026-09-16"})
+    assert again.json()["report"]["curator_note"] is None
