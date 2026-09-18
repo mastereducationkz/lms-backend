@@ -3,7 +3,9 @@
 Head teachers and admins read every teacher and decide. A teacher reads their own row and decides
 nothing — the register is about their money, so they must see it, and must not be able to waive it.
 """
+import os
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -163,3 +165,41 @@ def test_the_period_list_starts_at_the_rule(client, world):
     body = client(world["head"]).get("/teacher-discipline/periods").json()
     assert body["periods"][-1]["key"] == "2026-09-16"
     assert all(period["start"] >= "2026-09-16" for period in body["periods"])
+
+
+def test_the_register_imports_on_its_own():
+    """Importing the routes first must not deadlock the package graph.
+
+    `src/routes/__init__.py` imports every router inside `register_routes()` for this reason: at
+    module level, a router that itself imports `src.routes.auth` is a circular import the moment
+    anything reaches the discipline package first — which is what a test, or a script, does.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import src.discipline.routes as r; print(r.discipline_router and 'ok')"],
+        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent),
+        env={**os.environ, "PYTHONPATH": "."})
+    assert result.returncode == 0, result.stderr[-800:]
+    assert "ok" in result.stdout
+
+
+def test_the_export_downloads_the_familiar_sheet(client, world):
+    response = client(world["head"]).get("/teacher-discipline/export.xlsx?period=2026-09-16")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert "discipline-2026-09-16.xlsx" in response.headers["content-disposition"]
+
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+    sheet = load_workbook(BytesIO(response.content))["SAT"]
+    assert sheet["A1"].value == "ФИО"
+    assert sheet["A3"].value == "Кенжебаев Арсен"
+
+
+def test_a_student_cannot_download_the_register(client, world):
+    assert client(world["student"]).get(
+        "/teacher-discipline/export.xlsx?period=2026-09-16").status_code == 403

@@ -65,13 +65,19 @@ def _utc_bounds(period: Period) -> tuple[datetime, datetime]:
     return starts_at, ends_at
 
 
-def lessons_in(db: Session, period: Period) -> list[Event]:
-    """Class lessons of an operational group inside the period, never before the rule started."""
+def lessons_in(db: Session, period: Period, now: datetime) -> list[Event]:
+    """Lessons of the period that have already finished, never before the rule started.
+
+    The open period runs to the end of the month, so most of it has not happened yet. A lesson
+    still to come is not one the LMS «could not watch» — it is not a lesson yet, and counting it
+    as unmeasurable painted the rest of the month grey (573 of 674 on 18.09).
+    """
     starts_at, ends_at = _utc_bounds(period)
     return (db.query(Event)
             .filter(Event.event_type == "class", Event.is_active.is_(True),
                     Event.teacher_id.isnot(None),
                     Event.start_datetime >= starts_at, Event.start_datetime < ends_at,
+                    Event.end_datetime <= now,
                     event_has_operational_group_clause())
             .order_by(Event.start_datetime).all())
 
@@ -137,7 +143,7 @@ def _stored_period(db: Session, period: Period) -> Optional[DisciplinePeriod]:
 
 def judged_lessons(db: Session, period: Period, now: datetime) -> list[dict]:
     """Every lesson of the period with its findings — the one place the rule meets the data."""
-    events = lessons_in(db, period)
+    events = lessons_in(db, period, now)
     timings = _timings(db, events, now)
     programs = _programs(db, events)
     decisions = _decisions(db, (e.id for e in events))

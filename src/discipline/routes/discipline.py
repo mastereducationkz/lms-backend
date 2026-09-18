@@ -5,14 +5,17 @@ touches the database runs on the event loop and blocks every other request of it
 what took the API down on 17.09 (see ``src/routes/auth.py``).
 """
 from datetime import date, datetime, timezone
+from io import BytesIO
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from src.config import get_db
 from src.discipline import service
 from src.discipline.rules import RULE_START, period_containing, periods_until
+from src.discipline.export import workbook_for
 from src.discipline.schemas import DecisionIn
 from src.routes.auth import get_current_user_dependency
 from src.schemas.models import UserInDB
@@ -90,6 +93,26 @@ def read_day(teacher_id: int, day: date, db: Session = Depends(get_db),
             status_code=400,
             detail=f"The register starts on {RULE_START.strftime('%d.%m.%Y')}, when the rule took effect.")
     return service.day_detail(db, teacher_id, day, now=service.now())
+
+
+@router.get("/export.xlsx")
+def export(period: str = Query(..., description="the period's first day, e.g. 2026-09-16"),
+           program: Optional[str] = None,
+           db: Session = Depends(get_db),
+           current_user: UserInDB = Depends(get_current_user_dependency)):
+    """The period as the spreadsheet head teachers already know, for payroll and the archive."""
+    _may_read(current_user)
+    chosen = _period_or_400(period)
+    register = service.register(db, chosen, teacher_ids=_scope(current_user), program=program,
+                                now=service.now())
+    stream = BytesIO()
+    workbook_for(register).save(stream)
+    stream.seek(0)
+    name = f"discipline-{chosen.key}{'-' + program.upper() if program else ''}.xlsx"
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.post("/decisions")
