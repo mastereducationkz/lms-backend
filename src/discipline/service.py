@@ -11,7 +11,8 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, exists, or_, true
+from sqlalchemy.orm import Session, aliased
 
 from src.discipline.models import DisciplineDecision, DisciplinePeriod
 from src.discipline.rules import RULE_START, Finding, Period, judge_lesson
@@ -54,26 +55,48 @@ def now() -> datetime:
     return _now()
 
 
-def teachers_of(db: Session, user: UserInDB) -> Optional[list[int]]:
-    """Whose rows this person may read and decide on — None for «everyone».
+def visible_lessons_clause(user: UserInDB):
+    """SQL: the lessons this person may read and decide on.
 
-    A head teacher is scoped to the courses they manage, exactly as the head-teacher pages are
-    (`course_head_teachers` → `course_group_access` → groups). The register moves money, so the
-    NUET head, who manages four teachers, must not be able to fine a SAT teacher. Their own row is
-    always included: a head teacher who also teaches still has a record of their own.
+    Scope follows the **lesson**, not who owns the group. Asking «which groups does this teacher
+    own» loses every substitute: on production one teacher taught six NUET lessons of somebody
+    else's group, and no head teacher could see her — only admins (2026-09-18). A head teacher
+    sees the lessons of the courses they manage (`course_head_teachers` → `course_group_access` →
+    `event_groups`), whoever stood in front of the class, plus any lesson they taught themselves.
     """
+    role = getattr(user, "role", None)
+    if role == "admin":
+        return true()
+    if role != "head_teacher":
+        return Event.teacher_id == user.id
+
+    link = aliased(EventGroup)
+    managed = (exists().where(and_(
+        link.event_id == Event.id,
+        CourseGroupAccess.group_id == link.group_id,
+        CourseGroupAccess.is_active.is_(True),
+        CourseHeadTeacher.course_id == CourseGroupAccess.course_id,
+        CourseHeadTeacher.head_teacher_id == user.id,
+    )).correlate(Event))
+    return or_(managed, Event.teacher_id == user.id)
+
+
+def may_touch_lesson(db: Session, user: UserInDB, event_id: int) -> bool:
+    """Whether this person may decide on that lesson — the same rule, asked about one lesson."""
+    if getattr(user, "role", None) == "admin":
+        return True
+    return db.query(Event.id).filter(Event.id == event_id, visible_lessons_clause(user)).first() is not None
+
+
+def teachers_of(db: Session, user: UserInDB) -> Optional[list[int]]:
+    """The teachers this person may decide on when there is no lesson to point at (a manual entry)."""
     role = getattr(user, "role", None)
     if role == "admin":
         return None
     if role != "head_teacher":
         return [user.id]
-
-    rows = (db.query(Group.teacher_id)
-            .join(CourseGroupAccess, CourseGroupAccess.group_id == Group.id)
-            .join(CourseHeadTeacher, CourseHeadTeacher.course_id == CourseGroupAccess.course_id)
-            .filter(CourseHeadTeacher.head_teacher_id == user.id,
-                    CourseGroupAccess.is_active.is_(True),
-                    Group.teacher_id.isnot(None))
+    rows = (db.query(Event.teacher_id)
+            .filter(visible_lessons_clause(user), Event.teacher_id.isnot(None))
             .distinct().all())
     return sorted({teacher_id for (teacher_id,) in rows} | {user.id})
 
@@ -90,7 +113,7 @@ def _utc_bounds(period: Period) -> tuple[datetime, datetime]:
     return starts_at, ends_at
 
 
-def lessons_in(db: Session, period: Period, now: datetime) -> list[Event]:
+def lessons_in(db: Session, period: Period, now: datetime, scope=None) -> list[Event]:
     """Lessons of the period that have already finished, never before the rule started.
 
     The open period runs to the end of the month, so most of it has not happened yet. A lesson
@@ -103,7 +126,8 @@ def lessons_in(db: Session, period: Period, now: datetime) -> list[Event]:
                     Event.teacher_id.isnot(None),
                     Event.start_datetime >= starts_at, Event.start_datetime < ends_at,
                     Event.end_datetime <= now,
-                    event_has_operational_group_clause())
+                    event_has_operational_group_clause(),
+                    scope if scope is not None else true())
             .order_by(Event.start_datetime).all())
 
 
@@ -166,9 +190,9 @@ def _stored_period(db: Session, period: Period) -> Optional[DisciplinePeriod]:
     return db.query(DisciplinePeriod).filter(DisciplinePeriod.period_key == period.key).first()
 
 
-def judged_lessons(db: Session, period: Period, now: datetime) -> list[dict]:
+def judged_lessons(db: Session, period: Period, now: datetime, scope=None) -> list[dict]:
     """Every lesson of the period with its findings — the one place the rule meets the data."""
-    events = lessons_in(db, period, now)
+    events = lessons_in(db, period, now, scope)
     timings = _timings(db, events, now)
     programs = _programs(db, events)
     decisions = _decisions(db, (e.id for e in events))
@@ -201,10 +225,16 @@ def _amount_of(finding: dict) -> tuple[int, bool]:
     return int(finding["fine"]), False
 
 
-def register(db: Session, period: Period, *, teacher_ids: Optional[list[int]] = None,
-             program: Optional[str] = None, now: Optional[datetime] = None) -> dict:
-    """The grid: teachers down, days across, totals at the edges."""
+def register(db: Session, period: Period, *, viewer: Optional[UserInDB] = None,
+             teacher_ids: Optional[list[int]] = None, program: Optional[str] = None,
+             now: Optional[datetime] = None) -> dict:
+    """The grid: teachers down, days across, totals at the edges.
+
+    `viewer` decides which lessons are in it — a head teacher's courses, a teacher's own lessons,
+    everything for an admin. `teacher_ids` narrows further, for a caller that wants one row.
+    """
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    scope = visible_lessons_clause(viewer) if viewer is not None else None
     stored = _stored_period(db, period)
     days = [period.start + timedelta(days=offset) for offset in range((period.end - period.start).days + 1)]
 
@@ -212,7 +242,7 @@ def register(db: Session, period: Period, *, teacher_ids: Optional[list[int]] = 
     # Every programme the period holds for this reader, whatever they are filtering by: the page's
     # tabs come from here, and a list that shrank to the chosen programme left no way back.
     programs: set[str] = set()
-    for lesson in judged_lessons(db, period, now):
+    for lesson in judged_lessons(db, period, now, scope):
         if teacher_ids is not None and lesson["teacher_id"] not in teacher_ids:
             continue
         programs.add(lesson["program"])
@@ -279,7 +309,8 @@ def register(db: Session, period: Period, *, teacher_ids: Optional[list[int]] = 
     }
 
 
-def day_detail(db: Session, teacher_id: int, day: date, *, now: Optional[datetime] = None) -> dict:
+def day_detail(db: Session, teacher_id: int, day: date, *, viewer: Optional[UserInDB] = None,
+               now: Optional[datetime] = None) -> dict:
     """One teacher, one day: every lesson with its timings, findings and decision."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     from src.discipline.rules import period_containing
@@ -287,8 +318,9 @@ def day_detail(db: Session, teacher_id: int, day: date, *, now: Optional[datetim
     if period is None:
         return {"day": day.isoformat(), "teacher_id": teacher_id, "lessons": []}
 
+    scope = visible_lessons_clause(viewer) if viewer is not None else None
     lessons = []
-    for lesson in judged_lessons(db, period, now):
+    for lesson in judged_lessons(db, period, now, scope):
         if lesson["teacher_id"] != teacher_id or lesson["day"] != day:
             continue
         event = lesson["event"]
@@ -359,7 +391,7 @@ def apply_decision(db: Session, *, actor: UserInDB, event_id: Optional[int], tea
 def close_period(db: Session, period: Period, actor: UserInDB, *, now: Optional[datetime] = None) -> DisciplinePeriod:
     """Freeze a period's totals for payroll. Refuses while a miss still has no price."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
-    current = register(db, period, now=now)
+    current = register(db, period, now=now)   # closing freezes the whole period, not one reader's view
     if current["totals"]["unpriced"]:
         raise PeriodNotReady(f"{current['totals']['unpriced']} missed lessons still have no amount")
 
