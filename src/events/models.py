@@ -54,6 +54,21 @@ class Event(Base):
     def teacher_name(self):
         return self.teacher.name if self.teacher else None
 
+    @property
+    def group_teacher_name(self):
+        """Whose group this lesson belongs to — not necessarily who taught it.
+
+        A covered lesson keeps the owner here and the stand-in in `teacher_name`, so a calendar
+        can say «Дина instead of Ақжол» rather than telling every reader «you are substituting».
+        """
+        if not self.event_groups:
+            return None
+        try:
+            group = self.event_groups[0].group
+        except (IndexError, AttributeError):
+            return None
+        return group.teacher.name if group is not None and group.teacher else None
+
 
 class EventGroup(Base):
     __tablename__ = "event_groups"

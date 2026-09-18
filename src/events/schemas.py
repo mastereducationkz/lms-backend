@@ -31,6 +31,8 @@ class EventSchema(BaseModel):
     lesson_id: Optional[int] = None
     teacher_id: Optional[int] = None
     teacher_name: Optional[str] = None
+    # Whose group it is, when somebody else taught it — the calendar names both.
+    group_teacher_name: Optional[str] = None
     participant_count: int = 0
     groups: Optional[List[str]] = None
     courses: Optional[List[str]] = None
