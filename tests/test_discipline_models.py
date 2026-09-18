@@ -84,8 +84,8 @@ def test_the_same_lesson_can_owe_for_lateness_and_for_ending_early(db):
     lesson = _lesson(db, teacher)
     for kind, minutes in (("late", 2), ("ended_early", 10)):
         db.add(DisciplineDecision(event_id=lesson.id, teacher_id=teacher.id, day=date(2026, 9, 17),
-                                  kind=kind, minutes=minutes, proposed_amount=minutes * 300,
-                                  amount=minutes * 300, decided_by=head.id,
+                                  kind=kind, minutes=minutes, proposed_amount=minutes * 200,
+                                  amount=minutes * 200, decided_by=head.id,
                                   decided_at=datetime.utcnow()))
     db.flush()
     assert db.query(DisciplineDecision).filter_by(event_id=lesson.id).count() == 2

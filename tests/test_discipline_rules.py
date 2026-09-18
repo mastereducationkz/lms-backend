@@ -1,7 +1,7 @@
 """The register's rules: which half-month a day belongs to, and what a lesson costs.
 
 The owner's rule took effect on 16.09.2026, so nothing earlier is ever judged. Every whole minute
-late, or cut short, costs 300 ₸; a lesson never taught is a miss a head teacher prices by hand.
+late, or cut short, costs 200 ₸; a lesson never taught is a miss a head teacher prices by hand.
 Minutes are rounded down, in the teacher's favour, exactly as the students' rule rounds.
 """
 from datetime import date, datetime, timedelta
@@ -58,11 +58,11 @@ def test_a_teacher_who_joined_on_time_owes_nothing():
                         last_leave=LESSON_END, measurable=True) == []
 
 
-def test_each_whole_minute_late_costs_300_tenge():
+def test_each_whole_minute_late_costs_200_tenge():
     findings = judge_lesson(start=LESSON_START, end=LESSON_END,
                             first_join=LESSON_START.replace(minute=3, second=40),
                             last_leave=LESSON_END, measurable=True)
-    assert findings == [Finding(kind="late", minutes=3, fine=900, made_up=False)]
+    assert findings == [Finding(kind="late", minutes=3, fine=600, made_up=False)]
 
 
 def test_seconds_never_round_against_the_teacher():
@@ -76,20 +76,20 @@ def test_time_made_up_is_shown_but_still_proposed():
     findings = judge_lesson(start=LESSON_START, end=LESSON_END,
                             first_join=LESSON_START.replace(minute=3),
                             last_leave=LESSON_END.replace(minute=3), measurable=True)
-    assert findings == [Finding(kind="late", minutes=3, fine=900, made_up=True)]
+    assert findings == [Finding(kind="late", minutes=3, fine=600, made_up=True)]
 
 
 def test_leaving_at_the_bell_after_a_late_start_is_not_made_up():
     findings = judge_lesson(start=LESSON_START, end=LESSON_END,
                             first_join=LESSON_START.replace(minute=3),
                             last_leave=LESSON_END, measurable=True)
-    assert findings == [Finding(kind="late", minutes=3, fine=900, made_up=False)]
+    assert findings == [Finding(kind="late", minutes=3, fine=600, made_up=False)]
 
 
 def test_a_lesson_cut_short_costs_the_same_per_minute():
     findings = judge_lesson(start=LESSON_START, end=LESSON_END, first_join=LESSON_START,
                             last_leave=LESSON_END - timedelta(minutes=8), measurable=True)
-    assert findings == [Finding(kind="ended_early", minutes=8, fine=2400, made_up=False)]
+    assert findings == [Finding(kind="ended_early", minutes=8, fine=1600, made_up=False)]
 
 
 def test_late_and_cut_short_are_both_owed():
@@ -97,7 +97,7 @@ def test_late_and_cut_short_are_both_owed():
                             first_join=LESSON_START.replace(minute=2),
                             last_leave=LESSON_END - timedelta(minutes=10), measurable=True)
     assert [(f.kind, f.minutes, f.fine) for f in findings] == [
-        ("late", 2, 600), ("ended_early", 10, 3000)]
+        ("late", 2, 400), ("ended_early", 10, 2000)]
 
 
 def test_a_lesson_never_taught_is_a_miss_a_person_prices():
@@ -112,4 +112,4 @@ def test_a_lesson_the_lms_could_not_watch_is_judged_by_nobody():
 
 
 def test_the_rate_is_one_number():
-    assert fine_for(7) == 7 * FINE_PER_MINUTE == 2100
+    assert fine_for(7) == 7 * FINE_PER_MINUTE == 1400
