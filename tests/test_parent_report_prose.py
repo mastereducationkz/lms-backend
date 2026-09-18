@@ -87,6 +87,47 @@ def test_number_free_prose_always_passes():
     assert "weakness" in out
 
 
+def test_test_date_is_a_fact_the_prose_may_cite():
+    out = sanitize({"progress": "По тесту от 19.09 виден рост."}, facts())
+    assert "progress" in out
+
+
+def test_no_growth_streak_is_a_fact_the_prose_may_cite():
+    out = sanitize({"cause": "Уже 2 теста подряд без роста."}, facts(no_growth_streak=2))
+    assert "cause" in out
+
+
+def test_fractional_fact_is_not_truncated():
+    payload = facts(talk={"lessons": 3, "lessons_spoke": 2, "avg_seconds": 75.5,
+                          "questions": 4, "answers": 2})
+    out = sanitize({"activity": "В среднем говорит по 75.5 секунды за урок."}, payload)
+    assert "activity" in out
+
+
+def test_prose_may_not_contain_a_score_even_from_real_digits():
+    # 17 и 22 по отдельности настоящие, но пары «17/22» не было ни в одном тесте.
+    # Счёт печатает render из фактов — в прозе ему делать нечего.
+    out = sanitize({"progress": "Verbal: 17/22 — почти отлично."}, facts())
+    assert "progress" not in out
+
+
+def test_letter_glued_digits_are_not_numbers():
+    # «B2» — ярлык уровня, а не число из отчёта. Требовать его среди фактов значит
+    # выбросить честную фразу.
+    out = sanitize({"weakness": "Пока держится на уровне B2 по лексике."}, facts())
+    assert "weakness" in out
+
+
+@pytest.mark.asyncio
+async def test_malformed_llm_payload_degrades_to_empty_prose():
+    class BadClient:
+        async def complete(self, *, facts, slots):
+            return {"progress": 42}  # не строка
+
+    out = await generate_prose(facts(), "t1", client=BadClient())
+    assert out == {}
+
+
 class FakeClient:
     """Подменяет AzureOpenAIService: отдаёт заранее заданный словарь слотов."""
 

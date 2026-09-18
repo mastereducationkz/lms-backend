@@ -18,7 +18,18 @@ from src.reports.parent.template import PROSE_SLOTS
 
 logger = logging.getLogger("parent_reports.prose")
 
-_NUMBER = re.compile(r"\d+")
+#: Числа в фактах. Обычный «любой набор цифр» — им сканируются сами данные.
+_DIGITS = re.compile(r"\d+")
+
+#: Числа в прозе. Цифры, приклеенные к буквам, числами не считаются: «B2», «Unit5»,
+#: «IELTS9» — это ярлыки уровней и тем, и требовать их присутствия среди фактов значит
+#: выбрасывать совершенно честные фразы.
+_NUMBER = re.compile(r"(?<![^\W\d_])\d+(?![^\W\d_])")
+
+#: Счёт вида «17/27». Проза не имеет права его содержать вообще: результаты печатает
+#: ``template.render`` из фактов. Белый список отдельных чисел такую фразу пропустил бы —
+#: «17/22» целиком состоит из настоящих цифр, но такой пары не было ни в одном тесте.
+_SCORE = re.compile(r"\d+\s*/\s*\d+")
 
 MAX_SLOT_CHARS = 200
 
@@ -45,8 +56,20 @@ def allowed_numbers(facts: Dict[str, Any]) -> set:
     allowed: set = set()
 
     def put(value: Any) -> None:
-        if isinstance(value, (int, float)) and value is not None:
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, (int, float)):
+            # Дробную часть отбрасывать нельзя: при avg_seconds = 75.5 модель законно
+            # напишет «75.5», «5» не окажется в списке, и честная фраза будет выброшена.
+            allowed.update(_DIGITS.findall(str(abs(value))))
             allowed.add(str(int(abs(value))))
+
+    def put_date(iso_day: Optional[str]) -> None:
+        """День и месяц в обоих написаниях — «16»/«09» и «16»/«9»."""
+        if not iso_day or len(iso_day) < 10:
+            return
+        year, month, day = iso_day[:10].split("-")
+        allowed.update({day, month, str(int(day)), str(int(month))})
 
     test = facts.get("test") or {}
     for source in (test, test.get("prev") or {}):
@@ -54,8 +77,14 @@ def allowed_numbers(facts: Dict[str, Any]) -> set:
             side = source.get(key) or {}
             put(side.get("correct"))
             put(side.get("total"))
+        # Ярлык недели («Week 5») печатается платформой и вполне может быть упомянут.
+        allowed.update(_DIGITS.findall(str(source.get("label") or "")))
     for value in (test.get("delta") or {}).values():
         put(value)
+    # Дату теста ``template._test_lines`` печатает в шапке результатов — значит она факт.
+    put_date(test.get("date"))
+    # Причина, по которой отчёт вообще стал тревожным: «два теста подряд без роста».
+    put(facts.get("no_growth_streak"))
 
     homework = facts.get("homework") or {}
     put(homework.get("assigned"))
@@ -66,8 +95,7 @@ def allowed_numbers(facts: Dict[str, Any]) -> set:
         put(attendance.get(key))
     put(len(attendance.get("absences") or []))
     for absence in attendance.get("absences") or []:
-        day, month = absence["date"].split("-")[2], absence["date"].split("-")[1]
-        allowed.update({day, month, str(int(day)), str(int(month))})
+        put_date(absence.get("date"))
 
     talk = facts.get("talk") or {}
     for key in ("lessons", "lessons_spoke", "avg_seconds", "questions", "answers"):
@@ -88,9 +116,13 @@ def sanitize(prose: Dict[str, str], facts: Dict[str, Any]) -> Dict[str, str]:
         text = (raw or "").strip()
         if not text or len(text) > MAX_SLOT_CHARS:
             continue
-        if slot in FACTUAL_SLOTS and any(n not in allowed for n in _NUMBER.findall(text)):
-            logger.info("parent report: слот %s отброшен — число вне фактов", slot)
-            continue
+        if slot in FACTUAL_SLOTS:
+            if _SCORE.search(text):
+                logger.info("parent report: слот %s отброшен — проза со счётом", slot)
+                continue
+            if any(n not in allowed for n in _NUMBER.findall(text)):
+                logger.info("parent report: слот %s отброшен — число вне фактов", slot)
+                continue
         clean[slot] = text
     return clean
 
@@ -182,10 +214,13 @@ async def generate_prose(
     for attempt in (1, 2):
         try:
             raw = await client.complete(facts=facts, slots=slots)
-        except Exception as exc:  # сеть, квота, таймаут — каркас важнее прозы
+            # sanitize внутри try намеренно: ответ может быть синтаксически валидным, но
+            # с не-строкой в поле, и тогда падение произойдёт здесь, а не в запросе.
+            # Правило «сбой генерации даёт пустую прозу, а не исключение» одно на оба случая.
+            clean = {k: v for k, v in sanitize(raw, facts).items() if k in slots}
+        except Exception as exc:  # сеть, квота, таймаут, кривой ответ — каркас важнее прозы
             logger.warning("parent report: генерация прозы не удалась: %s", exc)
             return {}
-        clean = {k: v for k, v in sanitize(raw, facts).items() if k in slots}
         if len(clean) == len([s for s in slots if s in (raw or {})]):
             return clean
         if attempt == 2:
