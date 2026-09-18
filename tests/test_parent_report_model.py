@@ -2,6 +2,7 @@
 from datetime import date
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 
@@ -78,3 +79,21 @@ def test_different_weeks_coexist(db, student):
         ))
     db.flush()
     assert db.query(ParentReport).filter(ParentReport.student_id == student.id).count() == 2
+
+
+def test_template_auto_has_a_database_level_default(db, student):
+    # Писателя в обход ORM в этом проекте уже заводили (CRM пишет таблицы LMS напрямую).
+    # Python-дефолт его не спасёт — значение обязано подставляться самой базой.
+    db.execute(
+        text(
+            "INSERT INTO parent_reports "
+            "(student_id, week_start, template_key, facts_json, body_generated, body) "
+            "VALUES (:sid, :week, 't1', '{}'::jsonb, 'текст', 'текст')"
+        ),
+        {"sid": student.id, "week": date(2026, 9, 14)},
+    )
+    stored = db.execute(
+        text("SELECT template_auto FROM parent_reports WHERE student_id = :sid"),
+        {"sid": student.id},
+    ).scalar_one()
+    assert stored is True

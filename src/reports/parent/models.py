@@ -39,7 +39,11 @@ class ParentReport(Base):
 
     template_key = Column(String(8), nullable=False)
     #: False означает, что куратор переключил шаблон руками.
-    template_auto = Column(Boolean, nullable=False, default=True)
+    #: ``server_default`` рядом с ``default`` не дублирование: python-дефолт срабатывает
+    #: только через ORM, а в этот проект уже писали в обход неё (CRM пишет таблицы LMS
+    #: напрямую зеркальной моделью без её дефолтов — так в календаре появились NULL-даты).
+    #: Без дефолта в самой базе такой писатель получит NOT NULL violation.
+    template_auto = Column(Boolean, nullable=False, default=True, server_default="true")
 
     facts_json = Column(JSONB, nullable=False)
     body_generated = Column(Text, nullable=False)
