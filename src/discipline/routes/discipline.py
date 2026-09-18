@@ -53,9 +53,19 @@ def _may_decide(user: UserInDB) -> None:
         raise HTTPException(status_code=403, detail="Only a head teacher or an admin decides a fine")
 
 
-def _scope(user: UserInDB) -> Optional[list[int]]:
-    """A teacher sees their own row and nobody else's; a head teacher sees everyone."""
-    return None if getattr(user, "role", None) in DECIDES else [user.id]
+def _scope(db: Session, user: UserInDB) -> Optional[list[int]]:
+    """Whose rows this person may read and decide on — None for «everyone» (admins only).
+
+    A head teacher is scoped to the courses they manage, like every other head-teacher page: the
+    register moves money, and the NUET head must not be able to fine a SAT teacher.
+    """
+    return service.teachers_of(db, user)
+
+
+def _may_touch(db: Session, user: UserInDB, teacher_id: int) -> None:
+    scope = _scope(db, user)
+    if scope is not None and teacher_id not in scope:
+        raise HTTPException(status_code=403, detail="That teacher is not on a course you manage")
 
 
 @router.get("/periods")
@@ -77,7 +87,7 @@ def read_register(period: str = Query(..., description="the period's first day, 
                   db: Session = Depends(get_db),
                   current_user: UserInDB = Depends(get_current_user_dependency)):
     _may_read(current_user)
-    return service.register(db, _period_or_400(period), teacher_ids=_scope(current_user),
+    return service.register(db, _period_or_400(period), teacher_ids=_scope(db, current_user),
                             program=program, now=service.now())
 
 
@@ -85,9 +95,7 @@ def read_register(period: str = Query(..., description="the period's first day, 
 def read_day(teacher_id: int, day: date, db: Session = Depends(get_db),
              current_user: UserInDB = Depends(get_current_user_dependency)):
     _may_read(current_user)
-    scope = _scope(current_user)
-    if scope is not None and teacher_id not in scope:
-        raise HTTPException(status_code=403, detail="That is another teacher's day")
+    _may_touch(db, current_user, teacher_id)
     if period_containing(day) is None:
         raise HTTPException(
             status_code=400,
@@ -103,7 +111,7 @@ def export(period: str = Query(..., description="the period's first day, e.g. 20
     """The period as the spreadsheet head teachers already know, for payroll and the archive."""
     _may_read(current_user)
     chosen = _period_or_400(period)
-    register = service.register(db, chosen, teacher_ids=_scope(current_user), program=program,
+    register = service.register(db, chosen, teacher_ids=_scope(db, current_user), program=program,
                                 now=service.now())
     stream = BytesIO()
     workbook_for(register).save(stream)
@@ -120,6 +128,7 @@ def decide(body: DecisionIn, db: Session = Depends(get_db),
            current_user: UserInDB = Depends(get_current_user_dependency)):
     """Confirm, waive or reprice one finding."""
     _may_decide(current_user)
+    _may_touch(db, current_user, body.teacher_id)
     try:
         decision = service.apply_decision(
             db, actor=current_user, event_id=body.event_id, teacher_id=body.teacher_id,

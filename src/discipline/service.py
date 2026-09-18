@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from src.discipline.models import DisciplineDecision, DisciplinePeriod
 from src.discipline.rules import RULE_START, Finding, Period, judge_lesson
-from src.schemas.models import Event, EventGroup, Group, UserInDB
+from src.schemas.models import (CourseGroupAccess, CourseHeadTeacher, Event, EventGroup, Group,
+                                UserInDB)
 from src.services import meet_presence
 from src.services.operational_groups import event_has_operational_group_clause
 
@@ -51,6 +52,30 @@ def _now() -> datetime:
 
 def now() -> datetime:
     return _now()
+
+
+def teachers_of(db: Session, user: UserInDB) -> Optional[list[int]]:
+    """Whose rows this person may read and decide on — None for «everyone».
+
+    A head teacher is scoped to the courses they manage, exactly as the head-teacher pages are
+    (`course_head_teachers` → `course_group_access` → groups). The register moves money, so the
+    NUET head, who manages four teachers, must not be able to fine a SAT teacher. Their own row is
+    always included: a head teacher who also teaches still has a record of their own.
+    """
+    role = getattr(user, "role", None)
+    if role == "admin":
+        return None
+    if role != "head_teacher":
+        return [user.id]
+
+    rows = (db.query(Group.teacher_id)
+            .join(CourseGroupAccess, CourseGroupAccess.group_id == Group.id)
+            .join(CourseHeadTeacher, CourseHeadTeacher.course_id == CourseGroupAccess.course_id)
+            .filter(CourseHeadTeacher.head_teacher_id == user.id,
+                    CourseGroupAccess.is_active.is_(True),
+                    Group.teacher_id.isnot(None))
+            .distinct().all())
+    return sorted({teacher_id for (teacher_id,) in rows} | {user.id})
 
 
 def closed_periods(db: Session) -> list[DisciplinePeriod]:
@@ -184,9 +209,13 @@ def register(db: Session, period: Period, *, teacher_ids: Optional[list[int]] = 
     days = [period.start + timedelta(days=offset) for offset in range((period.end - period.start).days + 1)]
 
     rows: dict[int, dict] = {}
+    # Every programme the period holds for this reader, whatever they are filtering by: the page's
+    # tabs come from here, and a list that shrank to the chosen programme left no way back.
+    programs: set[str] = set()
     for lesson in judged_lessons(db, period, now):
         if teacher_ids is not None and lesson["teacher_id"] not in teacher_ids:
             continue
+        programs.add(lesson["program"])
         if program and lesson["program"] != program.upper():
             continue
         row = rows.setdefault(lesson["teacher_id"], {
@@ -243,6 +272,7 @@ def register(db: Session, period: Period, *, teacher_ids: Optional[list[int]] = 
                    "end": period.end.isoformat(), "closed": closed,
                    "closed_at": stored.closed_at.isoformat() + "Z" if closed else None},
         "days": [day.isoformat() for day in days],
+        "programs": sorted(programs),
         "teachers": teachers,
         "totals": totals,
         "reasons": [{"code": code, "label": label} for code, label in REASONS],
