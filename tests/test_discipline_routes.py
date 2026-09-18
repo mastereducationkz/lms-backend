@@ -70,8 +70,21 @@ def world(db, monkeypatch):
     monkeypatch.setattr(service, "_timings", lambda db_, events, now: {
         lesson.id: ("ready", datetime(2026, 9, 17, 13, 3), datetime(2026, 9, 17, 14, 0), 8, 9)})
     monkeypatch.setattr(service, "_now", lambda: NOW)
-    return {"teacher": teacher, "lesson": lesson,
-            "head": _person(db, "head_teacher", "Head"), "admin": _person(db, "admin", "Admin"),
+
+    # The head teacher manages the course this group is taught under — the ordinary case. A head
+    # teacher only reaches the teachers of their own courses, as on every other head-teacher page.
+    from src.schemas.models import Course, CourseGroupAccess, CourseHeadTeacher
+    head = _person(db, "head_teacher", "Head")
+    course = Course(title="Master SAT", description="", teacher_id=head.id)
+    db.add(course)
+    db.flush()
+    db.add(CourseGroupAccess(course_id=course.id, group_id=group.id, granted_by=head.id, is_active=True))
+    db.add(CourseHeadTeacher(course_id=course.id, head_teacher_id=head.id))
+    db.flush()
+
+    return {"teacher": teacher, "lesson": lesson, "group": group, "course": course,
+            "head": head, "admin": _person(db, "admin", "Admin"),
+            "another_head": _person(db, "head_teacher", "Head of another course"),
             "student": _person(db, "student", "Кто-то"),
             "other_teacher": _person(db, "teacher", "Другой")}
 
@@ -203,3 +216,38 @@ def test_the_export_downloads_the_familiar_sheet(client, world):
 def test_a_student_cannot_download_the_register(client, world):
     assert client(world["student"]).get(
         "/teacher-discipline/export.xlsx?period=2026-09-16").status_code == 403
+
+
+def test_a_head_teacher_of_another_course_sees_nothing_of_these_teachers(client, world):
+    """The register moves money: the NUET head must not reach a SAT teacher (owner, 2026-09-18)."""
+    body = client(world["another_head"]).get("/teacher-discipline/register?period=2026-09-16").json()
+    assert body["teachers"] == []
+
+
+def test_a_head_teacher_cannot_fine_a_teacher_of_someone_elses_course(client, world):
+    response = client(world["another_head"]).post("/teacher-discipline/decisions", json={
+        "event_id": world["lesson"].id, "teacher_id": world["teacher"].id, "day": "2026-09-17",
+        "kind": "late", "amount": 0, "reason_code": "moved"})
+    assert response.status_code == 403
+
+
+def test_a_head_teacher_cannot_open_such_a_teachers_day(client, world):
+    response = client(world["another_head"]).get(
+        f"/teacher-discipline/day?teacher_id={world['teacher'].id}&day=2026-09-17")
+    assert response.status_code == 403
+
+
+def test_an_admin_still_sees_and_decides_on_everyone(client, world):
+    body = client(world["admin"]).get("/teacher-discipline/register?period=2026-09-16").json()
+    assert [row["teacher_id"] for row in body["teachers"]] == [world["teacher"].id]
+    assert client(world["admin"]).post("/teacher-discipline/decisions", json={
+        "event_id": world["lesson"].id, "teacher_id": world["teacher"].id, "day": "2026-09-17",
+        "kind": "late", "amount": 0, "reason_code": "moved"}).status_code == 200
+
+
+def test_the_programme_tabs_survive_choosing_a_programme(client, world):
+    """The page's tabs come from `programs`; deriving them from the filtered rows made them —
+    «All» included — vanish the moment a programme was chosen, with no way back."""
+    body = client(world["head"]).get("/teacher-discipline/register?period=2026-09-16&program=SAT").json()
+    assert body["programs"] == ["SAT"]
+    assert [row["program"] for row in body["teachers"]] == ["SAT"]

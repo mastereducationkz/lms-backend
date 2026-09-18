@@ -232,3 +232,57 @@ def test_one_teacher_sees_only_their_own_row(db, lesson_factory, meet_stub, teac
 
 def _row_of(register: dict, teacher_id: int) -> dict:
     return next(row for row in register["teachers"] if row["teacher_id"] == teacher_id)
+
+
+def _manages(db, head, group):
+    """Link a head teacher to the course a group is taught under, as the LMS does."""
+    from src.schemas.models import Course, CourseGroupAccess, CourseHeadTeacher
+    course = Course(title=f"Course {datetime.now().timestamp():.6f}", description="", teacher_id=head.id)
+    db.add(course); db.flush()
+    db.add(CourseGroupAccess(course_id=course.id, group_id=group.id, granted_by=head.id, is_active=True))
+    db.add(CourseHeadTeacher(course_id=course.id, head_teacher_id=head.id))
+    db.flush()
+    return course
+
+
+def test_a_head_teacher_reaches_the_teachers_of_their_own_courses(db, lesson_factory, head_teacher, teacher):
+    """Everywhere else in the LMS a head teacher is scoped to the courses they manage; the register
+    scopes the same way, so the NUET head does not fine SAT teachers (owner, 2026-09-18)."""
+    from src.schemas.models import EventGroup
+    mine = lesson_factory(start=datetime(2026, 9, 17, 13, 0))
+    other = _person(db, "teacher", "Другой преподаватель")
+    theirs = lesson_factory(start=datetime(2026, 9, 17, 13, 0), of_teacher=other)
+
+    group_of_mine = db.query(EventGroup).filter_by(event_id=mine.id).one().group_id
+    _manages(db, head_teacher, db.get(__import__("src.schemas.models", fromlist=["Group"]).Group, group_of_mine))
+
+    scope = service.teachers_of(db, head_teacher)
+    assert teacher.id in scope                 # teaches a group of a course they manage
+    assert other.id not in scope               # somebody else's course
+    assert head_teacher.id in scope            # a head teacher who also teaches keeps their own row
+
+
+def test_a_head_teacher_who_manages_nothing_still_sees_their_own_lessons(db, head_teacher):
+    assert service.teachers_of(db, head_teacher) == [head_teacher.id]
+
+
+def test_an_admin_is_not_scoped(db, head_teacher):
+    admin = _person(db, "admin", "Админ")
+    assert service.teachers_of(db, admin) is None
+
+
+def test_the_programmes_of_a_period_do_not_shrink_when_one_is_chosen(db, lesson_factory, meet_stub, teacher):
+    """The page's tabs come from this list. Deriving them from the filtered rows made every tab —
+    including «All» — disappear as soon as a programme was chosen, with no way back."""
+    sat = lesson_factory(start=datetime(2026, 9, 17, 13, 0), program="SAT")
+    ielts = lesson_factory(start=datetime(2026, 9, 17, 15, 0), program="IELTS",
+                           of_teacher=_person(db, "teacher", "IELTS преподаватель"))
+    for lesson in (sat, ielts):
+        meet_stub(lesson, first_join=lesson.start_datetime, last_leave=lesson.end_datetime)
+
+    everything = service.register(db, SEPTEMBER, now=NOW)
+    assert everything["programs"] == ["IELTS", "SAT"]
+
+    only_sat = service.register(db, SEPTEMBER, program="SAT", now=NOW)
+    assert only_sat["programs"] == ["IELTS", "SAT"]          # the choice does not shrink the choices
+    assert [row["program"] for row in only_sat["teachers"]] == ["SAT"]
