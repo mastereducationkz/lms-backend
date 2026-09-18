@@ -49,3 +49,25 @@ class DisciplinePeriod(Base):
     closed_at = Column(DateTime, nullable=True)
     closed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     totals = Column(JSON, nullable=True)                   # frozen at closing, for payroll
+
+
+class DisciplineDigestSend(Base):
+    """One row per day posted to «Штрафы учителя» — and the row is what claims the day.
+
+    It is written before the network call, so two scheduler ticks racing cannot both post the
+    same morning: the unique constraint decides which one owns it. A day nobody was fined ends
+    as `skipped`, which records that we looked rather than that we failed.
+    """
+
+    __tablename__ = "discipline_digest_sends"
+    __table_args__ = (UniqueConstraint("kind", "day", name="uq_discipline_digest_kind_day"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(16), nullable=False, default="fines")
+    day = Column(Date, nullable=False, index=True)         # the Almaty day it is about
+    status = Column(String(16), nullable=False, default="pending")  # pending|sent|failed|skipped
+    attempts = Column(Integer, nullable=False, default=0)
+    telegram_message_id = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    sent_at = Column(DateTime, nullable=True)

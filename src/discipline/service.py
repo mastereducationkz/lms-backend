@@ -176,6 +176,10 @@ def _decisions(db: Session, event_ids: Iterable[int]) -> dict[tuple, DisciplineD
 
 def _empty_cell() -> dict:
     return {"late_minutes": 0, "early_minutes": 0, "misses": 0, "fine": 0, "unpriced": 0,
+            # Of `late_minutes`, the ones the teacher gave back by staying past the end. The
+            # fine is unchanged — only a person may waive it — but a head teacher decides
+            # differently on minutes that came back, so the grid has to show them.
+            "made_up_minutes": 0,
             "lessons": 0, "measured": 0, "unmeasurable": 0, "decided": 0, "state": "none"}
 
 
@@ -251,7 +255,8 @@ def register(db: Session, period: Period, *, viewer: Optional[UserInDB] = None,
         row = rows.setdefault(lesson["teacher_id"], {
             "teacher_id": lesson["teacher_id"], "name": "", "program": lesson["program"],
             "days": {}, "totals": {"late_minutes": 0, "early_minutes": 0, "misses": 0,
-                                   "fine": 0, "unpriced": 0, "lessons": 0, "unmeasurable": 0}})
+                                   "fine": 0, "unpriced": 0, "made_up_minutes": 0,
+                                   "lessons": 0, "unmeasurable": 0}})
         cell = row["days"].setdefault(lesson["day"].isoformat(), _empty_cell())
         states = {cell["state"]} - {"none"}
 
@@ -275,6 +280,9 @@ def register(db: Session, period: Period, *, viewer: Optional[UserInDB] = None,
             if finding["kind"] == "late":
                 cell["late_minutes"] += finding["minutes"]
                 row["totals"]["late_minutes"] += finding["minutes"]
+                if finding.get("made_up"):
+                    cell["made_up_minutes"] += finding["minutes"]
+                    row["totals"]["made_up_minutes"] += finding["minutes"]
             elif finding["kind"] == "ended_early":
                 cell["early_minutes"] += finding["minutes"]
                 row["totals"]["early_minutes"] += finding["minutes"]
@@ -287,8 +295,9 @@ def register(db: Session, period: Period, *, viewer: Optional[UserInDB] = None,
         rows[teacher.id]["name"] = teacher.name
 
     teachers = sorted(rows.values(), key=lambda r: (r["program"], r["name"].lower()))
-    totals = {key: sum(row["totals"][key] for row in teachers)
-              for key in ("late_minutes", "early_minutes", "misses", "fine", "unpriced", "lessons", "unmeasurable")}
+    totals = {key: sum(row["totals"].get(key, 0) for row in teachers)
+              for key in ("late_minutes", "early_minutes", "misses", "fine", "unpriced",
+                          "made_up_minutes", "lessons", "unmeasurable")}
     closed = bool(stored and stored.closed_at)
     if closed and stored.totals:
         totals = {**totals, **stored.totals}

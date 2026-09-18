@@ -89,6 +89,7 @@ class LessonReminderScheduler:
                 self._send_telegram_invitations()
                 self._send_telegram_lesson_notices()
                 self._send_telegram_homework_notices()
+                self._send_discipline_digest()
                 __import__("src.services.group_bot_jobs", fromlist=["run_from_scheduler"]).run_from_scheduler()
                 self._check_and_send_reminders()
                 self._check_and_send_post_lesson_reminders()
@@ -113,6 +114,25 @@ class LessonReminderScheduler:
         except Exception as e:
             db.rollback()
             logger.error(f"❌ [TELEGRAM] Lesson invitations failed: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _send_discipline_digest(self):
+        """Post yesterday's fines into «Штрафы учителя» at 09:00 Almaty
+        (src/discipline/digest.py). Off unless enabled; the day's row is the claim, so running
+        this every minute posts once."""
+        from src.discipline import digest
+
+        if not digest.enabled():
+            return
+        db = SessionLocal()
+        try:
+            summary = digest.run(db)
+            if summary.get("status") not in (None, "disabled"):
+                logger.info(f"⚖️ [DISCIPLINE] Fines digest: {summary}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ [DISCIPLINE] Fines digest failed: {e}", exc_info=True)
         finally:
             db.close()
 
