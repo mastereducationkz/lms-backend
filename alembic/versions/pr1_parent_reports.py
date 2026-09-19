@@ -1,7 +1,7 @@
 """parent_reports: сохранённые еженедельные отчёты родителям
 
 Revision ID: pr1_parent_reports
-Revises: exc2_attendance_excused_trigger
+Revises: td2_discipline_digest
 Create Date: 2026-09-18
 
 Написано руками, а не автогенерацией: autogenerate на этом проекте стабильно вытаскивает
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "pr1_parent_reports"
-down_revision = "exc2_attendance_excused_trigger"
+down_revision = "td2_discipline_digest"
 branch_labels = None
 depends_on = None
 
