@@ -95,7 +95,9 @@ def get_my_events(
         user_group_ids = [row[0] for row in db.query(Group.id).all()]
         user_course_ids = [row[0] for row in db.query(Course.id).all()]
     
-    if not user_group_ids and not user_course_ids:
+    # A teacher may own standalone webinars without owning an LMS group or course.
+    # Keep the query alive so the Event.teacher_id access branch below can return them.
+    if not user_group_ids and not user_course_ids and current_user.role not in {"teacher", "curator"}:
         return []
     logger.debug(f"DEBUG: user_group_ids={user_group_ids} user_course_ids={user_course_ids}")
     
@@ -462,7 +464,12 @@ def get_calendar_events(
         user_group_ids = [row[0] for row in db.query(Group.id).all()]
         user_course_ids = [row[0] for row in db.query(Course.id).all()]
     
-    if not user_group_ids and not user_course_ids:
+    # Standalone teacher-owned webinars are authorized by Event.teacher_id below.
+    if (
+        not user_group_ids
+        and not user_course_ids
+        and current_user.role not in {"teacher", "curator", "head_teacher"}
+    ):
         logger.debug(f"DEBUG: No groups or courses for user {current_user.id}")
         return []
     
