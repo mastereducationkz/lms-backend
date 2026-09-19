@@ -31,6 +31,9 @@ jobs:
           # the tree that block `git pull --ff-only`. Ignore file modes so pulls of
           # script content changes don't abort with "local changes would be overwritten".
           git config core.fileMode false
+          # The production host cannot reach GitHub over SSH (port 22); use HTTPS for
+          # deployment fetches instead.
+          git remote set-url origin https://github.com/mastereducationkz/lms-backend.git
           git fetch origin main
           git checkout main
           git pull --ff-only origin main
