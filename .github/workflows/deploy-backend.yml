@@ -52,8 +52,10 @@ jobs:
           cd ~/projects/lms
           tar -xzf /tmp/lms-backend.tar.gz
           rm -f /tmp/lms-backend.tar.gz
+          docker image prune -f
           gunzip -c /tmp/lms-backend-image.tar.gz | docker load
           rm -f /tmp/lms-backend-image.tar.gz
+          docker image inspect lms-backend:latest >/dev/null
           
           echo "📝 Setting script permissions..."
           chmod +x scripts/*.sh scripts/*.py || true
@@ -66,7 +68,8 @@ jobs:
           # and `up -d` then RECREATES the database mid-deploy (2026-07-17 this
           # caused a ~2 min full outage). Infra containers are updated manually;
           # a deploy only rebuilds and restarts the app services.
-          docker compose up -d backend scheduler
+          docker compose config -q
+          docker compose up -d --no-build backend scheduler
           
           echo "✅ Backend deployment completed!"
 
