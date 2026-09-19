@@ -34,7 +34,7 @@ def sees_every_recording(user) -> bool:
 
 def watchable_event_clause(user):
     """SQL: the events whose recording ``user`` may watch."""
-    from src.schemas.models import Event, EventGroup, Group, GroupStudent
+    from src.schemas.models import Event, EventCourse, EventGroup, Enrollment, Group, GroupStudent
 
     role = getattr(user, "role", None)
     uid = getattr(user, "id", None)
@@ -58,12 +58,22 @@ def watchable_event_clause(user):
         return lesson_of_a_group_where(group.curator_id == uid)
     if role == "student":
         member = aliased(GroupStudent)
-        return (
+        course_link, enrollment = aliased(EventCourse), aliased(Enrollment)
+        in_group = (
             exists()
             .where(and_(link.event_id == Event.id, link.group_id == member.group_id,
                         member.student_id == uid))
             .correlate(Event)
         )
+        in_course = (
+            exists()
+            .where(and_(course_link.event_id == Event.id,
+                        course_link.course_id == enrollment.course_id,
+                        enrollment.user_id == uid,
+                        enrollment.is_active.is_(True)))
+            .correlate(Event)
+        )
+        return or_(in_group, in_course)
     return false()
 
 
