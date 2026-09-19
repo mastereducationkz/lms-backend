@@ -26,6 +26,12 @@ if not POSTGRES_URL:
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+# Kept for legacy Azure-backed features such as NUET image analysis. Parent reports use
+# OPENAI_API_KEY/OPENAI_MODEL and do not depend on these settings.
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+
 # Database connections go through pgbouncer (see docker-compose.yml), which does the real
 # connection pooling and multiplexes onto a small, bounded set of Postgres connections. So the app
 # itself must NOT keep its own QueuePool: a per-worker QueuePool was what exhausted under bursts
