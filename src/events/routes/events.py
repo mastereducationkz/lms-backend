@@ -545,12 +545,12 @@ def get_calendar_events(
     # Recording status for the lessons this viewer may watch — status only, never a URL:
     # this response is cached, and playback links are minted per viewer on demand.
     recording_map = {}
-    class_ids = [e.id for e in standard_events if e.event_type == "class"]
-    if class_ids:
+    recordable_ids = [e.id for e in standard_events if e.event_type in {"class", "webinar"}]
+    if recordable_ids:
         for rec in (
             db.query(LessonRecording)
             .join(Event, Event.id == LessonRecording.event_id)
-            .filter(LessonRecording.event_id.in_(class_ids), watchable_event_clause(current_user))
+            .filter(LessonRecording.event_id.in_(recordable_ids), watchable_event_clause(current_user))
             .all()
         ):
             recording_map[rec.event_id] = RecordingSummary(

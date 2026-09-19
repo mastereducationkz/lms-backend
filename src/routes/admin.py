@@ -2496,7 +2496,10 @@ async def create_recurring_events(db: Session, base_event: Event, event_data: Cr
             meeting_url=base_event.meeting_url,
             created_by=base_event.created_by,
             is_recurring=False,  # Individual instances are not recurring
-            max_participants=base_event.max_participants
+            max_participants=base_event.max_participants,
+            # Retain the owner on every physical occurrence so Meet provisioning and
+            # recording access work for recurring webinars.
+            teacher_id=base_event.teacher_id,
         )
         
         db.add(recurring_event)

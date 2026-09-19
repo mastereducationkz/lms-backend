@@ -140,8 +140,12 @@ def of_recording(ctx: Context, recording, event=None, *, staff: bool = False) ->
 
 
 def _may_be_recorded(event) -> bool:
-    """A lesson this pipeline records, as far as the lesson alone can say: a class with a Meet link and a teacher."""
-    return event.event_type == "class" and bool(event.meeting_url) and bool(event.teacher_id)
+    """An online class/webinar this pipeline can bind to a Meet recording."""
+    return (
+        event.event_type in {"class", "webinar"}
+        and bool(event.meeting_url)
+        and bool(event.teacher_id)
+    )
 
 
 def _waiting_stage(event, now: datetime) -> Optional[str]:
