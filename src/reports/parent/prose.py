@@ -150,23 +150,17 @@ def requested_slots(facts: Dict[str, Any], template_key: str) -> Tuple[str, ...]
     return tuple(s for s in slots if s not in skip)
 
 
-class AzureProseClient:
-    """Обёртка над существующим Azure-клиентом: JSON-объект со слотами."""
+class OpenAIProseClient:
+    """Клиент OpenAI для прозы отчёта: возвращает JSON-объект со слотами."""
 
     def __init__(self) -> None:
-        from openai import AsyncAzureOpenAI
-        from src.config import (
-            AZURE_OPENAI_API_KEY,
-            AZURE_OPENAI_DEPLOYMENT_NAME,
-            AZURE_OPENAI_ENDPOINT,
-        )
+        from openai import AsyncOpenAI
+        from src.config import OPENAI_API_KEY, OPENAI_MODEL
 
-        self.client = AsyncAzureOpenAI(
-            azure_endpoint=AZURE_OPENAI_ENDPOINT,
-            api_key=AZURE_OPENAI_API_KEY,
-            api_version="2024-10-21",
-        )
-        self.deployment = AZURE_OPENAI_DEPLOYMENT_NAME
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        self.model = OPENAI_MODEL
 
     async def complete(self, *, facts: Dict[str, Any], slots: Tuple[str, ...]) -> Dict[str, str]:
         wanted = "\n".join(f"- {s}: {_SLOT_BRIEF[s]}" for s in slots)
@@ -187,7 +181,7 @@ class AzureProseClient:
                 "Оно приоритетнее автоматических выводов:\n" + note
             )
         response = await self.client.chat.completions.create(
-            model=self.deployment,
+            model=self.model,
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user}],
             response_format={"type": "json_object"},
@@ -209,7 +203,7 @@ async def generate_prose(
     slots = requested_slots(facts, template_key)
     if not slots:
         return {}
-    client = client or AzureProseClient()
+    client = client or OpenAIProseClient()
 
     for attempt in (1, 2):
         try:

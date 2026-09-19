@@ -23,10 +23,8 @@ if not POSTGRES_URL:
     logger.warning("POSTGRES_URL not set; using a placeholder URL (no real database).")
     POSTGRES_URL = "postgresql+psycopg2://placeholder:placeholder@localhost:5432/placeholder"
 
-# Azure OpenAI Configuration
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Database connections go through pgbouncer (see docker-compose.yml), which does the real
 # connection pooling and multiplexes onto a small, bounded set of Postgres connections. So the app
