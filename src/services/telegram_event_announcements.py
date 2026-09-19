@@ -22,7 +22,7 @@ from src.services import group_bot_outbox
 logger = logging.getLogger(__name__)
 
 ALMATY = ZoneInfo("Asia/Almaty")
-LEAD = timedelta(minutes=15)
+LEAD = timedelta(minutes=10)
 WINDOW = timedelta(minutes=5)
 GRACE_AFTER_START = timedelta(minutes=10)
 MAX_ATTEMPTS = 3
