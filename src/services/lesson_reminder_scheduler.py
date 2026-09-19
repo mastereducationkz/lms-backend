@@ -87,6 +87,7 @@ class LessonReminderScheduler:
                 now = datetime.now(timezone.utc)
                 logger.info(f"⏰ [SCHEDULER] Checking at {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
                 self._send_telegram_invitations()
+                self._send_telegram_event_announcements()
                 self._send_telegram_lesson_notices()
                 self._send_telegram_homework_notices()
                 self._send_discipline_digest()
@@ -151,6 +152,23 @@ class LessonReminderScheduler:
         except Exception as e:
             db.rollback()
             logger.error(f"❌ [TELEGRAM] Lesson change notices failed: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _send_telegram_event_announcements(self):
+        """Post public Russian reminders for upcoming webinars/office hours."""
+        from src.services import telegram_event_announcements
+
+        if not telegram_event_announcements.enabled():
+            return
+        db = SessionLocal()
+        try:
+            summary = telegram_event_announcements.send_due_announcements(db)
+            if any(summary.values()):
+                logger.info(f"📣 [TELEGRAM] Public event announcements: {summary}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ [TELEGRAM] Public event announcements failed: {e}", exc_info=True)
         finally:
             db.close()
 

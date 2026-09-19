@@ -61,6 +61,31 @@ class TelegramLessonInvitation(Base):
     )
 
 
+class TelegramEventAnnouncement(Base):
+    """One public-channel announcement for one LMS webinar occurrence.
+
+    The support registry id is stored with the row so changing the configured channel never
+    edits history or accidentally suppresses delivery to a newly selected channel. The row is
+    claimed before the network call; Support's idempotency key closes the remaining retry gap.
+    """
+
+    __tablename__ = "telegram_event_announcements"
+
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    support_group_id = Column(Integer, nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending")
+    telegram_message_id = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    sent_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "support_group_id", name="uq_telegram_event_announcement_target"),
+    )
+
+
 class TelegramGroupQuestion(Base):
     """One question asked of the bot in a group's chat, and what it answered.
 
