@@ -35,8 +35,8 @@ jobs:
           # deployment fetches instead.
           git remote set-url origin https://github.com/mastereducationkz/lms-backend.git
           git fetch origin main
-          git checkout main
-          git pull --ff-only origin main
+          git checkout -B main origin/main
+          git reset --hard origin/main
           
           echo "📝 Setting script permissions..."
           chmod +x scripts/*.sh scripts/*.py || true
