@@ -31,13 +31,21 @@ jobs:
     - name: Package backend image
       run: docker save lms-backend:latest | gzip > "${{ runner.temp }}/lms-backend-image.tar.gz"
 
+    - name: Stage deployment artifacts
+      run: |
+        # scp-action preserves the absolute source path below `target` when given
+        # runner.temp directly (it recently uploaded to /tmp/github/runner_temp/... ).
+        # Stage with stable relative names so the SSH step can consume /tmp/*.tar.gz.
+        cp "${{ runner.temp }}/lms-backend.tar.gz" ./lms-backend.tar.gz
+        cp "${{ runner.temp }}/lms-backend-image.tar.gz" ./lms-backend-image.tar.gz
+
     - name: Upload backend to Azure VM
       uses: appleboy/scp-action@v0.1.7
       with:
         host: ${{ secrets.HOST }}
         username: ${{ secrets.USERNAME }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
-        source: ${{ runner.temp }}/lms-backend.tar.gz,${{ runner.temp }}/lms-backend-image.tar.gz
+        source: lms-backend.tar.gz,lms-backend-image.tar.gz
         target: /tmp
 
     - name: Deploy to Azure VM
@@ -50,6 +58,8 @@ jobs:
           set -e
           echo "🚀 Starting backend deployment..."
           cd ~/projects/lms
+          test -s /tmp/lms-backend.tar.gz
+          test -s /tmp/lms-backend-image.tar.gz
           tar -xzf /tmp/lms-backend.tar.gz
           rm -f /tmp/lms-backend.tar.gz
           docker image prune -f
