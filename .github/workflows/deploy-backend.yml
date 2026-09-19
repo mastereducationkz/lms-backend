@@ -17,6 +17,23 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout tested backend revision
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+
+    - name: Package backend
+      run: tar -czf "${{ runner.temp }}/lms-backend.tar.gz" --exclude=.git --exclude=.env .
+
+    - name: Upload backend to Azure VM
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        source: ${{ runner.temp }}/lms-backend.tar.gz
+        target: /tmp
+
     - name: Deploy to Azure VM
       uses: appleboy/ssh-action@v1.2.0
       with:
@@ -27,16 +44,8 @@ jobs:
           set -e
           echo "🚀 Starting backend deployment..."
           cd ~/projects/lms
-          # Previous deploys run `chmod +x scripts/*`, leaving mode-only changes in
-          # the tree that block `git pull --ff-only`. Ignore file modes so pulls of
-          # script content changes don't abort with "local changes would be overwritten".
-          git config core.fileMode false
-          # The production host cannot reach GitHub over SSH (port 22); use HTTPS for
-          # deployment fetches instead.
-          git remote set-url origin https://github.com/mastereducationkz/lms-backend.git
-          git fetch origin main
-          git checkout -B main origin/main
-          git reset --hard origin/main
+          tar -xzf /tmp/lms-backend.tar.gz
+          rm -f /tmp/lms-backend.tar.gz
           
           echo "📝 Setting script permissions..."
           chmod +x scripts/*.sh scripts/*.py || true
