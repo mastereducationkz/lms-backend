@@ -25,13 +25,19 @@ jobs:
     - name: Package backend
       run: tar -czf "${{ runner.temp }}/lms-backend.tar.gz" --exclude=.git --exclude=.env .
 
+    - name: Build backend image
+      run: docker build --tag lms-backend:latest .
+
+    - name: Package backend image
+      run: docker save lms-backend:latest | gzip > "${{ runner.temp }}/lms-backend-image.tar.gz"
+
     - name: Upload backend to Azure VM
       uses: appleboy/scp-action@v0.1.7
       with:
         host: ${{ secrets.HOST }}
         username: ${{ secrets.USERNAME }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
-        source: ${{ runner.temp }}/lms-backend.tar.gz
+        source: ${{ runner.temp }}/lms-backend.tar.gz,${{ runner.temp }}/lms-backend-image.tar.gz
         target: /tmp
 
     - name: Deploy to Azure VM
@@ -46,6 +52,8 @@ jobs:
           cd ~/projects/lms
           tar -xzf /tmp/lms-backend.tar.gz
           rm -f /tmp/lms-backend.tar.gz
+          gunzip -c /tmp/lms-backend-image.tar.gz | docker load
+          rm -f /tmp/lms-backend-image.tar.gz
           
           echo "📝 Setting script permissions..."
           chmod +x scripts/*.sh scripts/*.py || true
@@ -58,7 +66,6 @@ jobs:
           # and `up -d` then RECREATES the database mid-deploy (2026-07-17 this
           # caused a ~2 min full outage). Infra containers are updated manually;
           # a deploy only rebuilds and restarts the app services.
-          docker compose build
           docker compose up -d backend scheduler
           
           echo "✅ Backend deployment completed!"
